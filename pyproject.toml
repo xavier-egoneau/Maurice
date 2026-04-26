@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maurice"
+version = "0.1.0"
+description = "A small contract-first agent runtime."
+readme = "SPEC.md"
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.13",
+  "PyYAML>=6.0",
+  "rich>=13",
+  "textual>=0.80",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+maurice = "maurice.host.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["maurice*"]
+
+[tool.setuptools.package-data]
+maurice = ["system_skills/**/*.yaml", "system_skills/**/*.md", "system_skills/**/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

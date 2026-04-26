@@ -1,0 +1,73 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.tox/
+.nox/
+
+# Test and coverage output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.cover
+*.py,cover
+
+# Packaging and build artifacts
+build/
+dist/
+site/
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+venv.bak/
+venv_old/
+venv_backup/
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+credentials.yaml
+*.secret
+*.secrets
+
+# Maurice local runtime/workspace artifacts
+.maurice/
+maurice-workspace/
+workspace/
+agents/
+sessions/
+artifacts/
+
+# Logs and temporary files
+*.log
+*.bak
+*.tmp
+*.swp
+*.swo
+*~
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+*.sublime-project
+*.sublime-workspace
+
+# Translation build outputs
+*.mo
+*.pot
+todo.md

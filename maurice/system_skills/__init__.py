@@ -1,0 +1,1 @@
+"""Shipped Maurice system skills."""

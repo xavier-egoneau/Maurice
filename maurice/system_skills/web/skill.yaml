@@ -1,0 +1,71 @@
+name: web
+version: 0.1.0
+origin: system
+mutable: false
+required: false
+description: Fetch web pages and search through a configured search endpoint.
+config_namespace: skills.web
+requires:
+  binaries: []
+  credentials: []
+dependencies:
+  skills: []
+  optional_skills: []
+permissions:
+  - class: network.outbound
+    scope:
+      hosts: []
+tools:
+  - name: web.fetch
+    description: Fetch a URL and return bounded text content.
+    input_schema:
+      type: object
+      properties:
+        url:
+          type: string
+        max_chars:
+          type: integer
+          minimum: 1
+        max_bytes:
+          type: integer
+          minimum: 1
+        timeout_seconds:
+          type: integer
+          minimum: 1
+      required: ["url"]
+    permission_class: network.outbound
+    permission_scope:
+      hosts: []
+    trust:
+      input: external_untrusted
+      output: external_untrusted
+    executor: maurice.system_skills.web.tools.fetch
+  - name: web.search
+    description: Search through a configured SearxNG-compatible endpoint.
+    input_schema:
+      type: object
+      properties:
+        query:
+          type: string
+        base_url:
+          type: string
+        max_results:
+          type: integer
+          minimum: 1
+        timeout_seconds:
+          type: integer
+          minimum: 1
+      required: ["query", "base_url"]
+    permission_class: network.outbound
+    permission_scope:
+      hosts: []
+    trust:
+      input: external_untrusted
+      output: external_untrusted
+    executor: maurice.system_skills.web.tools.search
+backend: null
+storage: null
+dreams:
+  attachment: dreams.md
+events:
+  state_publisher: null

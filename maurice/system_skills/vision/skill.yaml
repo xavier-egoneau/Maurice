@@ -1,0 +1,65 @@
+name: vision
+version: 0.1.0
+origin: system
+mutable: false
+required: false
+description: Prepare and analyze local image artifacts without kernel-specific vision logic.
+config_namespace: skills.vision
+requires:
+  binaries: []
+  credentials: []
+dependencies:
+  skills: []
+  optional_skills: []
+permissions:
+  - class: fs.read
+    scope:
+      paths:
+        - "$workspace/**"
+tools:
+  - name: vision.inspect
+    description: Inspect a local image file and return metadata.
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+        max_bytes:
+          type: integer
+          minimum: 1
+      required: ["path"]
+    permission_class: fs.read
+    permission_scope:
+      paths:
+        - "$workspace/**"
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.vision.tools.inspect
+  - name: vision.analyze
+    description: Analyze a local image through a configured vision backend.
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+        prompt:
+          type: string
+        max_bytes:
+          type: integer
+          minimum: 1
+      required: ["path", "prompt"]
+    permission_class: fs.read
+    permission_scope:
+      paths:
+        - "$workspace/**"
+    trust:
+      input: local_mutable
+      output: external_untrusted
+    executor: maurice.system_skills.vision.tools.analyze
+backend: null
+storage: null
+dreams:
+  attachment: dreams.md
+events:
+  state_publisher: null

@@ -1,0 +1,73 @@
+name: skills
+version: 0.1.0
+origin: system
+mutable: false
+required: false
+description: User skill authoring and reload helpers.
+config_namespace: skills.skills
+requires:
+  binaries: []
+  credentials: []
+dependencies:
+  skills: []
+  optional_skills: []
+permissions:
+  - class: fs.read
+    scope:
+      paths:
+        - "$workspace/skills/**"
+  - class: fs.write
+    scope:
+      paths:
+        - "$workspace/skills/**"
+tools:
+  - name: skills.create
+    description: Create a new user skill skeleton under the workspace skill root.
+    input_schema:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+      required: ["name"]
+    permission_class: fs.write
+    permission_scope:
+      paths:
+        - "$workspace/skills/**"
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.skills.tools.create
+  - name: skills.list
+    description: List discovered skills and loader states.
+    input_schema:
+      type: object
+      properties: {}
+    permission_class: fs.read
+    permission_scope:
+      paths:
+        - "$workspace/skills/**"
+    trust:
+      input: local_mutable
+      output: skill_generated
+    executor: maurice.system_skills.skills.tools.list_skills
+  - name: skills.reload
+    description: Reload skills for future turns and return a registry snapshot.
+    input_schema:
+      type: object
+      properties: {}
+    permission_class: fs.read
+    permission_scope:
+      paths:
+        - "$workspace/skills/**"
+    trust:
+      input: local_mutable
+      output: skill_generated
+    executor: maurice.system_skills.skills.tools.reload
+backend: null
+storage: null
+dreams:
+  attachment: dreams.md
+events:
+  state_publisher: null

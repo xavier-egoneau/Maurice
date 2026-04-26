@@ -1,0 +1,45 @@
+name: dreaming
+version: 0.1.0
+origin: system
+mutable: false
+required: false
+description: Structured background review over skill-provided dream inputs.
+config_namespace: skills.dreaming
+requires:
+  binaries: []
+  credentials: []
+dependencies:
+  skills: []
+  optional_skills:
+    - memory
+permissions:
+  - class: fs.write
+    scope:
+      paths:
+        - "$workspace/artifacts/dreams/**"
+tools:
+  - name: dreaming.run
+    description: Run a structured dream review over active skill inputs.
+    input_schema:
+      type: object
+      properties:
+        skills:
+          type: array
+          items:
+            type: string
+        max_signals:
+          type: integer
+    permission_class: fs.write
+    permission_scope:
+      paths:
+        - "$workspace/artifacts/dreams/**"
+    trust:
+      input: local_mutable
+      output: skill_generated
+    executor: maurice.system_skills.dreaming.tools.run
+backend: null
+storage: null
+dreams:
+  attachment: dreams.md
+events:
+  state_publisher: null

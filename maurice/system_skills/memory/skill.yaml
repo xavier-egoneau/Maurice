@@ -1,0 +1,91 @@
+name: memory
+version: 0.1.0
+origin: system
+mutable: false
+required: false
+description: Durable memory storage and retrieval.
+config_namespace: skills.memory
+requires:
+  binaries: []
+  credentials: []
+dependencies:
+  skills: []
+  optional_skills: []
+permissions:
+  - class: fs.read
+    scope:
+      paths:
+        - "$workspace/skills/memory/**"
+  - class: fs.write
+    scope:
+      paths:
+        - "$workspace/skills/memory/**"
+tools:
+  - name: memory.remember
+    description: Store a durable memory.
+    input_schema:
+      type: object
+      properties:
+        content:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        source:
+          type: string
+      required: ["content"]
+    permission_class: fs.write
+    permission_scope:
+      paths:
+        - "$workspace/skills/memory/**"
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.memory.tools.remember
+  - name: memory.search
+    description: Search durable memories by text.
+    input_schema:
+      type: object
+      properties:
+        query:
+          type: string
+        limit:
+          type: integer
+      required: ["query"]
+    permission_class: fs.read
+    permission_scope:
+      paths:
+        - "$workspace/skills/memory/**"
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.memory.tools.search
+  - name: memory.get
+    description: Fetch one durable memory by id.
+    input_schema:
+      type: object
+      properties:
+        id:
+          type: string
+      required: ["id"]
+    permission_class: fs.read
+    permission_scope:
+      paths:
+        - "$workspace/skills/memory/**"
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.memory.tools.get
+backend: null
+storage:
+  engine: sqlite
+  path: "$workspace/skills/memory/memory.sqlite"
+  schema_version: 1
+  migrations:
+    - migrations/001_init.sql
+dreams:
+  attachment: dreams.md
+  input_builder: maurice.system_skills.memory.tools.build_dream_input
+events:
+  state_publisher: null

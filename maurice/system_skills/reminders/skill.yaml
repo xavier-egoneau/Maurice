@@ -1,0 +1,79 @@
+name: reminders
+version: 0.1.0
+origin: system
+mutable: false
+required: false
+description: Create, list, cancel, and fire local reminders through the generic scheduler.
+config_namespace: skills.reminders
+requires:
+  binaries: []
+  credentials: []
+dependencies:
+  skills: []
+  optional_skills: []
+permissions:
+  - class: fs.write
+    scope:
+      paths:
+        - "$workspace/artifacts/reminders/**"
+tools:
+  - name: reminders.create
+    description: Create a scheduled reminder.
+    input_schema:
+      type: object
+      properties:
+        text:
+          type: string
+        run_at:
+          type: string
+      required: ["text", "run_at"]
+    permission_class: fs.write
+    permission_scope:
+      paths:
+        - "$workspace/artifacts/reminders/**"
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.reminders.tools.create
+  - name: reminders.list
+    description: List reminders.
+    input_schema:
+      type: object
+      properties:
+        status:
+          type: string
+      required: []
+    permission_class: fs.read
+    permission_scope:
+      paths:
+        - "$workspace/artifacts/reminders/**"
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.reminders.tools.list_reminders
+  - name: reminders.cancel
+    description: Cancel a scheduled reminder.
+    input_schema:
+      type: object
+      properties:
+        reminder_id:
+          type: string
+      required: ["reminder_id"]
+    permission_class: fs.write
+    permission_scope:
+      paths:
+        - "$workspace/artifacts/reminders/**"
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.reminders.tools.cancel
+backend: null
+storage:
+  engine: json
+  path: "$workspace/artifacts/reminders/reminders.json"
+  schema_version: 1
+  migrations: []
+dreams:
+  attachment: dreams.md
+events:
+  state_publisher: null

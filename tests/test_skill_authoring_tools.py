@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+from maurice.kernel.config import SkillRootConfig
+from maurice.kernel.permissions import PermissionContext
+from maurice.kernel.skills import SkillLoader, SkillRoot, SkillState
+from maurice.system_skills.skills.tools import create, list_skills, reload
+
+
+def context(tmp_path) -> PermissionContext:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    (workspace / "skills").mkdir(parents=True)
+    runtime.mkdir()
+    return PermissionContext(workspace_root=str(workspace), runtime_root=str(runtime))
+
+
+def roots(tmp_path):
+    return [
+        SkillRoot(path="maurice/system_skills", origin="system", mutable=False),
+        SkillRoot(
+            path=str(tmp_path / "workspace" / "skills"),
+            origin="user",
+            mutable=True,
+        ),
+    ]
+
+
+def test_skills_create_writes_user_skill_under_workspace(tmp_path) -> None:
+    permission_context = context(tmp_path)
+
+    result = create(
+        {"name": "notes_helper", "description": "Helps with notes."},
+        permission_context,
+        roots(tmp_path),
+    )
+
+    skill_dir = tmp_path / "workspace" / "skills" / "notes_helper"
+    registry = SkillLoader(roots(tmp_path), enabled_skills=["notes_helper"]).load()
+
+    assert result.ok
+    assert (skill_dir / "skill.yaml").is_file()
+    assert (skill_dir / "prompt.md").is_file()
+    assert registry.skills["notes_helper"].state == SkillState.LOADED
+
+
+def test_skills_create_rejects_collision_with_system_skill(tmp_path) -> None:
+    permission_context = context(tmp_path)
+
+    result = create(
+        {"name": "memory"},
+        permission_context,
+        roots(tmp_path),
+    )
+
+    assert not result.ok
+    assert result.error.code == "skill_collision"
+    assert not (tmp_path / "workspace" / "skills" / "memory").exists()
+
+
+def test_skills_create_rejects_user_root_outside_workspace(tmp_path) -> None:
+    permission_context = context(tmp_path)
+    unsafe_roots = [
+        SkillRootConfig(path=str(tmp_path / "elsewhere"), origin="user", mutable=True)
+    ]
+
+    result = create({"name": "unsafe"}, permission_context, unsafe_roots)
+
+    assert not result.ok
+    assert result.error.code == "permission_denied"
+
+
+def test_skills_list_and_reload_return_registry_snapshot(tmp_path) -> None:
+    permission_context = context(tmp_path)
+    create({"name": "notes_helper"}, permission_context, roots(tmp_path))
+
+    listed = list_skills({}, roots(tmp_path), enabled_skills=["notes_helper"])
+    reloaded = reload({}, roots(tmp_path), enabled_skills=["notes_helper"])
+
+    assert listed.ok
+    assert listed.data["skills"][0]["name"] == "filesystem" or listed.data["skills"]
+    assert any(skill["name"] == "notes_helper" for skill in reloaded.data["skills"])
+    assert reloaded.summary == "Skills reloaded for future turns."

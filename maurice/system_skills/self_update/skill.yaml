@@ -1,0 +1,71 @@
+name: self_update
+version: 0.1.0
+origin: system
+mutable: false
+required: false
+description: Runtime self-update proposal generation.
+config_namespace: skills.self_update
+requires:
+  binaries: []
+  credentials: []
+dependencies:
+  skills: []
+  optional_skills: []
+permissions:
+  - class: runtime.write
+    scope:
+      targets:
+        - kernel
+        - host
+        - system_skill:*
+        - packaged_defaults
+        - installer
+      mode: proposal_only
+tools:
+  - name: self_update.propose
+    description: Create a runtime update proposal under the workspace.
+    input_schema:
+      type: object
+      properties:
+        target_type:
+          type: string
+        target_name:
+          type: string
+        runtime_path:
+          type: string
+        summary:
+          type: string
+        patch:
+          type: string
+        risk:
+          type: string
+        test_plan:
+          type: string
+        requires_restart:
+          type: boolean
+        created_by_agent:
+          type: string
+        mode:
+          type: string
+        target:
+          type: string
+      required: ["target_type", "target_name", "runtime_path", "summary", "patch", "risk", "test_plan"]
+    permission_class: runtime.write
+    permission_scope:
+      targets:
+        - kernel
+        - host
+        - system_skill:*
+        - packaged_defaults
+        - installer
+      mode: proposal_only
+    trust:
+      input: local_mutable
+      output: skill_generated
+    executor: maurice.system_skills.self_update.tools.propose
+backend: null
+storage: null
+dreams:
+  attachment: dreams.md
+events:
+  state_publisher: null
