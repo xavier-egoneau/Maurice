@@ -64,6 +64,15 @@ def test_loop_persists_text_turn_and_events(tmp_path) -> None:
     assert "Use filesystem tools" in provider.calls[0]["system"]
 
 
+def test_agent_system_prompt_explains_content_root(tmp_path) -> None:
+    from maurice.host.cli import _agent_system_prompt
+
+    prompt = _agent_system_prompt(tmp_path / "workspace")
+
+    assert "content/" in prompt
+    assert "ouvre le dossier toto" in prompt
+
+
 def test_loop_preserves_provider_failure_error(tmp_path) -> None:
     provider = MockProvider(
         [
@@ -339,8 +348,8 @@ def test_approved_replay_allows_asked_tool_execution(tmp_path) -> None:
 
 
 def test_loop_uses_real_filesystem_executors(tmp_path) -> None:
-    workspace_file = tmp_path / "workspace" / "notes.md"
-    workspace_file.parent.mkdir()
+    workspace_file = tmp_path / "workspace" / "content" / "notes.md"
+    workspace_file.parent.mkdir(parents=True)
     workspace_file.write_text("real content", encoding="utf-8")
     provider = MockProvider(
         [

@@ -243,7 +243,7 @@ class AgentLoop:
                         rememberable=evaluation.rememberable,
                     )
                 result = self._failed_tool_result(
-                    "Tool execution requires approval.",
+                    f"Autorisation requise pour {declaration.name}. Reponds `ok` pour approuver ou `non` pour refuser.",
                     code="approval_required",
                     retryable=True,
                 )

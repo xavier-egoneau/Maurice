@@ -124,9 +124,14 @@ def _resolve_path(arguments: dict[str, Any], context: PermissionContext) -> Path
     if not isinstance(raw_path, str) or not raw_path:
         raise ValueError("filesystem tools require a non-empty path")
     workspace = Path(context.variables()["$workspace"])
+    content = workspace / "content"
     candidate = Path(raw_path).expanduser()
     if not candidate.is_absolute():
-        candidate = workspace / candidate
+        first_part = candidate.parts[0] if candidate.parts else ""
+        if first_part in {"agents", "config", "content", "sessions", "skills"}:
+            candidate = workspace / candidate
+        else:
+            candidate = content / candidate
     return candidate.resolve()
 
 

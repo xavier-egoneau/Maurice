@@ -35,11 +35,26 @@ from maurice.host.auth import (
     save_chatgpt_auth,
 )
 from maurice.host.channels import ChannelAdapterRegistry
-from maurice.host.credentials import CredentialRecord, CredentialsStore, load_credentials, write_credentials
+from maurice.host.credentials import (
+    CredentialRecord,
+    CredentialsStore,
+    credentials_path,
+    ensure_workspace_credentials_migrated,
+    load_workspace_credentials,
+    write_workspace_credentials,
+)
 from maurice.host.dashboard import build_dashboard_snapshot
 from maurice.host.gateway import GatewayHttpServer, MessageRouter
 from maurice.host.migration import inspect_jarvis_workspace, migrate_jarvis_workspace
 from maurice.host.monitoring import build_monitoring_snapshot, read_event_tail
+from maurice.host.paths import (
+    agents_config_path,
+    ensure_workspace_config_migrated,
+    host_config_path,
+    kernel_config_path,
+    maurice_home,
+    workspace_skills_config_path,
+)
 from maurice.host.secret_capture import capture_pending_secret
 from maurice.host.self_update import (
     apply_runtime_proposal,
@@ -48,7 +63,7 @@ from maurice.host.self_update import (
     validate_runtime_proposal,
 )
 from maurice.host.service import check_install, inspect_service_status, read_service_logs
-from maurice.host.workspace import initialize_workspace
+from maurice.host.workspace import ensure_workspace_content_migrated, initialize_workspace
 from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.config import ConfigBundle, load_workspace_config, read_yaml_file, write_yaml_file
 from maurice.kernel.events import EventStore
@@ -462,7 +477,13 @@ def build_parser() -> argparse.ArgumentParser:
     migration_run.add_argument("--jarvis", required=True, help="Jarvis workspace root to migrate from.")
     migration_run.add_argument("--workspace", required=True, help="Maurice workspace root to migrate into.")
     migration_run.add_argument("--dry-run", action="store_true", help="Report planned migration without writing.")
-    migration_run.add_argument("--include-artifacts", action="store_true", help="Copy selected Jarvis artifacts.")
+    migration_run.add_argument(
+        "--include-content",
+        "--include-artifacts",
+        action="store_true",
+        dest="include_artifacts",
+        help="Copy selected Jarvis content.",
+    )
     migration_run.add_argument("--json", action="store_true", help="Print full report as JSON.")
 
     self_update_parser = subparsers.add_parser("self-update", help="Host-owned runtime proposal apply flow.")
@@ -502,7 +523,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "onboard":
         runtime_root = Path(__file__).resolve().parents[2]
         workspace_arg = Path(args.workspace)
-        if args.agent is not None and not (workspace_arg.expanduser() / "config" / "host.yaml").exists():
+        if args.agent is not None and not host_config_path(workspace_arg).exists():
             initialize_workspace(
                 workspace_arg,
                 runtime_root,
@@ -982,7 +1003,7 @@ def _dashboard_textual(
         def update_snapshot(self, bundle: ConfigBundle, snapshot) -> None:
             gateway = f"{snapshot.runtime.gateway.get('host')}:{snapshot.runtime.gateway.get('port')}"
             telegram = "ok" if _telegram_channel_configured(bundle) else "-"
-            provider = f"{bundle.kernel.model.provider}:{bundle.kernel.model.protocol or bundle.kernel.model.name}"
+            provider = _effective_model_label(bundle, _default_agent(bundle))
             scheduler = "ok" if snapshot.runtime.scheduler_enabled else "-"
             self.update(
                 f"Service [#E8761A]{gateway}[/]   Automatismes [#E8761A]{scheduler}[/]   "
@@ -1224,7 +1245,7 @@ def _dashboard_rich(
         snapshot = build_monitoring_snapshot(workspace_root, agent_id=selected_agent.id, event_limit=event_limit)
         dashboard = build_dashboard_snapshot(workspace_root, agent_id=selected_agent.id, event_limit=event_limit)
         spinner = "|/-\\"[frame % 4]
-        provider = f"{bundle.kernel.model.provider}:{bundle.kernel.model.protocol or bundle.kernel.model.name}"
+        provider = _effective_model_label(bundle, selected_agent)
         gateway = f"{snapshot.runtime.gateway.get('host')}:{snapshot.runtime.gateway.get('port')}"
         telegram = "ok" if _telegram_channel_configured(bundle) else "-"
         title = Text("MAURICE", style="bold #E8761A")
@@ -1332,7 +1353,7 @@ def _model_rows(bundle: ConfigBundle, snapshot) -> list[list[str]]:
     return [
         [
             agent.id,
-            bundle.kernel.model.provider,
+            str(_effective_model_config(bundle, bundle.agents.agents.get(agent.id)).get("provider") or "mock"),
             _agent_model_name(bundle, agent.id),
         ]
         for agent in snapshot.agents
@@ -1664,10 +1685,19 @@ def _compact_counts(counts: dict[str, int]) -> str:
 
 def _agent_model_name(bundle: ConfigBundle, agent_id: str) -> str:
     agent = bundle.agents.agents.get(agent_id)
-    model = agent.model if agent is not None and agent.model else bundle.kernel.model.model_dump(mode="json")
+    model = _effective_model_config(bundle, agent)
     provider = model.get("provider") or "mock"
     name = model.get("name") or provider
     return f"{provider}/{name}"
+
+
+def _effective_model_label(bundle: ConfigBundle, agent=None) -> str:
+    model = _effective_model_config(bundle, agent)
+    return f"{model.get('provider') or 'mock'}:{model.get('protocol') or model.get('name') or 'mock'}"
+
+
+def _default_agent(bundle: ConfigBundle):
+    return next((agent for agent in bundle.agents.agents.values() if agent.default), None)
 
 
 def _telegram_channel_configured(bundle: ConfigBundle) -> bool:
@@ -1684,11 +1714,11 @@ def _print_host_checks(title: str, ok: bool, checks) -> None:
 
 def _onboarding_existing_values(workspace_root: Path) -> dict[str, Any]:
     workspace = Path(workspace_root).expanduser().resolve()
-    config_root = workspace / "config"
-    host_data = read_yaml_file(config_root / "host.yaml")
-    kernel_data = read_yaml_file(config_root / "kernel.yaml")
-    agents_data = read_yaml_file(config_root / "agents.yaml")
-    skills_data = read_yaml_file(config_root / "skills.yaml")
+    ensure_workspace_config_migrated(workspace)
+    host_data = read_yaml_file(host_config_path(workspace))
+    kernel_data = read_yaml_file(kernel_config_path(workspace))
+    agents_data = read_yaml_file(agents_config_path(workspace))
+    skills_data = read_yaml_file(workspace_skills_config_path(workspace))
 
     kernel = kernel_data.get("kernel") if isinstance(kernel_data.get("kernel"), dict) else {}
     host = host_data.get("host") if isinstance(host_data.get("host"), dict) else {}
@@ -1900,12 +1930,23 @@ def _onboard_agent_model(workspace_root: Path, *, agent_id: str) -> None:
     credentials = list(agent.credentials or [])
     if credential_to_allow and credential_to_allow not in credentials:
         credentials.append(credential_to_allow)
-    update_agent(workspace, agent_id=agent_id, model=kernel_model, credentials=credentials)
+    if agent.default:
+        _write_kernel_model(workspace, kernel_model)
+        update_agent(workspace, agent_id=agent_id, clear_model=True, credentials=credentials)
+    else:
+        update_agent(workspace, agent_id=agent_id, model=kernel_model, credentials=credentials)
     if provider == "chatgpt" and _ask_yes_no("Connect ChatGPT now?", default=False):
         _auth_login("chatgpt", workspace)
     print("")
     print(f"Agent model updated: {agent_id}")
     print(f"Next: maurice run --agent {agent_id} --message \"salut Maurice\"")
+
+
+def _write_kernel_model(workspace: Path, kernel_model: dict[str, object]) -> None:
+    kernel_path = kernel_config_path(workspace)
+    kernel_data = read_yaml_file(kernel_path)
+    kernel_data.setdefault("kernel", {})["model"] = kernel_model
+    write_yaml_file(kernel_path, kernel_data)
 
 
 def _onboard_interactive(workspace_root: Path, *, existing: dict[str, object] | None = None) -> None:
@@ -1971,8 +2012,8 @@ def _write_onboarding_config(
     existing: dict[str, object] | None = None,
 ) -> None:
     existing = existing or {}
-    config_root = workspace / "config"
-    fresh_host_data = read_yaml_file(config_root / "host.yaml")
+    ensure_workspace_config_migrated(workspace)
+    fresh_host_data = read_yaml_file(host_config_path(workspace))
     host_data = _existing_config(existing, "host_data") or fresh_host_data
     fresh_host = fresh_host_data.get("host") if isinstance(fresh_host_data.get("host"), dict) else {}
     host = host_data.setdefault("host", {})
@@ -1985,14 +2026,14 @@ def _write_onboarding_config(
         channels["telegram"] = telegram_config
     else:
         channels.pop("telegram", None)
-    write_yaml_file(config_root / "host.yaml", host_data)
+    write_yaml_file(host_config_path(workspace), host_data)
 
-    kernel_data = _existing_config(existing, "kernel_data") or read_yaml_file(config_root / "kernel.yaml")
+    kernel_data = _existing_config(existing, "kernel_data") or read_yaml_file(kernel_config_path(workspace))
     kernel_data.setdefault("kernel", {})["model"] = kernel_model
     kernel_data["kernel"].setdefault("permissions", {})["profile"] = profile
-    write_yaml_file(config_root / "kernel.yaml", kernel_data)
+    write_yaml_file(kernel_config_path(workspace), kernel_data)
 
-    fresh_agents_data = read_yaml_file(config_root / "agents.yaml")
+    fresh_agents_data = read_yaml_file(agents_config_path(workspace))
     agents_data = _existing_config(existing, "agents_data") or fresh_agents_data
     main_agent = agents_data.setdefault("agents", {}).setdefault("main", {})
     fresh_main = (fresh_agents_data.get("agents") or {}).get("main") if isinstance(fresh_agents_data.get("agents"), dict) else {}
@@ -2012,9 +2053,9 @@ def _write_onboarding_config(
     if not telegram_config:
         channels = [channel for channel in channels if channel != "telegram"]
     main_agent["channels"] = channels
-    write_yaml_file(config_root / "agents.yaml", agents_data)
+    write_yaml_file(agents_config_path(workspace), agents_data)
 
-    skills_data = _existing_config(existing, "skills_data") or read_yaml_file(config_root / "skills.yaml")
+    skills_data = _existing_config(existing, "skills_data") or read_yaml_file(workspace_skills_config_path(workspace))
     web_config = skills_data.setdefault("skills", {}).setdefault("web", {})
     if search_config:
         web_config["search_provider"] = search_config["provider"]
@@ -2022,7 +2063,7 @@ def _write_onboarding_config(
     else:
         web_config.pop("search_provider", None)
         web_config.pop("base_url", None)
-    write_yaml_file(config_root / "skills.yaml", skills_data)
+    write_yaml_file(workspace_skills_config_path(workspace), skills_data)
 
 
 def _existing_config(existing: dict[str, object], key: str) -> dict[str, Any]:
@@ -2103,7 +2144,7 @@ def _ask_csv_strings(prompt: str, *, default: str) -> list[str]:
 
 
 def _credential_value(workspace: Path, name: str) -> str:
-    record = load_credentials(workspace / "credentials.yaml").credentials.get(name)
+    record = load_workspace_credentials(workspace).credentials.get(name)
     return record.value if record is not None else ""
 
 
@@ -2268,6 +2309,12 @@ def _write_int_file(path: Path, value: int) -> None:
     path.write_text(f"{value}\n", encoding="utf-8")
 
 
+def _redact_secret(text: str, secret: str) -> str:
+    if not secret:
+        return text
+    return text.replace(secret, "[redacted]")
+
+
 def _telegram_sender_ids(updates: list[dict[str, Any]]) -> list[int]:
     ids: list[int] = []
     for update in updates:
@@ -2280,25 +2327,23 @@ def _telegram_sender_ids(updates: list[dict[str, Any]]) -> list[int]:
 
 
 def _save_api_credential(workspace: Path, name: str, api_key: str, base_url: str) -> None:
-    credentials_path = workspace / "credentials.yaml"
-    store = load_credentials(credentials_path)
+    store = load_workspace_credentials(workspace)
     store.credentials[name] = CredentialRecord(type="api_key", value=api_key, base_url=base_url)
-    write_credentials(credentials_path, store)
+    write_workspace_credentials(workspace, store)
 
 
 def _save_token_credential(workspace: Path, name: str, token: str, *, provider: str) -> None:
-    credentials_path = workspace / "credentials.yaml"
-    store = load_credentials(credentials_path)
+    store = load_workspace_credentials(workspace)
     store.credentials[name] = CredentialRecord(type="token", value=token, provider=provider)
-    write_credentials(credentials_path, store)
+    write_workspace_credentials(workspace, store)
 
 
 def _credential_exists(workspace: Path, name: str) -> bool:
-    return name in load_credentials(workspace / "credentials.yaml").credentials
+    return name in load_workspace_credentials(workspace).credentials
 
 
 def _credential_value(workspace: Path, name: str) -> str:
-    credential = load_credentials(workspace / "credentials.yaml").credentials.get(name)
+    credential = load_workspace_credentials(workspace).credentials.get(name)
     return credential.value if credential is not None else ""
 
 
@@ -3359,6 +3404,7 @@ def _scheduler_serve_until_stopped(
     print(f"Scheduler started for agent {agent.id}")
     while not stop_event.is_set():
         service.run_forever(max_iterations=1)
+        stop_event.wait(max(poll_seconds, 0.1))
     print("Scheduler stopped")
 
 
@@ -3390,10 +3436,11 @@ def _scheduler_handlers(workspace_root: Path, agent_id: str):
         else workspace / "agents" / agent.id / "events.jsonl"
     )
     event_store = EventStore(event_stream)
-    credentials = load_credentials(workspace / "credentials.yaml").visible_to(agent.credentials)
+    credentials = load_workspace_credentials(workspace).visible_to(agent.credentials)
     context = PermissionContext(
         workspace_root=bundle.host.workspace_root,
         runtime_root=bundle.host.runtime_root,
+        maurice_home_root=str(maurice_home()),
     )
     registry = SkillLoader(
         bundle.host.skill_roots,
@@ -3580,17 +3627,28 @@ def _telegram_poll_until_stopped(
     allowed_chats = _int_list(telegram.get("allowed_chats"))
     print(f"Telegram polling started for @{_telegram_bot_username(token) or 'bot'} -> agent {agent.id}")
     while not stop_event.is_set():
-        _telegram_poll_once(
-            token=token,
-            router=router,
-            event_store=event_store,
-            workspace=workspace,
-            offset_path=offset_path,
-            agent_id=agent.id,
-            allowed_users=allowed_users,
-            allowed_chats=allowed_chats,
-            timeout_seconds=0,
-        )
+        try:
+            _telegram_poll_once(
+                token=token,
+                router=router,
+                event_store=event_store,
+                workspace=workspace,
+                offset_path=offset_path,
+                agent_id=agent.id,
+                allowed_users=allowed_users,
+                allowed_chats=allowed_chats,
+                timeout_seconds=0,
+            )
+        except Exception as exc:
+            event_store.emit(
+                name="channel.poll.failed",
+                kind="progress",
+                origin="host.channel.telegram",
+                agent_id=agent.id,
+                session_id="telegram",
+                payload={"error": _redact_secret(str(exc), token)},
+            )
+            print(f"Telegram polling error: {_redact_secret(str(exc), token)}")
         stop_event.wait(poll_seconds)
     print("Telegram polling stopped")
 
@@ -3711,20 +3769,50 @@ def _gateway_router_for(workspace_root: Path, agent_id: str | None):
             run_turn=run_gateway_turn,
             event_store=EventStore(event_stream),
             default_agent_id=agent.id,
+            approval_store_for=lambda target_agent_id: ApprovalStore(
+                workspace / "agents" / target_agent_id / "approvals.json",
+                event_store=EventStore(event_stream),
+            ),
+            reset_session=lambda target_agent_id, session_id: _reset_gateway_session(
+                workspace,
+                target_agent_id,
+                session_id,
+            ),
         ),
         agent,
         bundle,
     )
 
 
+def _reset_gateway_session(workspace: Path, agent_id: str, session_id: str) -> None:
+    store = SessionStore(workspace / "sessions")
+    try:
+        store.reset(agent_id, session_id)
+    except FileNotFoundError:
+        store.create(agent_id, session_id=session_id)
+
+
 def _doctor_workspace(workspace_root: Path) -> None:
     bundle = load_workspace_config(workspace_root)
     workspace = Path(bundle.host.workspace_root)
-    required_dirs = ["agents", "skills", "sessions", "artifacts", "config"]
+    ensure_workspace_credentials_migrated(workspace)
+    ensure_workspace_config_migrated(workspace)
+    ensure_workspace_content_migrated(workspace)
+    required_dirs = ["agents", "skills", "sessions", "content"]
     missing = [name for name in required_dirs if not (workspace / name).is_dir()]
     if missing:
         raise SystemExit(f"Maurice doctor: missing workspace dirs: {', '.join(missing)}")
+    if not workspace_skills_config_path(workspace).is_file():
+        raise SystemExit("Maurice doctor: missing workspace skills.yaml")
     print(f"Maurice doctor: workspace OK ({workspace})")
+    print(f"Maurice credentials: {credentials_path()}")
+    default_agent = _default_agent(bundle)
+    print(f"Maurice model: {_effective_model_label(bundle, default_agent)}")
+    if default_agent is not None and default_agent.model:
+        print(
+            f"Maurice model note: {default_agent.id} overrides kernel.model; "
+            "kernel.model is only the fallback default."
+        )
 
 
 def run_one_turn(
@@ -3745,9 +3833,10 @@ def run_one_turn(
     permission_context = PermissionContext(
         workspace_root=bundle.host.workspace_root,
         runtime_root=bundle.host.runtime_root,
+        maurice_home_root=str(maurice_home()),
     )
     event_store = EventStore(event_stream)
-    credentials = load_credentials(workspace / "credentials.yaml").visible_to(agent.credentials)
+    credentials = load_workspace_credentials(workspace).visible_to(agent.credentials)
     registry = SkillLoader(
         bundle.host.skill_roots,
         enabled_skills=agent.skills or bundle.kernel.skills,
@@ -3807,7 +3896,7 @@ def run_one_turn(
             event_store=event_store,
         ),
         model=str(model_config.get("name") or bundle.kernel.model.name),
-        system_prompt="Maurice kernel turn loop.",
+        system_prompt=_agent_system_prompt(workspace),
     )
     return loop.run_turn(
         agent_id=agent.id,
@@ -3835,6 +3924,19 @@ def _resolve_agent(bundle: ConfigBundle, agent_id: str | None):
     if agent.status != "active":
         raise SystemExit("No active default agent configured")
     return agent
+
+
+def _agent_system_prompt(workspace: Path) -> str:
+    content = workspace / "content"
+    return (
+        "Maurice kernel turn loop.\n"
+        f"Workspace root: {workspace}\n"
+        f"User content root: {content}\n"
+        "Use the workspace `content/` directory as the default place for user-facing files, folders, exports, drafts, reports, and other produced content. "
+        "When the user names a relative folder or file without another base path, resolve it under `content/`. "
+        "For example, if the user says `ouvre le dossier toto`, inspect `$workspace/content/toto`. "
+        "Do not put secrets or host configuration in `content/`."
+    )
 
 
 def _provider_for_config(

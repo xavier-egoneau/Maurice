@@ -155,6 +155,11 @@ def test_loader_loads_system_host_skill() -> None:
     assert skill.state == SkillState.LOADED
     assert "host.status" in registry.tools
     assert "runtime status" in skill.prompt
+    assert "Ask exactly one question at a time" in skill.prompt
+    assert "`filesystem` : lire/ecrire des fichiers" in skill.prompt
+    assert "`self_update` : proposer des ameliorations" in skill.prompt
+    assert "Envoie-moi maintenant le token BotFather" in skill.prompt
+    assert "Quels ids Telegram" in skill.prompt
     assert registry.tools["host.status"].permission.permission_class == "host.control"
 
 

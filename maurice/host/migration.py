@@ -215,7 +215,7 @@ def _migrate_artifacts(root: Path, workspace: Path, report: MigrationReport, *, 
     artifacts = root / "artifacts"
     if not artifacts.is_dir():
         return
-    destination_root = workspace / "artifacts" / "jarvis"
+    destination_root = workspace / "content" / "jarvis"
     for path in sorted(item for item in artifacts.iterdir() if item.is_file()):
         destination = destination_root / path.name
         if not dry_run:
@@ -291,7 +291,7 @@ def _load_memory_export(path: Path) -> list[dict[str, Any]]:
 def _write_report(workspace: Path, report: MigrationReport, *, dry_run: bool) -> None:
     if dry_run:
         return
-    path = workspace / "artifacts" / "migrations" / "jarvis_migration_report.json"
+    path = workspace / "content" / "migrations" / "jarvis_migration_report.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
 

@@ -16,8 +16,9 @@ from urllib import parse, request
 
 from maurice.host.credentials import (
     CredentialRecord,
-    load_credentials,
-    write_credentials,
+    ensure_workspace_credentials_migrated,
+    load_workspace_credentials,
+    write_workspace_credentials,
 )
 
 
@@ -30,7 +31,7 @@ CHATGPT_SCOPE = "openid profile email offline_access"
 
 
 def credentials_path(workspace_root: str | Path) -> Path:
-    return Path(workspace_root).expanduser().resolve() / "credentials.yaml"
+    return ensure_workspace_credentials_migrated(workspace_root)
 
 
 def save_chatgpt_auth(
@@ -39,7 +40,7 @@ def save_chatgpt_auth(
     *,
     credential_name: str = CHATGPT_CREDENTIAL_NAME,
 ) -> CredentialRecord:
-    store = load_credentials(credentials_path(workspace_root))
+    store = load_workspace_credentials(workspace_root)
     record = CredentialRecord(
         type="token",
         value=token_data["access_token"],
@@ -49,7 +50,7 @@ def save_chatgpt_auth(
         obtained_at=token_data.get("obtained_at", datetime.now(UTC).isoformat()),
     )
     store.credentials[credential_name] = record
-    write_credentials(credentials_path(workspace_root), store)
+    write_workspace_credentials(workspace_root, store)
     return record
 
 
@@ -58,7 +59,7 @@ def load_chatgpt_auth(
     *,
     credential_name: str = CHATGPT_CREDENTIAL_NAME,
 ) -> CredentialRecord | None:
-    store = load_credentials(credentials_path(workspace_root))
+    store = load_workspace_credentials(workspace_root)
     return store.credentials.get(credential_name)
 
 
@@ -67,12 +68,11 @@ def clear_chatgpt_auth(
     *,
     credential_name: str = CHATGPT_CREDENTIAL_NAME,
 ) -> bool:
-    path = credentials_path(workspace_root)
-    store = load_credentials(path)
+    store = load_workspace_credentials(workspace_root)
     existed = credential_name in store.credentials
     if existed:
         del store.credentials[credential_name]
-        write_credentials(path, store)
+        write_workspace_credentials(workspace_root, store)
     return existed
 
 

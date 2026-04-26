@@ -8,7 +8,8 @@ from maurice.host.agents import update_agent
 from maurice.kernel.approvals import ApprovalStore
 from maurice.host.cli import build_parser, main
 from maurice.host.cli import _ollama_model_choices, run_one_turn
-from maurice.host.credentials import load_credentials
+from maurice.host.credentials import load_workspace_credentials
+from maurice.host.paths import host_config_path
 from maurice.host.secret_capture import request_secret_capture
 from maurice.kernel.config import load_workspace_config, read_yaml_file, write_yaml_file
 
@@ -123,6 +124,22 @@ def test_cli_onboard_agent_model_updates_only_agent_model(tmp_path, capsys, monk
     }
 
 
+def test_cli_onboard_default_agent_model_updates_kernel_default(tmp_path, capsys, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
+    capsys.readouterr()
+    answers = iter(["ollama", "auto_heberge", "http://localhost:11434", "llama3.2"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert main(["onboard", "--workspace", str(workspace), "--agent", "main", "--model"]) == 0
+
+    bundle = load_workspace_config(workspace)
+    assert bundle.kernel.model.provider == "ollama"
+    assert bundle.kernel.model.protocol == "ollama_chat"
+    assert bundle.kernel.model.name == "llama3.2"
+    assert bundle.agents.agents["main"].model is None
+
+
 def test_cli_onboard_agent_model_can_pick_chatgpt_model_from_cache(tmp_path, capsys, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     home = tmp_path / "home"
@@ -150,8 +167,9 @@ def test_cli_onboard_agent_model_can_pick_chatgpt_model_from_cache(tmp_path, cap
 
     bundle = load_workspace_config(workspace)
     assert "Modele ChatGPT" in output
-    assert bundle.agents.agents["main"].model["provider"] == "auth"
-    assert bundle.agents.agents["main"].model["name"] == "gpt-5.4-mini"
+    assert bundle.kernel.model.provider == "auth"
+    assert bundle.kernel.model.name == "gpt-5.4-mini"
+    assert bundle.agents.agents["main"].model is None
 
 
 def test_ollama_model_choices_use_api_tags(monkeypatch) -> None:
@@ -199,14 +217,15 @@ def test_cli_onboard_agent_model_configures_ollama_cloud_credential(tmp_path, ca
     assert main(["onboard", "--workspace", str(workspace), "--agent", "main", "--model"]) == 0
 
     bundle = load_workspace_config(workspace)
-    credentials = load_credentials(workspace / "credentials.yaml")
-    assert bundle.agents.agents["main"].model == {
+    credentials = load_workspace_credentials(workspace)
+    assert bundle.kernel.model.model_dump(mode="json") == {
         "provider": "ollama",
         "protocol": "ollama_chat",
         "name": "minimax-m2.7:cloud",
         "base_url": "https://ollama.com",
         "credential": "ollama_cloud",
     }
+    assert bundle.agents.agents["main"].model is None
     assert bundle.agents.agents["main"].credentials == ["ollama_cloud"]
     assert credentials.credentials["ollama_cloud"].value == "cloud-secret"
 
@@ -281,7 +300,7 @@ def test_cli_interactive_onboard_configures_telegram_bot(tmp_path, capsys, monke
     assert bundle.agents.agents["main"].channels == ["telegram"]
     assert "telegram_bot" not in bundle.agents.agents["main"].credentials
 
-    credentials = load_credentials(workspace / "credentials.yaml")
+    credentials = load_workspace_credentials(workspace)
     assert credentials.credentials["telegram_bot"].type == "token"
     assert credentials.credentials["telegram_bot"].value == "123456:ABC"
     assert credentials.credentials["telegram_bot"].provider == "telegram_bot"
@@ -315,7 +334,7 @@ def test_cli_onboard_agent_creates_durable_agent(tmp_path, capsys, monkeypatch) 
 def test_cli_gateway_telegram_poll_routes_allowed_message(tmp_path, capsys, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     main(["onboard", "--workspace", str(workspace)])
-    host_path = workspace / "config" / "host.yaml"
+    host_path = host_config_path(workspace)
     host_data = read_yaml_file(host_path)
     host_data["host"]["channels"]["telegram"] = {
         "adapter": "telegram",
@@ -374,7 +393,7 @@ credentials:
 def test_cli_gateway_telegram_captures_pending_secret_before_model(tmp_path, capsys, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     main(["onboard", "--workspace", str(workspace)])
-    host_path = workspace / "config" / "host.yaml"
+    host_path = host_config_path(workspace)
     host_data = read_yaml_file(host_path)
     host_data["host"]["channels"]["telegram"] = {
         "adapter": "telegram",
@@ -431,7 +450,7 @@ credentials:
     assert main(["gateway", "telegram-poll", "--workspace", str(workspace), "--once"]) == 0
     capsys.readouterr()
 
-    credentials = load_credentials(workspace / "credentials.yaml")
+    credentials = load_workspace_credentials(workspace)
     assert credentials.credentials["telegram_coding"].value == "123456:SECRET"
     assert calls == [("message", "test-token", 222, "Secret enregistre sous `telegram_coding`. Tu peux continuer.")]
     events = (workspace / "agents" / "main" / "events.jsonl").read_text(encoding="utf-8")
@@ -638,7 +657,7 @@ def test_cli_self_update_validate_and_apply(tmp_path, capsys) -> None:
     workspace = tmp_path / "workspace"
     main(["onboard", "--workspace", str(workspace)])
     bundle = load_workspace_config(workspace)
-    host_config = workspace / "config" / "host.yaml"
+    host_config = host_config_path(workspace)
     host_config.write_text(
         host_config.read_text(encoding="utf-8").replace(bundle.host.runtime_root, str(runtime)),
         encoding="utf-8",
@@ -1292,7 +1311,7 @@ def test_cli_scheduler_runs_due_dream_job(tmp_path, capsys) -> None:
     run_output = capsys.readouterr().out
     assert "dreaming.run" in run_output
     assert "completed" in run_output
-    assert list((workspace / "artifacts" / "dreams").glob("dream_*.json"))
+    assert list((workspace / "content" / "dreams").glob("dream_*.json"))
 
 
 def test_cli_gateway_local_message_routes_through_runtime(tmp_path, capsys) -> None:

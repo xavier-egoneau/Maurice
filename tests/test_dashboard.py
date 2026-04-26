@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from maurice.host.dashboard import build_dashboard_snapshot
+from maurice.host.paths import agents_config_path
 from maurice.host.workspace import initialize_workspace
 from maurice.kernel.config import read_yaml_file, write_yaml_file
 from maurice.kernel.events import EventStore
@@ -88,7 +89,7 @@ def test_dashboard_models_use_agent_override(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     runtime = Path(__file__).resolve().parents[1]
     initialize_workspace(workspace, runtime)
-    agents_path = workspace / "config" / "agents.yaml"
+    agents_path = agents_config_path(workspace)
     agents_data = read_yaml_file(agents_path)
     agents_data["agents"]["main"]["model"] = {
         "provider": "ollama",

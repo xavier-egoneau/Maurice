@@ -7,10 +7,13 @@ reference secrets, but the kernel config loaders do not read this file.
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
+
+from maurice.host.paths import maurice_home
 
 
 class CredentialRecord(BaseModel):
@@ -36,6 +39,53 @@ class CredentialsStore(BaseModel):
                 if name in set(allowed_names)
             }
         )
+
+
+def credentials_path() -> Path:
+    return maurice_home() / "credentials.yaml"
+
+
+def legacy_credentials_path(workspace_root: str | Path) -> Path:
+    return Path(workspace_root).expanduser().resolve() / "credentials.yaml"
+
+
+def load_workspace_credentials(workspace_root: str | Path) -> CredentialsStore:
+    return load_credentials(ensure_workspace_credentials_migrated(workspace_root))
+
+
+def write_workspace_credentials(workspace_root: str | Path, store: CredentialsStore) -> None:
+    path = ensure_workspace_credentials_migrated(workspace_root)
+    write_credentials(path, store)
+
+
+def ensure_workspace_credentials_migrated(workspace_root: str | Path) -> Path:
+    """Move legacy workspace credentials into the host-owned Maurice home."""
+    canonical = credentials_path()
+    legacy = legacy_credentials_path(workspace_root)
+    if legacy.exists():
+        if not canonical.exists():
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(legacy), str(canonical))
+            canonical.chmod(0o600)
+        else:
+            canonical_store = load_credentials(canonical)
+            legacy_store = load_credentials(legacy)
+            changed = False
+            for name, record in legacy_store.credentials.items():
+                if name not in canonical_store.credentials:
+                    canonical_store.credentials[name] = record
+                    changed = True
+            if changed:
+                write_credentials(canonical, canonical_store)
+            migrated = legacy.with_name("credentials.yaml.migrated")
+            if migrated.exists():
+                legacy.unlink()
+            else:
+                legacy.rename(migrated)
+                migrated.chmod(0o600)
+    if not canonical.exists():
+        write_credentials(canonical, CredentialsStore())
+    return canonical
 
 
 def load_credentials(path: str | Path) -> CredentialsStore:

@@ -7,6 +7,10 @@ Security in Maurice should be simple enough to understand in one pass.
 The kernel owns policy enforcement.
 Skills may request actions, but they never define the final security policy.
 
+Secrets are host-owned. Runtime credentials live in `~/.maurice/credentials.yaml`
+with restrictive file permissions, not inside the agent workspace. Agents may
+see credential names and metadata, but not secret values.
+
 
 ## Permission Classes
 
@@ -282,7 +286,7 @@ The workspace root contains:
 
 - agent sub-workspaces
 - sessions
-- artifacts
+- content
 - user-created skills
 
 By default, normal agent filesystem permissions should target the workspace root only.

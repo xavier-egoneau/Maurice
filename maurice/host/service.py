@@ -7,6 +7,14 @@ from pathlib import Path
 from typing import Literal
 
 from maurice import __version__
+from maurice.host.credentials import credentials_path, ensure_workspace_credentials_migrated
+from maurice.host.paths import (
+    agents_config_path,
+    host_config_path,
+    kernel_config_path,
+    workspace_skills_config_path,
+)
+from maurice.host.workspace import ensure_workspace_content_migrated
 from maurice.kernel.config import ConfigBundle, load_workspace_config
 from maurice.kernel.contracts import AgentConfig, Event, MauriceModel
 from maurice.kernel.events import EventStore
@@ -84,8 +92,8 @@ def inspect_service_status(workspace_root: str | Path) -> ServiceStatusReport:
     checks.append(
         HostCheck(
             name="credentials_store",
-            state="ok" if (workspace / "credentials.yaml").exists() else "warn",
-            summary=str(workspace / "credentials.yaml"),
+            state="ok" if ensure_workspace_credentials_migrated(workspace).exists() else "warn",
+            summary=str(credentials_path()),
         )
     )
 
@@ -130,13 +138,25 @@ def _workspace_checks(workspace_root: str | Path) -> list[HostCheck]:
         )
         return checks
 
-    required_dirs = ["agents", "skills", "sessions", "artifacts", "config"]
+    ensure_workspace_content_migrated(workspace)
+    required_dirs = ["agents", "skills", "sessions", "content"]
     missing = [name for name in required_dirs if not (workspace / name).is_dir()]
+    required_files = [
+        workspace_skills_config_path(workspace),
+        host_config_path(workspace),
+        kernel_config_path(workspace),
+        agents_config_path(workspace),
+    ]
+    missing_files = [str(path) for path in required_files if not path.is_file()]
     checks.append(
         HostCheck(
             name="workspace_dirs",
-            state="error" if missing else "ok",
-            summary="missing: " + ", ".join(missing) if missing else "all required dirs present",
+            state="error" if missing or missing_files else "ok",
+            summary=(
+                "missing: " + ", ".join([*missing, *missing_files])
+                if missing or missing_files
+                else "all required dirs and config files present"
+            ),
         )
     )
     checks.append(_path_check("configured_runtime_root", Path(bundle.host.runtime_root), must_be_dir=True))

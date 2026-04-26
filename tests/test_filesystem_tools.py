@@ -19,6 +19,7 @@ def context(tmp_path) -> PermissionContext:
 
 def test_filesystem_write_read_list_and_mkdir(tmp_path) -> None:
     permission_context = context(tmp_path)
+    workspace = tmp_path / "workspace"
 
     mkdir_result = make_directory({"path": "notes"}, permission_context)
     write_result = write_text(
@@ -31,6 +32,19 @@ def test_filesystem_write_read_list_and_mkdir(tmp_path) -> None:
     assert write_result.data["bytes"] == 5
     assert read_result.data["content"] == "hello"
     assert list_result.data["entries"][0]["name"] == "today.md"
+    assert (workspace / "content" / "notes" / "today.md").read_text(encoding="utf-8") == "hello"
+
+
+def test_filesystem_explicit_workspace_dirs_still_resolve_from_workspace(tmp_path) -> None:
+    permission_context = context(tmp_path)
+    workspace = tmp_path / "workspace"
+    (workspace / "config").mkdir()
+    (workspace / "config" / "note.md").write_text("config note", encoding="utf-8")
+
+    result = read_text({"path": "config/note.md"}, permission_context)
+
+    assert result.ok
+    assert result.data["path"] == str((workspace / "config" / "note.md").resolve())
 
 
 def test_filesystem_read_missing_file_returns_tool_error(tmp_path) -> None:

@@ -418,7 +418,7 @@ class RunStore:
         envelope = RunResultEnvelope(
             status="cancelled",
             summary=summary,
-            requested_followups=["Review checkpoint before deleting run artifacts."],
+            requested_followups=["Review checkpoint before deleting run content."],
             safe_to_resume=safe_to_resume,
         )
         _write_envelope(Path(run.workspace) / "checkpoint.json", envelope)

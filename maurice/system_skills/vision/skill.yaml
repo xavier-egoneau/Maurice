@@ -3,7 +3,7 @@ version: 0.1.0
 origin: system
 mutable: false
 required: false
-description: Prepare and analyze local image artifacts without kernel-specific vision logic.
+description: Prepare and analyze local image content without kernel-specific vision logic.
 config_namespace: skills.vision
 requires:
   binaries: []

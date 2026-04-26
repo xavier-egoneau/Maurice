@@ -43,11 +43,11 @@ maurice-workspace/
   skills/
     user_skill/
   sessions/
-  artifacts/
+  content/
 ```
 
 The runtime directory is trusted and should be read-only during normal agent execution.
-The workspace is mutable and contains agent state, user-created skills, artifacts, and sub-workspaces.
+The workspace is mutable and contains agent state, user-created skills, content, and sub-workspaces.
 
 This physical separation is a security boundary.
 The kernel may load user skills from the workspace, but agents should not be able to modify the kernel or shipped system skills through normal tools.

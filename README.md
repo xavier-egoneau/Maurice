@@ -171,7 +171,7 @@ Expected at this checkpoint:
 Maurice separates runtime code from mutable agent work.
 
 - runtime: this repo/package
-- workspace: agent state, sessions, user skills, artifacts, proposals
+- workspace: agent state, sessions, user skills, content, proposals
 
 Create a local workspace:
 
@@ -215,18 +215,21 @@ Onboarding creates:
 ```text
 workspace/
   agents/main/
-  artifacts/
-  config/
+  content/
+  skills.yaml
+  sessions/
+  skills/
+
+~/.maurice/
+  credentials.yaml
+  workspaces/<workspace-id>/config/
     agents.yaml
     host.yaml
     kernel.yaml
-    skills.yaml
-  credentials.yaml
-  sessions/
-  skills/
 ```
 
-Secrets stay in `credentials.yaml`, separate from normal config.
+Secrets stay in `~/.maurice/credentials.yaml`, outside the agent workspace and
+separate from normal config.
 Agents do not receive credentials implicitly. Storing a credential and allowing
 an agent to use it are separate steps:
 
@@ -237,8 +240,9 @@ python3 -m maurice.host.cli agents update main --workspace /tmp/maurice-workspac
 
 Agents may inspect credential names and metadata through the host skill, but
 secret values are hidden. When a new token is needed from a conversation, the
-host captures the next channel message directly into `credentials.yaml` and only
-returns the credential name to the agent.
+host captures the next channel message directly into `~/.maurice/credentials.yaml`
+and only returns the credential name to the agent. Legacy workspace
+`credentials.yaml` files are migrated automatically.
 
 ## Current CLI Commands
 
@@ -522,8 +526,8 @@ Known MVP limitations:
 - agent-facing host inspection is exposed through `host.status` and `host.logs` with `host.control` permission checks
 - `monitor snapshot` and `monitor events` expose generic runtime, agent, skill, approval, job, run, and event state for future dashboard work
 - `reminders.create`, `reminders.list`, and `reminders.cancel` persist reminder state and schedule `reminders.fire` jobs through the generic scheduler
-- `vision.inspect` prepares local image artifacts, and `vision.analyze` is ready for an injected/configured backend while keeping image logic out of the kernel loop
-- `migration inspect/run` can dry-run and migrate compatible Jarvis user skills, explicit memory exports, and selected artifacts with provenance; raw Jarvis config/sessions are excluded
+- `vision.inspect` prepares local image content, and `vision.analyze` is ready for an injected/configured backend while keeping image logic out of the kernel loop
+- `migration inspect/run` can dry-run and migrate compatible Jarvis user skills, explicit memory exports, and selected content with provenance; raw Jarvis config/sessions are excluded
 - malformed optional skills are isolated as `disabled_with_error` with suggested fixes instead of breaking the runtime
 - CLI `run` does not yet expose a friendly way to trigger arbitrary tool calls
 - no dashboard, TUI, Telegram, vision, cron, or remote marketplace

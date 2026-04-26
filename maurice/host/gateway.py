@@ -46,6 +46,12 @@ class GatewayResult(MauriceModel):
 
 
 RunTurn = Callable[..., TurnResult]
+ApprovalStoreFor = Callable[[str], Any]
+ResetSession = Callable[[str, str], None]
+
+
+APPROVAL_ACCEPT_WORDS = {"ok", "oui", "yes", "y", "go", "vas-y", "vasy", "approve", "approuve"}
+APPROVAL_DENY_WORDS = {"non", "no", "n", "deny", "refuse", "annule", "annuler", "stop"}
 
 
 class MessageRouter:
@@ -57,10 +63,14 @@ class MessageRouter:
         run_turn: RunTurn,
         event_store: EventStore | None = None,
         default_agent_id: str = "main",
+        approval_store_for: ApprovalStoreFor | None = None,
+        reset_session: ResetSession | None = None,
     ) -> None:
         self.run_turn = run_turn
         self.event_store = event_store
         self.default_agent_id = default_agent_id
+        self.approval_store_for = approval_store_for
+        self.reset_session = reset_session
 
     def handle(self, inbound: InboundMessage | dict[str, Any]) -> GatewayResult:
         message = InboundMessage.model_validate(inbound)
@@ -76,13 +86,23 @@ class MessageRouter:
         )
 
         if message.text.strip() in ("/new", "/reset"):
+            if self.reset_session is not None:
+                self.reset_session(agent_id, session_id)
             outbound = OutboundMessage(
                 channel=message.channel,
                 peer_id=message.peer_id,
                 agent_id=agent_id,
                 session_id=session_id,
                 correlation_id=correlation_id,
-                text="Session reset is not implemented in the gateway yet.",
+                text="Session reinitialisee. On repart proprement.",
+            )
+            self._emit(
+                "gateway.session.reset",
+                message,
+                agent_id=agent_id,
+                session_id=session_id,
+                correlation_id=correlation_id,
+                payload={},
             )
             self._emit(
                 "gateway.message.sent",
@@ -113,6 +133,32 @@ class MessageRouter:
             )
             return GatewayResult(inbound=message, outbound=outbound, status="completed")
 
+        approval_result = self._resolve_pending_approval_from_message(
+            message,
+            agent_id=agent_id,
+            session_id=session_id,
+            correlation_id=correlation_id,
+        )
+        if approval_result == "denied":
+            outbound = OutboundMessage(
+                channel=message.channel,
+                peer_id=message.peer_id,
+                agent_id=agent_id,
+                session_id=session_id,
+                correlation_id=correlation_id,
+                text="Action refusee.",
+                metadata={"approval": "denied"},
+            )
+            self._emit(
+                "gateway.message.sent",
+                message,
+                agent_id=agent_id,
+                session_id=session_id,
+                correlation_id=correlation_id,
+                payload={"text": outbound.text, "approval": "denied"},
+            )
+            return GatewayResult(inbound=message, outbound=outbound, status="completed")
+
         turn = self.run_turn(
             message=message.text,
             session_id=session_id,
@@ -138,6 +184,50 @@ class MessageRouter:
             payload={"text": outbound.text, "turn_status": turn.status},
         )
         return GatewayResult(inbound=message, outbound=outbound, status=turn.status)
+
+    def _resolve_pending_approval_from_message(
+        self,
+        message: InboundMessage,
+        *,
+        agent_id: str,
+        session_id: str,
+        correlation_id: str,
+    ) -> str | None:
+        if self.approval_store_for is None:
+            return None
+        normalized = message.text.strip().lower()
+        if normalized not in APPROVAL_ACCEPT_WORDS and normalized not in APPROVAL_DENY_WORDS:
+            return None
+        store = self.approval_store_for(agent_id)
+        pending = [
+            approval
+            for approval in store.list(status="pending")
+            if approval.agent_id == agent_id and approval.session_id == session_id
+        ]
+        if not pending:
+            return None
+        approval = pending[-1]
+        if normalized in APPROVAL_DENY_WORDS:
+            store.deny(approval.id)
+            self._emit(
+                "approval.denied.from_channel",
+                message,
+                agent_id=agent_id,
+                session_id=session_id,
+                correlation_id=correlation_id,
+                payload={"approval_id": approval.id},
+            )
+            return "denied"
+        store.approve(approval.id)
+        self._emit(
+            "approval.approved.from_channel",
+            message,
+            agent_id=agent_id,
+            session_id=session_id,
+            correlation_id=correlation_id,
+            payload={"approval_id": approval.id},
+        )
+        return "approved"
 
     def _session_id(self, message: InboundMessage) -> str:
         return f"{message.channel}:{message.peer_id}"

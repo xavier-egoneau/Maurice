@@ -10,7 +10,7 @@ from maurice.host.auth import (
     load_chatgpt_auth,
     save_chatgpt_auth,
 )
-from maurice.host.credentials import load_credentials
+from maurice.host.credentials import load_workspace_credentials
 
 
 def test_chatgpt_auth_is_stored_in_credentials_yaml(tmp_path) -> None:
@@ -23,7 +23,7 @@ def test_chatgpt_auth_is_stored_in_credentials_yaml(tmp_path) -> None:
         },
     )
 
-    store = load_credentials(tmp_path / "credentials.yaml")
+    store = load_workspace_credentials(tmp_path)
     record = store.credentials["chatgpt"]
 
     assert record.type == "token"

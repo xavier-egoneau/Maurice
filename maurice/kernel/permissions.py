@@ -28,12 +28,18 @@ class PermissionContext(MauriceModel):
     workspace_root: str
     runtime_root: str
     home_root: str | None = None
+    maurice_home_root: str | None = None
 
     def variables(self) -> dict[str, str]:
         return {
             "$workspace": str(Path(self.workspace_root).expanduser().resolve()),
             "$runtime": str(Path(self.runtime_root).expanduser().resolve()),
             "$home": str(Path(self.home_root or Path.home()).expanduser().resolve()),
+            "$maurice_home": str(
+                Path(self.maurice_home_root or Path.home() / ".maurice")
+                .expanduser()
+                .resolve()
+            ),
         }
 
 
@@ -213,6 +219,11 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                         "service.status",
                         "credentials.list",
                         "credentials.capture",
+                        "agents.list",
+                        "agents.create",
+                        "agents.update",
+                        "agents.delete",
+                        "telegram.configure",
                     ]
                 },
                 "rememberable": True,
@@ -239,7 +250,12 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "decision": "allow",
                 "scope": {
                     "paths": ["$workspace/**", "$home/**"],
-                    "exclude": ["$runtime/**", "$home/.ssh/**", "$home/.gnupg/**"],
+                    "exclude": [
+                        "$runtime/**",
+                        "$maurice_home/**",
+                        "$home/.ssh/**",
+                        "$home/.gnupg/**",
+                    ],
                 },
                 "rememberable": False,
                 "reason": "Power profile allows broad reads outside protected paths.",
@@ -308,6 +324,11 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                         "service.restart",
                         "credentials.list",
                         "credentials.capture",
+                        "agents.list",
+                        "agents.create",
+                        "agents.update",
+                        "agents.delete",
+                        "telegram.configure",
                     ]
                 },
                 "rememberable": True,

@@ -8,6 +8,13 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from maurice.host.paths import (
+    agents_config_path,
+    ensure_workspace_config_migrated,
+    host_config_path,
+    kernel_config_path,
+    workspace_skills_config_path,
+)
 from maurice.kernel.contracts import AgentConfig
 
 
@@ -123,12 +130,12 @@ def write_yaml_file(path: Path, data: dict[str, Any]) -> None:
 
 def load_workspace_config(workspace_root: str | Path) -> ConfigBundle:
     root = Path(workspace_root).expanduser().resolve()
-    config_root = root / "config"
+    ensure_workspace_config_migrated(root)
 
-    host_data = read_yaml_file(config_root / "host.yaml").get("host", {})
-    kernel_data = read_yaml_file(config_root / "kernel.yaml").get("kernel", {})
-    agents_data = read_yaml_file(config_root / "agents.yaml")
-    skills_data = read_yaml_file(config_root / "skills.yaml")
+    host_data = read_yaml_file(host_config_path(root)).get("host", {})
+    kernel_data = read_yaml_file(kernel_config_path(root)).get("kernel", {})
+    agents_data = read_yaml_file(agents_config_path(root))
+    skills_data = read_yaml_file(workspace_skills_config_path(root))
 
     return ConfigBundle(
         host=HostConfig.model_validate(host_data),

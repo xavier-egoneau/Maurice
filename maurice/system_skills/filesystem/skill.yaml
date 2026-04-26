@@ -3,7 +3,7 @@ version: 0.1.0
 origin: system
 mutable: false
 required: false
-description: Scoped filesystem access through Maurice permissions.
+description: Scoped filesystem access. Relative user file names resolve under workspace/content by default.
 config_namespace: skills.filesystem
 requires:
   binaries: []
@@ -26,7 +26,7 @@ permissions:
         - "$workspace/secrets/**"
 tools:
   - name: filesystem.list
-    description: List entries inside an allowed directory.
+    description: List entries inside an allowed directory. Relative user folders default to workspace/content.
     input_schema:
       type: object
       properties:
@@ -42,7 +42,7 @@ tools:
       output: local_mutable
     executor: maurice.system_skills.filesystem.tools.list_entries
   - name: filesystem.read
-    description: Read a text file inside an allowed scope.
+    description: Read a text file inside an allowed scope. Relative user files default to workspace/content.
     input_schema:
       type: object
       properties:
@@ -58,7 +58,7 @@ tools:
       output: local_mutable
     executor: maurice.system_skills.filesystem.tools.read_text
   - name: filesystem.write
-    description: Write a text file inside an allowed scope.
+    description: Write a text file inside an allowed scope. Relative user files default to workspace/content.
     input_schema:
       type: object
       properties:
@@ -76,7 +76,7 @@ tools:
       output: local_mutable
     executor: maurice.system_skills.filesystem.tools.write_text
   - name: filesystem.mkdir
-    description: Create a directory inside an allowed scope.
+    description: Create a directory inside an allowed scope. Relative user folders default to workspace/content.
     input_schema:
       type: object
       properties:

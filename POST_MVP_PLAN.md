@@ -28,7 +28,7 @@ This plan starts from the current checkpoint:
 - local HTTP channel adapter exists over the gateway
 - generic monitoring snapshots and event tail CLI exist
 - reminders skill persists reminders and fires them through generic scheduler jobs
-- vision skill prepares local image artifacts and supports injectable analysis backends
+- vision skill prepares local image content and supports injectable analysis backends
 - conservative Jarvis migration tooling can inspect, dry-run, and migrate compatible user-owned data
 - host-owned self-update apply flow can validate, test, apply, report, and emit events for runtime proposals
 - autonomous execution policy lets runs continue until blocked, complete, or bounded by limits
@@ -354,7 +354,7 @@ Deliverables:
 
 Acceptance:
 
-- reminders survive process restart: done via JSON storage under workspace artifacts
+- reminders survive process restart: done via JSON storage under workspace content
 - reminder execution emits events: done
 - scheduler remains domain-neutral: done; it only dispatches the `reminders.fire` job name to host skill handlers
 
@@ -392,7 +392,7 @@ Deliverables:
 - migrate selected credentials where safe: partial; credentials are detected and explicitly skipped pending provider-specific review
 - migrate user skills where compatible: done for skill directories with `skill.yaml`
 - migrate memory through explicit export/import: done for JSON exports
-- copy selected artifacts: done behind `--include-artifacts`
+- copy selected content: done behind `--include-content`
 - write migration report: done
 
 Acceptance:

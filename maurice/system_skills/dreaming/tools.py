@@ -133,7 +133,7 @@ def run(
 
 
 def _report_path(context: PermissionContext, dream_id: str) -> Path:
-    return Path(context.variables()["$workspace"]) / "artifacts" / "dreams" / f"{dream_id}.json"
+    return Path(context.variables()["$workspace"]) / "content" / "dreams" / f"{dream_id}.json"
 
 
 def _emit(

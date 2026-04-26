@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from maurice.host.paths import agents_config_path
 from maurice.kernel.config import ConfigBundle, load_workspace_config, write_yaml_file
 from maurice.kernel.contracts import AgentConfig
 from maurice.kernel.events import EventStore
@@ -76,6 +77,7 @@ def update_agent(
     credentials: list[str] | None = None,
     channels: list[str] | None = None,
     model: dict[str, Any] | None = None,
+    clear_model: bool = False,
     make_default: bool | None = None,
     confirmed_permission_elevation: bool = False,
 ) -> AgentConfig:
@@ -97,7 +99,7 @@ def update_agent(
             "skills": skills if skills is not None else current.skills,
             "credentials": credentials if credentials is not None else current.credentials,
             "channels": channels if channels is not None else current.channels,
-            "model": model if model is not None else current.model,
+            "model": None if clear_model else model if model is not None else current.model,
             "default": make_default if make_default is not None else current.default,
         }
     )
@@ -204,7 +206,7 @@ def _set_only_default(bundle: ConfigBundle, agent_id: str) -> None:
 
 def _write_agents_config(workspace: Path, bundle: ConfigBundle) -> None:
     write_yaml_file(
-        workspace / "config" / "agents.yaml",
+        agents_config_path(workspace),
         {
             "agents": {
                 agent_id: agent.model_dump(mode="json")

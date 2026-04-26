@@ -56,9 +56,11 @@ When operating outside the default workspace, add:
 --workspace /path/to/workspace
 ```
 
-Do not edit `config/*.yaml` directly for normal user workflows when a host
-command exists. Direct config edits are acceptable for tests, migrations, and
-low-level repair work.
+Do not edit host-owned config directly for normal user workflows when a host
+command exists. `host.yaml`, `kernel.yaml`, and `agents.yaml` live under
+`~/.maurice/workspaces/<workspace-id>/config/`; `skills.yaml` is the only
+workspace-level config file. Direct config edits are acceptable for tests,
+migrations, and low-level repair work.
 
 
 ## Permanent Agents

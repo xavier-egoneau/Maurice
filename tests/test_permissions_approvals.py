@@ -115,10 +115,47 @@ def test_host_control_is_scoped_by_action(tmp_path) -> None:
         {"actions": ["service.restart"]},
         context,
     )
+    agent_create_eval = evaluate_permission(
+        "limited",
+        "host.control",
+        {"actions": ["agents.create"]},
+        context,
+    )
+    telegram_eval = evaluate_permission(
+        "limited",
+        "host.control",
+        {"actions": ["telegram.configure"]},
+        context,
+    )
 
     assert safe_eval.denied
     assert limited_eval.requires_approval
+    assert agent_create_eval.requires_approval
+    assert telegram_eval.requires_approval
     assert restart_eval.denied
+
+
+def test_power_profile_denies_raw_maurice_home_reads(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    maurice_home = tmp_path / ".maurice"
+    workspace.mkdir()
+    runtime.mkdir()
+    maurice_home.mkdir()
+    context = PermissionContext(
+        workspace_root=str(workspace),
+        runtime_root=str(runtime),
+        maurice_home_root=str(maurice_home),
+    )
+
+    evaluation = evaluate_permission(
+        "power",
+        "fs.read",
+        {"paths": [str(maurice_home / "workspaces" / "abc" / "config" / "agents.yaml")]},
+        context,
+    )
+
+    assert evaluation.denied
 
 
 def test_more_permissive_agent_profile_requires_confirmation() -> None:

@@ -82,7 +82,7 @@ That path becomes the mutable root for:
 - agent sub-workspaces
 - user-created skills
 - sessions
-- artifacts
+- content
 - local skill storage when appropriate
 
 The chosen workspace root is persisted in host config.
@@ -124,7 +124,7 @@ Workspace bootstrap:
 - `agents/`
 - `skills/`
 - `sessions/`
-- `artifacts/`
+- `content/`
 - default agent directories
 
 Onboarding may create directories and default files.
@@ -147,11 +147,13 @@ maurice-workspace/
     kernel.yaml
     agents.yaml
     skills.yaml
-  credentials.yaml
   agents/
   skills/
   sessions/
-  artifacts/
+  content/
+
+~/.maurice/
+  credentials.yaml
 ```
 
 The exact file layout may change, but ownership boundaries should not.

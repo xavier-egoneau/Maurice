@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from maurice.host.credentials import load_credentials
+from maurice.host.credentials import credentials_path, load_workspace_credentials
+from maurice.host.paths import agents_config_path, host_config_path, kernel_config_path
 from maurice.host.workspace import initialize_workspace
 from maurice.kernel.config import load_workspace_config
 
@@ -15,14 +16,22 @@ def test_initialize_workspace_creates_expected_shape(tmp_path) -> None:
     created = initialize_workspace(workspace, runtime, permission_profile="limited")
 
     assert created == workspace.resolve()
-    for relative in ("agents/main", "skills", "sessions", "artifacts", "config"):
+    for relative in ("agents/main", "skills", "sessions", "content"):
         assert (workspace / relative).is_dir()
+    assert (workspace / "skills.yaml").is_file()
+    assert not (workspace / "config").exists()
+    assert host_config_path(workspace).is_file()
+    assert kernel_config_path(workspace).is_file()
+    assert agents_config_path(workspace).is_file()
 
     bundle = load_workspace_config(workspace)
     assert bundle.host.runtime_root == str(runtime.resolve())
     assert bundle.host.workspace_root == str(workspace.resolve())
     assert bundle.kernel.permissions.profile == "limited"
     assert bundle.agents.agents["main"].permission_profile == "limited"
+    assert credentials_path().is_file()
+    assert credentials_path().parent.is_dir()
+    assert not (workspace / "credentials.yaml").exists()
 
 
 def test_initialize_workspace_rejects_runtime_workspace_collision(tmp_path) -> None:
@@ -42,7 +51,9 @@ def test_credentials_are_loaded_separately_from_config(tmp_path) -> None:
     )
 
     bundle = load_workspace_config(workspace)
-    credentials = load_credentials(workspace / "credentials.yaml")
+    credentials = load_workspace_credentials(workspace)
 
     assert not hasattr(bundle, "credentials")
     assert credentials.credentials["openai"].value == "secret"
+    assert credentials_path().is_file()
+    assert not (workspace / "credentials.yaml").exists()

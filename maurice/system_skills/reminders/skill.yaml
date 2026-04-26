@@ -15,7 +15,7 @@ permissions:
   - class: fs.write
     scope:
       paths:
-        - "$workspace/artifacts/reminders/**"
+        - "$workspace/content/reminders/**"
 tools:
   - name: reminders.create
     description: Create a scheduled reminder.
@@ -30,7 +30,7 @@ tools:
     permission_class: fs.write
     permission_scope:
       paths:
-        - "$workspace/artifacts/reminders/**"
+        - "$workspace/content/reminders/**"
     trust:
       input: local_mutable
       output: local_mutable
@@ -46,7 +46,7 @@ tools:
     permission_class: fs.read
     permission_scope:
       paths:
-        - "$workspace/artifacts/reminders/**"
+        - "$workspace/content/reminders/**"
     trust:
       input: local_mutable
       output: local_mutable
@@ -62,7 +62,7 @@ tools:
     permission_class: fs.write
     permission_scope:
       paths:
-        - "$workspace/artifacts/reminders/**"
+        - "$workspace/content/reminders/**"
     trust:
       input: local_mutable
       output: local_mutable
@@ -70,7 +70,7 @@ tools:
 backend: null
 storage:
   engine: json
-  path: "$workspace/artifacts/reminders/reminders.json"
+  path: "$workspace/content/reminders/reminders.json"
   schema_version: 1
   migrations: []
 dreams:

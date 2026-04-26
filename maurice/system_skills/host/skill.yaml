@@ -17,6 +17,13 @@ permissions:
       actions:
         - service.status
         - logs.read
+        - credentials.list
+        - credentials.capture
+        - agents.list
+        - agents.create
+        - agents.update
+        - agents.delete
+        - telegram.configure
 tools:
   - name: host.status
     description: Inspect local Maurice service status for the current workspace.
@@ -90,6 +97,137 @@ tools:
       input: local_mutable
       output: local_mutable
     executor: maurice.system_skills.host.tools.request_secret
+  - name: host.agent_list
+    description: List durable agents without revealing secrets.
+    input_schema:
+      type: object
+      properties: {}
+      required: []
+    permission_class: host.control
+    permission_scope:
+      actions:
+        - agents.list
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.host.tools.agent_list
+  - name: host.agent_create
+    description: Create a durable agent from a reviewed structured proposal. Secret values must be captured separately through host.request_secret.
+    input_schema:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        permission_profile:
+          type: string
+          enum: [safe, limited, power]
+        skills:
+          type: array
+          items:
+            type: string
+        credentials:
+          type: array
+          items:
+            type: string
+        channels:
+          type: array
+          items:
+            type: string
+        model:
+          type: object
+        make_default:
+          type: boolean
+          default: false
+      required: [agent_id]
+    permission_class: host.control
+    permission_scope:
+      actions:
+        - agents.create
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.host.tools.agent_create
+  - name: host.agent_update
+    description: Update a durable agent from a reviewed structured proposal. Secret values must be captured separately through host.request_secret.
+    input_schema:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        permission_profile:
+          type: string
+          enum: [safe, limited, power]
+        skills:
+          type: array
+          items:
+            type: string
+        credentials:
+          type: array
+          items:
+            type: string
+        channels:
+          type: array
+          items:
+            type: string
+        model:
+          type: object
+        clear_model:
+          type: boolean
+          default: false
+        make_default:
+          type: boolean
+      required: [agent_id]
+    permission_class: host.control
+    permission_scope:
+      actions:
+        - agents.update
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.host.tools.agent_update
+  - name: host.agent_delete
+    description: Delete a durable agent after explicit user approval. This removes the agent config and workspace.
+    input_schema:
+      type: object
+      properties:
+        agent_id:
+          type: string
+      required: [agent_id]
+    permission_class: host.control
+    permission_scope:
+      actions:
+        - agents.delete
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.host.tools.agent_delete
+  - name: host.telegram_bind
+    description: Connect the configured Telegram bot to a durable agent. Secret values must be captured separately through host.request_secret if the bot token is missing.
+    input_schema:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        credential:
+          type: string
+          default: telegram_bot
+        allowed_users:
+          type: array
+          items:
+            type: integer
+        allowed_chats:
+          type: array
+          items:
+            type: integer
+      required: [agent_id]
+    permission_class: host.control
+    permission_scope:
+      actions:
+        - telegram.configure
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.host.tools.telegram_bind
 backend: null
 storage: null
 dreams:

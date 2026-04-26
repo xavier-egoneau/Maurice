@@ -245,7 +245,7 @@ def fire_reminder(
 
 
 def _store_path(context: PermissionContext) -> Path:
-    return Path(context.variables()["$workspace"]) / "artifacts" / "reminders" / "reminders.json"
+    return Path(context.variables()["$workspace"]) / "content" / "reminders" / "reminders.json"
 
 
 def _parse_datetime(value: Any) -> datetime:

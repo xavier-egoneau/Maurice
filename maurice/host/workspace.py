@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Literal
 
+from maurice.host.credentials import ensure_workspace_credentials_migrated
+from maurice.host.paths import (
+    agents_config_path,
+    ensure_workspace_config_migrated,
+    host_config_path,
+    kernel_config_path,
+    workspace_skills_config_path,
+)
 from maurice.kernel.config import KernelConfig, write_yaml_file
 
 
@@ -12,8 +21,7 @@ WORKSPACE_DIRS = (
     "agents/main",
     "skills",
     "sessions",
-    "artifacts",
-    "config",
+    "content",
 )
 
 
@@ -30,6 +38,8 @@ def initialize_workspace(
 
     for relative in WORKSPACE_DIRS:
         (workspace / relative).mkdir(parents=True, exist_ok=True)
+    ensure_workspace_content_migrated(workspace)
+    ensure_workspace_config_migrated(workspace)
 
     host_config = {
         "host": {
@@ -78,13 +88,32 @@ def initialize_workspace(
     }
     skills_config = {"skills": {}}
 
-    write_yaml_file(workspace / "config" / "host.yaml", host_config)
-    write_yaml_file(workspace / "config" / "kernel.yaml", kernel_config)
-    write_yaml_file(workspace / "config" / "agents.yaml", agents_config)
-    write_yaml_file(workspace / "config" / "skills.yaml", skills_config)
-
-    credentials_path = workspace / "credentials.yaml"
-    if not credentials_path.exists():
-        write_yaml_file(credentials_path, {"credentials": {}})
+    write_yaml_file(host_config_path(workspace), host_config)
+    write_yaml_file(kernel_config_path(workspace), kernel_config)
+    write_yaml_file(agents_config_path(workspace), agents_config)
+    write_yaml_file(workspace_skills_config_path(workspace), skills_config)
+    ensure_workspace_credentials_migrated(workspace)
 
     return workspace
+
+
+def ensure_workspace_content_migrated(workspace_root: str | Path) -> Path:
+    """Rename the legacy user-facing artifacts directory to content."""
+    workspace = Path(workspace_root).expanduser().resolve()
+    legacy = workspace / "artifacts"
+    content = workspace / "content"
+    if legacy.exists():
+        if not content.exists():
+            legacy.rename(content)
+        else:
+            for item in legacy.iterdir():
+                destination = content / item.name
+                if destination.exists():
+                    continue
+                shutil.move(str(item), str(destination))
+            try:
+                legacy.rmdir()
+            except OSError:
+                pass
+    content.mkdir(parents=True, exist_ok=True)
+    return content

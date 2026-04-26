@@ -8,7 +8,11 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from maurice.host.credentials import CredentialRecord, load_credentials, write_credentials
+from maurice.host.credentials import (
+    CredentialRecord,
+    load_workspace_credentials,
+    write_workspace_credentials,
+)
 
 
 class SecretCaptureRequest(BaseModel):
@@ -77,12 +81,11 @@ def capture_pending_secret(
     if request is None:
         return None
 
-    credentials_path = workspace / "credentials.yaml"
-    credentials = load_credentials(credentials_path)
+    credentials = load_workspace_credentials(workspace)
     credentials.credentials[request.credential] = CredentialRecord(
         type=request.type, value=value.strip(), provider=request.provider
     )
-    write_credentials(credentials_path, credentials)
+    write_workspace_credentials(workspace, credentials)
 
     store.requests = [
         item

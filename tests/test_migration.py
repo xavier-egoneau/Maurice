@@ -74,8 +74,8 @@ def test_migration_dry_run_does_not_write(tmp_path) -> None:
 
     assert any(item.status == "dry_run" for item in report.items)
     assert not (workspace / "skills" / "weather").exists()
-    assert not (workspace / "artifacts" / "jarvis" / "note.txt").exists()
-    assert not (workspace / "artifacts" / "migrations" / "jarvis_migration_report.json").exists()
+    assert not (workspace / "content" / "jarvis" / "note.txt").exists()
+    assert not (workspace / "content" / "migrations" / "jarvis_migration_report.json").exists()
 
 
 def test_migration_copies_compatible_data_with_provenance(tmp_path) -> None:
@@ -90,8 +90,8 @@ def test_migration_copies_compatible_data_with_provenance(tmp_path) -> None:
     assert report.migrated_count >= 3
     assert (workspace / "skills" / "weather" / "skill.yaml").is_file()
     assert (workspace / "skills" / "weather" / ".maurice_migration.json").is_file()
-    assert (workspace / "artifacts" / "jarvis" / "note.txt").is_file()
-    assert (workspace / "artifacts" / "migrations" / "jarvis_migration_report.json").is_file()
+    assert (workspace / "content" / "jarvis" / "note.txt").is_file()
+    assert (workspace / "content" / "migrations" / "jarvis_migration_report.json").is_file()
 
     context = PermissionContext(workspace_root=str(workspace), runtime_root=str(runtime))
     memories = search({"query": "Jarvis"}, context)

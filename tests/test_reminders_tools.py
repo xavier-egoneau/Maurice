@@ -50,7 +50,7 @@ def test_reminder_create_persists_and_schedules_job(tmp_path) -> None:
     assert reminder["text"] == "Take a break"
     assert reminder["job_id"] == jobs[0].id
     assert [event.name for event in events.read_all()] == ["reminder.created"]
-    assert (tmp_path / "workspace" / "artifacts" / "reminders" / "reminders.json").is_file()
+    assert (tmp_path / "workspace" / "content" / "reminders" / "reminders.json").is_file()
 
 
 def test_reminder_list_cancel_and_fire(tmp_path) -> None:
@@ -79,7 +79,7 @@ def test_reminder_list_cancel_and_fire(tmp_path) -> None:
 
     assert fired.ok is True
     assert fired.data["reminder"]["status"] == "delivered"
-    assert ReminderStore(tmp_path / "workspace" / "artifacts" / "reminders" / "reminders.json").list(
+    assert ReminderStore(tmp_path / "workspace" / "content" / "reminders" / "reminders.json").list(
         status="delivered"
     )[0].text == "Stand up"
 

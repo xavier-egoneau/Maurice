@@ -29,7 +29,7 @@ def test_dreaming_run_degrades_without_memory_input(tmp_path) -> None:
     assert result.ok
     assert result.data["report"]["inputs"] == []
     assert result.data["report"]["summary"] == "Dream completed with no skill inputs."
-    assert (tmp_path / "workspace" / "artifacts" / "dreams").is_dir()
+    assert (tmp_path / "workspace" / "content" / "dreams").is_dir()
 
 
 def test_dreaming_run_consumes_memory_dream_input(tmp_path) -> None:
