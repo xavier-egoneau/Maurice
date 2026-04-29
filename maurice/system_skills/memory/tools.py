@@ -13,6 +13,10 @@ from maurice.kernel.contracts import DreamInput, ToolResult
 from maurice.kernel.permissions import PermissionContext
 
 
+def build_executors(ctx: Any) -> dict[str, Any]:
+    return memory_tool_executors(ctx.permission_context)
+
+
 def memory_tool_executors(context: PermissionContext) -> dict[str, Any]:
     return {
         "memory.remember": lambda arguments: remember(arguments, context),

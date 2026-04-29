@@ -1,9 +1,9 @@
-WORKSPACE ?= /home/egza/Documents/workspace_maurice
+WORKSPACE ?= $(HOME)/Documents/workspace_maurice
 PROFILE ?= limited
 MSG ?= salut Maurice
 PORT ?= 18791
 
-.PHONY: bootstrap setup link-cli install onboard doctor run start stop logs dashboard gateway telegram test help
+.PHONY: bootstrap setup link-cli install onboard doctor run start stop restart logs dashboard gateway telegram test help
 
 help:
 	@echo "Maurice local commands"
@@ -16,6 +16,7 @@ help:
 	@echo "  make run        Run one mock/agent turn"
 	@echo "  make start      Start Maurice background services"
 	@echo "  make stop       Stop Maurice background services"
+	@echo "  make restart    Restart Maurice background services"
 	@echo "  make logs       Show recent Maurice logs"
 	@echo "  make dashboard  Show the local text dashboard"
 	@echo "  make gateway    Start the local gateway"
@@ -56,6 +57,9 @@ start:
 
 stop:
 	. .venv/bin/activate && maurice stop --workspace "$(WORKSPACE)"
+
+restart:
+	. .venv/bin/activate && maurice restart --workspace "$(WORKSPACE)"
 
 logs:
 	. .venv/bin/activate && maurice logs --workspace "$(WORKSPACE)"

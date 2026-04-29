@@ -219,6 +219,33 @@ Runtime/system skill updates go through the runtime self-update proposal flow.
 - event/state publishers
 - required flag
 - permissions requested
+- tools_module (dotted Python module path where `build_executors` lives)
+
+
+## Executor Convention
+
+Every skill that exposes tools must implement a `build_executors` function in its tools module:
+
+```python
+def build_executors(ctx: SkillContext) -> dict[str, ToolExecutor]:
+    ...
+```
+
+`SkillContext` carries the full runtime context:
+
+- `permission_context` — scoped path and credential context
+- `registry` — the loaded skill registry (available at executor-build time)
+- `event_store` — optional event bus
+- `skill_config` — this skill's config slice from `skills.<name>`
+- `all_skill_configs` — full skills config dict
+- `skill_roots` — discovered skill roots
+- `enabled_skills` — active skill names
+- `agent_id` / `session_id` — current agent and session
+- `extra` — host-provided hooks (callbacks, backends, etc.)
+
+The `extra` dict carries anything that requires host wiring at runtime, such as scheduler callbacks or provider backends. Skills should look up their hooks from `ctx.extra` by agreed key names.
+
+The kernel calls `registry.build_executor_map(ctx)` to dynamically load all executors from loaded skills. No caller needs to import individual skill modules directly.
 
 
 ## Prompt Fragments

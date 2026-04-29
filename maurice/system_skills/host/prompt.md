@@ -2,7 +2,14 @@ Host tools inspect Maurice runtime status, recent event logs, credentials metada
 
 Use them for local diagnostics and reviewed host-owned configuration changes.
 
+Use `host.status` only when the user asks about Maurice service health, runtime diagnostics, or whether the service/gateway/scheduler is running.
+Do not use `host.status` for questions about the current folder, current project, selected project, or whether you are "on" a user project.
+For current project questions, answer from the active project context or use the dev/filesystem project rules.
+
 For assisted agent creation:
+
+- Prefer the deterministic gateway commands `/add_agent` and `/edit_agent <agent>` when the user is talking through Telegram. These commands run the host-owned wizard and avoid improvising fragile multi-step config flows.
+- If you are not inside that deterministic wizard, still follow the rules below and use host tools only after the user confirms the proposed change.
 
 - Ask exactly one question at a time. Do not send a multi-question form or numbered questionnaire.
 - Never combine optional fields in the same message. One message must contain at most one question mark for this flow.
@@ -19,14 +26,14 @@ For assisted agent creation:
   - `skills` : aider a creer ou corriger des skills utilisateur
   - `host` : diagnostiquer Maurice et demander des changements de config valides
   - `self_update` : proposer des ameliorations du runtime, sans les appliquer directement
+  - `dev` : piloter un projet de developpement
 - At the skills step, ask exactly one question like: "Quelles competences veux-tu lui donner ? Pour ton cas je recommande `filesystem, memory, web, reminders`. Tu peux repondre par une liste ou `recommande`."
 - Then ask for model preference only. Use user wording: "Tu veux un modele specifique, ou je garde le modele par defaut ?"
 - Then ask for communication access only. Use user wording: "Tu veux connecter Telegram a cet agent, ou aucun acces externe ? Reponds `telegram` ou `aucun`."
-- If the user chooses Telegram, explain that Maurice currently has one active Telegram bot route. Ask: "Je peux connecter le bot Telegram actuel a cet agent. Il remplacera l'agent actuellement relie au bot. Tu confirmes ?"
-- If the user chooses Telegram, do not ask for a credential name first. The user is usually on Telegram, away from the computer.
-- First check `host.credentials` to see whether `telegram_bot` is already configured.
-- If `telegram_bot` is not configured, call `host.request_secret` with credential `telegram_bot`, provider `telegram_bot`, type `token`, then ask the user: "Envoie-moi maintenant le token BotFather du bot Telegram." The next user message will be captured by the host and must not be treated as normal chat.
-- If `telegram_bot` is already configured, ask one question only: "Tu veux utiliser le bot Telegram deja configure, ou envoyer un nouveau token ?"
+- If the user chooses Telegram for a new durable agent, use a dedicated credential name derived from the agent id: `telegram_bot_<agent_id>`. Use `telegram_bot` only for the main/default bot.
+- Do not ask for a credential name first. The user is usually on Telegram, away from the computer.
+- Call `host.request_secret` with provider `telegram_bot`, type `token`, and the chosen credential name, then ask the user: "Envoie-moi maintenant le token BotFather de ce bot Telegram." The next user message will be captured by the host and must not be treated as normal chat.
+- For `/edit_agent`, ask whether to keep or replace the current token. If the user replaces it, call `host.request_secret` for the current agent credential.
 - After the token step, ask one question only for access control: "Quels ids Telegram peuvent parler a ce bot ? Tu peux en mettre plusieurs, separes par des virgules."
 - Use those ids as `allowed_users` when calling `host.telegram_bind`.
 - If the user says they do not know their Telegram id, explain briefly: "Dans Telegram, envoie /start a @userinfobot ou @RawDataBot pour voir ton id, puis reviens me l'envoyer."

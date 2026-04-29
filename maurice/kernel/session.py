@@ -110,6 +110,11 @@ class SessionStore:
         metadata: dict[str, Any] | None = None,
     ) -> TurnRecord:
         session = self.load(agent_id, session_id)
+        now = utc_now()
+        for stale in session.turns:
+            if stale.status == "running":
+                stale.status = "failed"
+                stale.completed_at = now
         turn = TurnRecord(
             correlation_id=correlation_id or new_correlation_id("turn"),
             metadata=metadata or {},

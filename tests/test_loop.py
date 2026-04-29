@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.contracts import ToolResult
 from maurice.kernel.events import EventStore
@@ -69,8 +71,10 @@ def test_agent_system_prompt_explains_content_root(tmp_path) -> None:
 
     prompt = _agent_system_prompt(tmp_path / "workspace")
 
-    assert "content/" in prompt
-    assert "ouvre le dossier toto" in prompt
+    assert "Agent content" in prompt
+    assert "Workspace root" in prompt
+    assert "Path resolution" in prompt
+    assert "secrets" in prompt
 
 
 def test_loop_preserves_provider_failure_error(tmp_path) -> None:
@@ -150,6 +154,193 @@ def test_mock_provider_can_call_declared_filesystem_tool(tmp_path) -> None:
         "tool",
         "assistant",
     ]
+
+
+def test_loop_can_continue_after_tool_result_when_limit_allows(tmp_path) -> None:
+    class SequentialProvider:
+        def __init__(self):
+            self.calls = []
+
+        def stream(self, *, messages, model, tools, system, limits=None):
+            self.calls.append(list(messages))
+            if len(self.calls) == 1:
+                yield {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "id": "call_1",
+                        "name": "filesystem.read",
+                        "arguments": {"path": "notes.md"},
+                    },
+                }
+                yield {"type": "status", "status": "completed"}
+                return
+            yield {"type": "text_delta", "delta": "J'ai lu le fichier et je continue."}
+            yield {"type": "status", "status": "completed"}
+
+    provider = SequentialProvider()
+
+    def read_text(_arguments):
+        return ToolResult(
+            ok=True,
+            summary="File read.",
+            data={"content": "notes"},
+            trust="local_mutable",
+        )
+
+    loop = make_loop(tmp_path, provider, executors={"filesystem.read": read_text})
+
+    result = loop.run_turn(
+        agent_id="main",
+        session_id="sess_1",
+        message="Read notes",
+        limits={"max_tool_iterations": 2},
+    )
+
+    assert len(provider.calls) == 2
+    assert any(message["role"] == "tool" for message in provider.calls[1])
+    assert result.assistant_text == "J'ai lu le fichier et je continue."
+    assert result.tool_results[0].ok
+
+
+def test_loop_continues_after_tool_result_by_default(tmp_path) -> None:
+    class SequentialProvider:
+        def __init__(self):
+            self.calls = []
+
+        def stream(self, *, messages, model, tools, system, limits=None):
+            self.calls.append(list(messages))
+            if len(self.calls) == 1:
+                yield {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "id": "call_1",
+                        "name": "filesystem.list",
+                        "arguments": {"path": "."},
+                    },
+                }
+                yield {"type": "status", "status": "completed"}
+                return
+            yield {
+                "type": "tool_call",
+                "tool_call": {
+                    "id": "call_2",
+                    "name": "filesystem.move",
+                    "arguments": {"source_path": "test/src", "target_path": "src"},
+                },
+            }
+            yield {"type": "text_delta", "delta": "C'est remis en place."}
+            yield {"type": "status", "status": "completed"}
+
+    def list_entries(_arguments):
+        return ToolResult(ok=True, summary="J'ai trouve `test`.", trust="local_mutable")
+
+    def move_path(_arguments):
+        return ToolResult(ok=True, summary="J'ai deplace `src`.", trust="local_mutable")
+
+    provider = SequentialProvider()
+    loop = make_loop(
+        tmp_path,
+        provider,
+        profile="limited",
+        executors={"filesystem.list": list_entries, "filesystem.move": move_path},
+    )
+
+    result = loop.run_turn(
+        agent_id="main",
+        session_id="sess_1",
+        message="Remets src a la racine",
+        limits={"max_tool_iterations": 8},
+    )
+
+    assert len(provider.calls) == 2
+    assert [tool.summary for tool in result.tool_results] == ["J'ai trouve `test`.", "J'ai deplace `src`."]
+    assert result.assistant_text == "C'est remis en place."
+
+
+def test_loop_can_execute_text_tool_protocol_when_enabled(tmp_path) -> None:
+    class TextToolProvider:
+        def __init__(self):
+            self.calls = []
+
+        def stream(self, *, messages, model, tools, system, limits=None):
+            self.calls.append(list(messages))
+            if len(self.calls) == 1:
+                yield {
+                    "type": "text_delta",
+                    "delta": (
+                        "```maurice_tool_calls\n"
+                        '[{"name":"filesystem.list","arguments":{"path":"."}}]\n'
+                        "```"
+                    ),
+                }
+                yield {"type": "status", "status": "completed"}
+                return
+            yield {"type": "text_delta", "delta": "J'ai trouve le dossier."}
+            yield {"type": "status", "status": "completed"}
+
+    def list_entries(_arguments):
+        return ToolResult(
+            ok=True,
+            summary="J'ai trouve le dossier `app`.",
+            data={"entries": [{"name": "app", "type": "directory"}]},
+            trust="local_mutable",
+        )
+
+    provider = TextToolProvider()
+    loop = make_loop(tmp_path, provider, executors={"filesystem.list": list_entries})
+
+    result = loop.run_turn(
+        agent_id="main",
+        session_id="sess_1",
+        message="Liste",
+        limits={"max_tool_iterations": 2, "allow_text_tool_calls": True},
+    )
+
+    assert len(provider.calls) == 2
+    assert result.tool_results[0].summary == "J'ai trouve le dossier `app`."
+    assert result.assistant_text == "J'ai trouve le dossier."
+    assert [message.role for message in result.session.messages] == ["user", "tool", "assistant"]
+
+
+def test_loop_does_not_execute_text_tool_protocol_by_default(tmp_path) -> None:
+    provider = MockProvider(
+        [
+            {
+                "type": "text_delta",
+                "delta": (
+                    "```maurice_tool_calls\n"
+                    '[{"name":"filesystem.list","arguments":{"path":"."}}]\n'
+                    "```"
+                ),
+            },
+            {"type": "status", "status": "completed"},
+        ]
+    )
+    loop = make_loop(tmp_path, provider, executors={"filesystem.list": lambda _arguments: {"ok": True}})
+
+    result = loop.run_turn(agent_id="main", session_id="sess_1", message="Liste")
+
+    assert result.tool_results == []
+    assert "maurice_tool_calls" in result.assistant_text
+
+
+def test_loop_removes_internal_user_prompt_after_turn(tmp_path) -> None:
+    provider = MockProvider(
+        [
+            {"type": "text_delta", "delta": "Execution lancee"},
+            {"type": "status", "status": "completed"},
+        ]
+    )
+    loop = make_loop(tmp_path, provider)
+
+    result = loop.run_turn(
+        agent_id="main",
+        session_id="sess_1",
+        message="Commande interne `/dev` : execute le plan.",
+        message_metadata={"internal": True},
+    )
+
+    assert result.session.messages == []
 
 
 def test_tool_execution_goes_through_permission_and_requests_approval(tmp_path) -> None:
@@ -233,7 +424,7 @@ def test_reminder_tool_can_schedule_job_through_agent_loop(tmp_path) -> None:
                     "name": "reminders.create",
                     "arguments": {
                         "text": "Stretch",
-                        "run_at": "2026-04-26T12:00:00+00:00",
+                            "run_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
                     },
                 },
             },

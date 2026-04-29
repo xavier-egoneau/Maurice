@@ -18,7 +18,7 @@ permissions:
         - "$workspace/content/reminders/**"
 tools:
   - name: reminders.create
-    description: Create a scheduled reminder.
+    description: Create a scheduled reminder. Prefer trigger_type/trigger_value for natural reminders; keep run_at for exact ISO datetimes.
     input_schema:
       type: object
       properties:
@@ -26,7 +26,18 @@ tools:
           type: string
         run_at:
           type: string
-      required: ["text", "run_at"]
+          description: Exact ISO datetime, used only when trigger_type/trigger_value are not provided.
+        trigger_type:
+          type: string
+          enum: ["at", "every"]
+          description: "'at' for one-shot reminders, 'every' for recurring interval reminders."
+        trigger_value:
+          type: string
+          description: "'20m', '2h', '1d', '08:00', '1h08', or an ISO datetime for at; '20m', '2h', '1d' for every."
+        interval_seconds:
+          type: integer
+          description: Optional repeat interval in seconds after the first run_at.
+      required: ["text"]
     permission_class: fs.write
     permission_scope:
       paths:
@@ -77,3 +88,4 @@ dreams:
   attachment: dreams.md
 events:
   state_publisher: null
+tools_module: maurice.system_skills.reminders.tools

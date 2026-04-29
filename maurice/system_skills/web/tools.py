@@ -18,6 +18,10 @@ DEFAULT_TIMEOUT_SECONDS = 20
 USER_AGENT = "Maurice/0.1 web-skill"
 
 
+def build_executors(ctx: Any) -> dict[str, Any]:
+    return web_tool_executors(ctx.permission_context, ctx.skill_config or None)
+
+
 def web_tool_executors(
     context: PermissionContext,
     config: dict[str, Any] | None = None,

@@ -22,6 +22,8 @@ Owns:
 - event retention
 - monitoring/state exposure toggles
 
+`skills` is the list of skill names to load. An empty list `[]` means no explicit filter — all skills discovered in the configured skill roots are loaded. An explicit list restricts loading to the named skills only.
+
 
 ### Skill config
 
@@ -142,18 +144,18 @@ maurice-runtime/
   config/defaults.yaml
 
 maurice-workspace/
-  config/
-    host.yaml
-    kernel.yaml
-    agents.yaml
-    skills.yaml
   agents/
   skills/
+  skills.yaml
   sessions/
   content/
 
 ~/.maurice/
   credentials.yaml
+  workspaces/<workspace-id>/config/
+    agents.yaml
+    host.yaml
+    kernel.yaml
 ```
 
 The exact file layout may change, but ownership boundaries should not.
@@ -180,6 +182,10 @@ kernel:
     - web
   scheduler:
     enabled: true
+    dreaming_enabled: true
+    dreaming_time: "09:00"
+    daily_enabled: true
+    daily_time: "09:30"
   events:
     retention_days: 30
   sessions:

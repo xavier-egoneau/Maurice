@@ -14,6 +14,14 @@ from maurice.kernel.contracts import ToolResult
 from maurice.kernel.permissions import PermissionContext
 
 
+def build_executors(ctx: Any) -> dict[str, Any]:
+    return host_tool_executors(
+        ctx.permission_context,
+        agent_id=ctx.agent_id,
+        session_id=ctx.session_id,
+    )
+
+
 def host_tool_executors(
     context: PermissionContext,
     *,

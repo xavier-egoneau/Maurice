@@ -64,7 +64,7 @@ maurice dashboard --plain
 By default this creates/uses:
 
 ```text
-/home/egza/Documents/workspace_maurice
+$HOME/Documents/workspace_maurice
 ```
 
 You can override it:
@@ -308,6 +308,7 @@ python3 -m maurice.host.cli approvals list --workspace /tmp/maurice-workspace
 python3 -m maurice.host.cli approvals approve <approval-id> --workspace /tmp/maurice-workspace
 python3 -m maurice.host.cli approvals deny <approval-id> --workspace /tmp/maurice-workspace
 python3 -m maurice.host.cli scheduler schedule-dream --workspace /tmp/maurice-workspace --skill memory
+python3 -m maurice.host.cli scheduler configure --workspace /tmp/maurice-workspace --dream-time 09:00 --daily-time 09:30
 python3 -m maurice.host.cli scheduler run-once --workspace /tmp/maurice-workspace
 python3 -m maurice.host.cli scheduler serve --workspace /tmp/maurice-workspace
 python3 -m maurice.host.cli gateway local-message --workspace /tmp/maurice-workspace --message "hello"
@@ -326,6 +327,30 @@ python3 -m maurice.host.cli self-update apply <proposal-id> --workspace /tmp/mau
 ```
 
 `run` uses the configured model provider. Non-interactive development workspaces can still default to the mock provider, but the interactive onboarding only offers real providers. The generic `api` provider supports OpenAI-compatible APIs, `ollama` supports local/self-hosted and cloud Ollama endpoints, and `auth` supports the ChatGPT account/session path.
+
+## Dev Skill
+
+When the `dev` skill is enabled, project commands work relative to the current agent:
+
+```text
+/projects
+/project open monprojet
+/plan
+/tasks
+/dev
+/check
+/review
+```
+
+Project code lives in `agents/<agent>/content/<project>/`.
+Maurice's project memory lives in `agents/<agent>/content/<project>/.maurice/`:
+
+- `AGENTS.md`: local working rules for Maurice in this project
+- `DECISIONS.md`: durable decisions
+- `PLAN.md`: ordered checkbox plan with `[ parallellisable ]` or `[ non parallellisable ]`
+- `dreams.md`: project signals for daily dreaming
+
+The `.maurice/` folder contains its own `.gitignore` so Maurice's planning memory does not pollute the project repository by default.
 
 ## Test Skills Directly
 

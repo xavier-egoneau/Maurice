@@ -19,6 +19,7 @@ from maurice.kernel.skills import SkillLoader
 
 
 ACTIVE_EVENT_GRACE = timedelta(seconds=12)
+ACTIVE_STALE_THRESHOLD = timedelta(minutes=10)
 
 
 class DashboardStatus(MauriceModel):
@@ -154,6 +155,8 @@ def _automation_rows(workspace: Path, bundle: ConfigBundle) -> list[AutomationDa
     for agent in bundle.agents.agents.values():
         store = JobStore(workspace / "agents" / agent.id / "jobs.json")
         for job in store.list():
+            if str(job.status) == "completed" and not job.recurring:
+                continue
             rows.append(
                 AutomationDashboardRow(
                     job_id=job.id,
@@ -279,15 +282,21 @@ def _all_agent_events(workspace: Path, bundle: ConfigBundle) -> list[Event]:
 
 def _active_agents(events: list[Event]) -> set[str]:
     active: set[str] = set()
+    last_started_at: dict[str, datetime] = {}
     recent_activity: dict[str, datetime] = {}
     now = datetime.now(UTC)
     for event in events:
         if event.name.endswith(".started") or event.name in {"turn.started", "job.started", "run.started"}:
             active.add(event.agent_id)
+            last_started_at[event.agent_id] = event.time
         elif event.name.endswith(".completed") or event.name.endswith(".failed") or event.name.endswith(".cancelled"):
             active.discard(event.agent_id)
         if _is_activity_event(event):
             recent_activity[event.agent_id] = event.time
+    for agent_id in list(active):
+        started = last_started_at.get(agent_id)
+        if started is not None and now - _as_utc(started) > ACTIVE_STALE_THRESHOLD:
+            active.discard(agent_id)
     for agent_id, last_seen in recent_activity.items():
         if now - _as_utc(last_seen) <= ACTIVE_EVENT_GRACE:
             active.add(agent_id)

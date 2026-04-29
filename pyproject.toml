@@ -27,7 +27,7 @@ maurice = "maurice.host.cli:main"
 include = ["maurice*"]
 
 [tool.setuptools.package-data]
-maurice = ["system_skills/**/*.yaml", "system_skills/**/*.md", "system_skills/**/*.sql"]
+maurice = ["system_skills/**/*.yaml", "system_skills/**/*.md", "system_skills/**/*.sql", "host/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

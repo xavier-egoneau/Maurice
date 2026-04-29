@@ -4,6 +4,7 @@ from maurice.kernel.permissions import PermissionContext
 from maurice.system_skills.filesystem.tools import (
     list_entries,
     make_directory,
+    move_path,
     read_text,
     write_text,
 )
@@ -35,6 +36,116 @@ def test_filesystem_write_read_list_and_mkdir(tmp_path) -> None:
     assert (workspace / "content" / "notes" / "today.md").read_text(encoding="utf-8") == "hello"
 
 
+def test_filesystem_relative_paths_use_active_project_when_available(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    project = workspace / "agents" / "main" / "content" / "test"
+    project.mkdir(parents=True)
+    runtime.mkdir()
+    permission_context = PermissionContext(
+        workspace_root=str(workspace),
+        runtime_root=str(runtime),
+        agent_workspace_root=str(workspace / "agents" / "main"),
+        active_project_root=str(project),
+    )
+
+    write_result = write_text({"path": "notes.md", "content": "hello"}, permission_context)
+    list_result = list_entries({"path": "."}, permission_context)
+
+    assert write_result.ok
+    assert (project / "notes.md").read_text(encoding="utf-8") == "hello"
+    assert list_result.ok
+    assert "notes.md" in list_result.summary
+
+
+def test_filesystem_move_directory_inside_active_project(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    project = workspace / "agents" / "main" / "content" / "test"
+    nested = project / "test" / "src"
+    nested.mkdir(parents=True)
+    runtime.mkdir()
+    permission_context = PermissionContext(
+        workspace_root=str(workspace),
+        runtime_root=str(runtime),
+        agent_workspace_root=str(workspace / "agents" / "main"),
+        active_project_root=str(project),
+    )
+
+    result = move_path(
+        {"source_path": "test/src", "target_path": "src"},
+        permission_context,
+    )
+
+    assert result.ok
+    assert not nested.exists()
+    assert (project / "src").is_dir()
+    assert result.data["target_path"] == str((project / "src").resolve())
+
+
+def test_filesystem_move_refuses_existing_target_without_overwrite(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    project = workspace / "agents" / "main" / "content" / "test"
+    (project / "test" / "src").mkdir(parents=True)
+    (project / "src").mkdir()
+    runtime.mkdir()
+    permission_context = PermissionContext(
+        workspace_root=str(workspace),
+        runtime_root=str(runtime),
+        agent_workspace_root=str(workspace / "agents" / "main"),
+        active_project_root=str(project),
+    )
+
+    result = move_path(
+        {"source_path": "test/src", "target_path": "src"},
+        permission_context,
+    )
+
+    assert not result.ok
+    assert result.error.code == "target_exists"
+    assert (project / "test" / "src").is_dir()
+
+
+def test_filesystem_active_project_name_resolves_to_project_root(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    project = workspace / "agents" / "main" / "content" / "test"
+    project.mkdir(parents=True)
+    (project / "notes.md").write_text("hello", encoding="utf-8")
+    runtime.mkdir()
+    permission_context = PermissionContext(
+        workspace_root=str(workspace),
+        runtime_root=str(runtime),
+        agent_workspace_root=str(workspace / "agents" / "main"),
+        active_project_root=str(project),
+    )
+
+    result = list_entries({"path": "test"}, permission_context)
+
+    assert result.ok
+    assert result.data["path"] == str(project.resolve())
+    assert "notes.md" in result.summary
+
+
+def test_filesystem_relative_paths_use_agent_content_without_project(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    agent_content = workspace / "agents" / "main" / "content"
+    agent_content.mkdir(parents=True)
+    runtime.mkdir()
+    permission_context = PermissionContext(
+        workspace_root=str(workspace),
+        runtime_root=str(runtime),
+        agent_workspace_root=str(workspace / "agents" / "main"),
+    )
+
+    write_result = write_text({"path": "notes.md", "content": "hello"}, permission_context)
+
+    assert write_result.ok
+    assert (agent_content / "notes.md").read_text(encoding="utf-8") == "hello"
+
+
 def test_filesystem_explicit_workspace_dirs_still_resolve_from_workspace(tmp_path) -> None:
     permission_context = context(tmp_path)
     workspace = tmp_path / "workspace"
@@ -52,6 +163,7 @@ def test_filesystem_read_missing_file_returns_tool_error(tmp_path) -> None:
 
     assert not result.ok
     assert result.error.code == "not_found"
+    assert "Je ne trouve pas" in result.summary
 
 
 def test_filesystem_invalid_path_returns_tool_error(tmp_path) -> None:

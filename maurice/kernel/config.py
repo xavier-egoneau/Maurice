@@ -35,13 +35,27 @@ class KernelPermissionsConfig(ConfigModel):
 
 
 class KernelApprovalsConfig(ConfigModel):
-    mode: Literal["ask", "auto_deny"] = "ask"
+    mode: Literal["ask", "auto_deny", "auto"] = "ask"
     ttl_seconds: int = Field(default=1800, ge=1)
     remember_ttl_seconds: int = Field(default=600, ge=1)
+    classifier_model: str = ""
+    classifier_cache_ttl_seconds: int = Field(default=3600, ge=60)
 
 
 class KernelSchedulerConfig(ConfigModel):
     enabled: bool = True
+    dreaming_enabled: bool = True
+    dreaming_time: str = "09:00"
+    daily_enabled: bool = True
+    daily_time: str = "09:30"
+
+    @field_validator("dreaming_time", "daily_time")
+    @classmethod
+    def time_must_be_hhmm(cls, value: str) -> str:
+        normalized = _normalize_time(value)
+        if normalized is None:
+            raise ValueError("time must look like HH:MM or 9h30")
+        return normalized
 
 
 class KernelEventsConfig(ConfigModel):
@@ -51,28 +65,39 @@ class KernelEventsConfig(ConfigModel):
 class KernelSessionsConfig(ConfigModel):
     retention_days: int = Field(default=30, ge=1)
     compaction: bool = True
+    context_window_tokens: int = Field(default=100_000, ge=1_000)
+    trim_threshold: float = Field(default=0.60, gt=0.0, lt=1.0)
+    summarize_threshold: float = Field(default=0.75, gt=0.0, lt=1.0)
+    reset_threshold: float = Field(default=0.90, gt=0.0, lt=1.0)
+    keep_recent_turns: int = Field(default=10, ge=1)
 
 
 class KernelConfig(ConfigModel):
     model: KernelModelConfig = Field(default_factory=KernelModelConfig)
     permissions: KernelPermissionsConfig = Field(default_factory=KernelPermissionsConfig)
     approvals: KernelApprovalsConfig = Field(default_factory=KernelApprovalsConfig)
-    skills: list[str] = Field(
-        default_factory=lambda: [
-            "filesystem",
-            "memory",
-            "dreaming",
-            "skills",
-            "self_update",
-            "web",
-            "host",
-            "reminders",
-            "vision",
-        ]
-    )
+    skills: list[str] = Field(default_factory=list)
     scheduler: KernelSchedulerConfig = Field(default_factory=KernelSchedulerConfig)
     events: KernelEventsConfig = Field(default_factory=KernelEventsConfig)
     sessions: KernelSessionsConfig = Field(default_factory=KernelSessionsConfig)
+
+
+def _normalize_time(value: str) -> str | None:
+    raw = str(value or "").strip().lower()
+    if "h" in raw:
+        hour, _, minute = raw.partition("h")
+        minute = minute or "00"
+    elif ":" in raw:
+        hour, _, minute = raw.partition(":")
+    else:
+        return None
+    if not hour.isdigit() or not minute.isdigit():
+        return None
+    hour_int = int(hour)
+    minute_int = int(minute)
+    if hour_int > 23 or minute_int > 59:
+        return None
+    return f"{hour_int:02d}:{minute_int:02d}"
 
 
 class GatewayConfig(ConfigModel):

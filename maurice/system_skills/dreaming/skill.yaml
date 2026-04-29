@@ -29,6 +29,9 @@ tools:
             type: string
         max_signals:
           type: integer
+        include_memory:
+          type: boolean
+          description: Include Maurice global memory as a first-class dream source when available. Defaults to true.
     permission_class: fs.write
     permission_scope:
       paths:
@@ -43,3 +46,4 @@ dreams:
   attachment: dreams.md
 events:
   state_publisher: null
+tools_module: maurice.system_skills.dreaming.tools

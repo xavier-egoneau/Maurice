@@ -60,9 +60,58 @@ def test_dreaming_run_consumes_memory_dream_input(tmp_path) -> None:
     ]
 
 
+def test_dreaming_run_includes_global_memory_by_default(tmp_path) -> None:
+    permission_context = context(tmp_path)
+    remembered = remember(
+        {"content": "Global memory must stay in dream context.", "tags": ["dreaming"]},
+        permission_context,
+    )
+
+    result = run(
+        {"skills": ["reminders"], "max_signals": 5},
+        permission_context,
+        registry(["dreaming", "memory", "reminders"]),
+        dream_input_builders={"memory": lambda: build_dream_input(permission_context)},
+    )
+
+    inputs = result.data["report"]["inputs"]
+    assert result.ok
+    assert [item["skill"] for item in inputs] == ["memory"]
+    assert inputs[0]["signals"][0]["data"]["memory"]["id"] == remembered.data["id"]
+
+
+def test_dreaming_run_can_explicitly_skip_global_memory(tmp_path) -> None:
+    permission_context = context(tmp_path)
+    remember(
+        {"content": "Diagnostic run can skip memory.", "tags": ["dreaming"]},
+        permission_context,
+    )
+
+    result = run(
+        {"skills": ["reminders"], "include_memory": False},
+        permission_context,
+        registry(["dreaming", "memory", "reminders"]),
+        dream_input_builders={"memory": lambda: build_dream_input(permission_context)},
+    )
+
+    assert result.ok
+    assert result.data["report"]["inputs"] == []
+
+
 def test_dreaming_run_validates_arguments(tmp_path) -> None:
     result = run(
         {"skills": "memory"},
+        context(tmp_path),
+        registry(["dreaming", "memory"]),
+    )
+
+    assert not result.ok
+    assert result.error.code == "invalid_arguments"
+
+
+def test_dreaming_run_validates_include_memory(tmp_path) -> None:
+    result = run(
+        {"include_memory": "yes"},
         context(tmp_path),
         registry(["dreaming", "memory"]),
     )

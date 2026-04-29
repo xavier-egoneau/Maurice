@@ -89,3 +89,4 @@ dreams:
   input_builder: maurice.system_skills.memory.tools.build_dream_input
 events:
   state_publisher: null
+tools_module: maurice.system_skills.memory.tools

@@ -58,6 +58,35 @@ events:
 """
 
 
+def test_loader_registers_skill_commands(tmp_path) -> None:
+    write_skill(
+        tmp_path,
+        "dev",
+        minimal_manifest(
+            "dev",
+            extra="""
+commands:
+  - name: /plan
+    description: Prepare project plan.
+    handler: tests.dev.plan
+    renderer: markdown
+    aliases:
+      - /dev
+""",
+        ),
+    )
+
+    registry = SkillLoader(
+        [SkillRoot(path=str(tmp_path), origin="user", mutable=True)],
+        enabled_skills=["dev"],
+    ).load()
+
+    assert registry.skills["dev"].state == SkillState.LOADED
+    assert registry.commands["/plan"].owner_skill == "dev"
+    assert registry.commands["/plan"].description == "Prepare project plan."
+    assert registry.commands["/dev"].name == "/plan"
+
+
 def test_loader_loads_system_filesystem_skill() -> None:
     registry = SkillLoader(
         [
@@ -161,6 +190,9 @@ def test_loader_loads_system_host_skill() -> None:
     assert "Envoie-moi maintenant le token BotFather" in skill.prompt
     assert "Quels ids Telegram" in skill.prompt
     assert registry.tools["host.status"].permission.permission_class == "host.control"
+    assert "/add_agent" in registry.commands
+    assert "/edit_agent" in registry.commands
+    assert registry.commands["/add_agent"].owner_skill == "host"
 
 
 def test_loader_loads_system_reminders_skill() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import UTC, datetime
 from maurice.host.dashboard import build_dashboard_snapshot
 from maurice.host.paths import agents_config_path
 from maurice.host.workspace import initialize_workspace
@@ -60,6 +61,24 @@ def test_dashboard_snapshot_marks_errors_for_journal(tmp_path) -> None:
 
     assert snapshot.logs[-1].message == "job.failed"
     assert snapshot.logs[-1].level == "error"
+
+
+def test_dashboard_hides_completed_one_shot_automations(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = Path(__file__).resolve().parents[1]
+    initialize_workspace(workspace, runtime)
+    store = JobStore(workspace / "agents" / "main" / "jobs.json")
+    job = store.schedule(
+        name="reminders.fire",
+        owner="skill:reminders",
+        run_at=datetime.now(UTC),
+        payload={"agent_id": "main", "session_id": "reminders"},
+    )
+    store.complete(job.id)
+
+    snapshot = build_dashboard_snapshot(workspace)
+
+    assert snapshot.automations == []
 
 
 def test_dashboard_keeps_recent_agent_activity_visible(tmp_path) -> None:

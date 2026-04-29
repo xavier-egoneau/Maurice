@@ -42,6 +42,7 @@ They are shipped by default and may be enabled by default, but the kernel should
 - kernel schedules background jobs
 - dreaming skill defines what a dream run means
 - memory skill owns durable memory storage and retrieval
+- Maurice global memory is a first-class dream source, not a secondary optional signal
 - other skills expose dream inputs through their own contracts
 
 
@@ -218,13 +219,14 @@ Define the full pipeline:
 
 1. kernel background runner triggers a dream job
 2. dreaming system skill enumerates active skills
-3. dreaming loads each `dreams.md`
-4. each skill provides `dream_inputs`
-5. dreaming assembles context
-6. provider generates structured report
-7. owner skill validates proposed actions
-8. approval gate applies policy
-9. report and events are persisted
+3. dreaming connects to Maurice global memory when the memory skill is available
+4. dreaming loads each `dreams.md`
+5. each skill provides `dream_inputs`
+6. dreaming assembles memory context plus skill signals
+7. provider generates structured report
+8. owner skill validates proposed actions
+9. approval gate applies policy
+10. report and events are persisted
 
 
 ### 8. Storage And Migrations

@@ -228,9 +228,17 @@ tools:
       input: local_mutable
       output: local_mutable
     executor: maurice.system_skills.host.tools.telegram_bind
+commands:
+  - name: /add_agent
+    description: creer un nouvel agent
+    renderer: markdown
+  - name: /edit_agent
+    description: modifier un agent (`/edit_agent <agent>`)
+    renderer: markdown
 backend: null
 storage: null
 dreams:
   attachment: dreams.md
 events:
   state_publisher: null
+tools_module: maurice.system_skills.host.tools

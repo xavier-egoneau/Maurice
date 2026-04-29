@@ -100,6 +100,27 @@ def list_secret_captures(workspace_root: str | Path) -> list[SecretCaptureReques
     return _load_store(Path(workspace_root).expanduser().resolve()).requests
 
 
+def clear_secret_capture(
+    workspace_root: str | Path,
+    *,
+    agent_id: str | None = None,
+    session_id: str | None = None,
+) -> int:
+    workspace = Path(workspace_root).expanduser().resolve()
+    store = _load_store(workspace)
+    before = len(store.requests)
+    store.requests = [
+        item
+        for item in store.requests
+        if (agent_id is not None and item.agent_id != agent_id)
+        or (session_id is not None and item.session_id != session_id)
+    ]
+    removed = before - len(store.requests)
+    if removed:
+        _write_store(workspace, store)
+    return removed
+
+
 def _store_path(workspace: Path) -> Path:
     return workspace / "agents" / ".secret_capture.json"
 

@@ -71,3 +71,4 @@ dreams:
   attachment: dreams.md
 events:
   state_publisher: null
+tools_module: maurice.system_skills.skills.tools

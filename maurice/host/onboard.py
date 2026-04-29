@@ -1,1 +1,0 @@
-"""Interactive onboarding implementation placeholder."""

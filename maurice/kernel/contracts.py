@@ -241,6 +241,38 @@ class SkillToolExport(MauriceModel):
     executor: str = ""
 
 
+class SkillCommandExport(MauriceModel):
+    name: str
+    description: str = ""
+    handler: str = ""
+    renderer: Literal["text", "markdown"] = "markdown"
+    aliases: list[str] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def command_name_starts_with_slash(cls, value: str) -> str:
+        if not value.startswith("/") or any(character.isspace() for character in value):
+            raise ValueError("command names must start with / and contain no whitespace")
+        return value
+
+    @field_validator("aliases")
+    @classmethod
+    def aliases_start_with_slash(cls, values: list[str]) -> list[str]:
+        for value in values:
+            if not value.startswith("/") or any(character.isspace() for character in value):
+                raise ValueError("command aliases must start with / and contain no whitespace")
+        return values
+
+
+class CommandDeclaration(MauriceModel):
+    name: str
+    owner_skill: str
+    description: str = ""
+    handler: str = ""
+    renderer: Literal["text", "markdown"] = "markdown"
+    aliases: list[str] = Field(default_factory=list)
+
+
 class SkillRequires(MauriceModel):
     binaries: list[str] = Field(default_factory=list)
     credentials: list[str] = Field(default_factory=list)
@@ -279,10 +311,12 @@ class SkillManifest(MauriceModel):
     dependencies: SkillDependencies = Field(default_factory=SkillDependencies)
     permissions: list[SkillPermission] = Field(default_factory=list)
     tools: list[SkillToolExport] = Field(default_factory=list)
+    commands: list[SkillCommandExport] = Field(default_factory=list)
     backend: dict[str, Any] | str | None = None
     storage: SkillStorage | None = None
     dreams: SkillDreams | None = None
     events: SkillEvents | None = None
+    tools_module: str | None = None
 
 
 class AgentConfig(MauriceModel):

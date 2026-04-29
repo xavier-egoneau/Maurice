@@ -17,6 +17,14 @@ SUPPORTED_FORMATS = {"png", "jpeg", "gif", "webp"}
 VisionBackend = Callable[[dict[str, Any]], dict[str, Any]]
 
 
+def build_executors(ctx: Any) -> dict[str, Any]:
+    return vision_tool_executors(
+        ctx.permission_context,
+        backend=ctx.extra.get("vision_backend"),
+        config=ctx.skill_config or None,
+    )
+
+
 def vision_tool_executors(
     context: PermissionContext,
     *,

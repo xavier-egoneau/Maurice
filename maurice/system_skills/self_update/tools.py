@@ -18,6 +18,10 @@ RISKS = {"low", "medium", "high"}
 STATUS = "draft"
 
 
+def build_executors(ctx: Any) -> dict[str, Any]:
+    return self_update_tool_executors(ctx.permission_context)
+
+
 def self_update_tool_executors(context: PermissionContext) -> dict[str, Any]:
     return {
         "self_update.propose": lambda arguments: propose(arguments, context),

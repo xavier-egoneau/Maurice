@@ -1,0 +1,60 @@
+name: dev
+version: 0.1.0
+origin: system
+mutable: false
+required: false
+description: Project-oriented development commands.
+config_namespace: skills.dev
+requires:
+  binaries: []
+  credentials: []
+dependencies:
+  skills: []
+  optional_skills:
+    - filesystem
+    - memory
+permissions: []
+tools: []
+commands:
+  - name: /projects
+    description: lister les projets de l'agent courant
+    handler: maurice.system_skills.dev.commands.projects
+    renderer: markdown
+  - name: /project
+    description: ouvrir ou afficher le projet actif
+    handler: maurice.system_skills.dev.commands.project
+    renderer: markdown
+  - name: /plan
+    description: cadrer puis creer PLAN.md pour le projet actif
+    handler: maurice.system_skills.dev.commands.plan
+    renderer: markdown
+  - name: /tasks
+    description: afficher les taches du projet actif
+    handler: maurice.system_skills.dev.commands.tasks
+    renderer: markdown
+  - name: /decision
+    description: afficher ou ajouter une decision projet
+    handler: maurice.system_skills.dev.commands.decision
+    renderer: markdown
+  - name: /dev
+    description: executer le plan actif en autonomie jusqu'a blocage ou validation requise
+    handler: maurice.system_skills.dev.commands.dev
+    renderer: markdown
+  - name: /check
+    description: verifier l'etat du projet actif
+    handler: maurice.system_skills.dev.commands.check
+    renderer: markdown
+  - name: /review
+    description: relire l'etat du projet actif avant validation
+    handler: maurice.system_skills.dev.commands.review
+    renderer: markdown
+  - name: /commit
+    description: preparer un commit pour le projet actif
+    handler: maurice.system_skills.dev.commands.commit
+    renderer: markdown
+backend: null
+storage: null
+dreams:
+  attachment: dreams.md
+events:
+  state_publisher: null

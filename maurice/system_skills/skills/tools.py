@@ -16,6 +16,14 @@ from maurice.kernel.skills import SkillLoadError, SkillLoader, SkillRoot
 SKILL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
+def build_executors(ctx: Any) -> dict[str, Any]:
+    return skill_authoring_tool_executors(
+        ctx.permission_context,
+        ctx.skill_roots,
+        enabled_skills=ctx.enabled_skills or None,
+    )
+
+
 def skill_authoring_tool_executors(
     context: PermissionContext,
     roots: list[SkillRoot | SkillRootConfig],

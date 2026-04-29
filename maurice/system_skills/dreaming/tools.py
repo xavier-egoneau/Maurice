@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,37 @@ from maurice.kernel.permissions import PermissionContext
 from maurice.kernel.skills import SkillRegistry
 
 DreamInputBuilder = Callable[[], DreamInput]
+
+
+def build_executors(ctx: Any) -> dict[str, Any]:
+    registry: SkillRegistry = ctx.registry
+    builders = _discover_dream_input_builders(registry, ctx.permission_context)
+    return dreaming_tool_executors(
+        ctx.permission_context,
+        registry,
+        event_store=ctx.event_store,
+        dream_input_builders=builders,
+    )
+
+
+def _discover_dream_input_builders(
+    registry: SkillRegistry, context: PermissionContext
+) -> dict[str, DreamInputBuilder]:
+    builders: dict[str, DreamInputBuilder] = {}
+    for name, skill in registry.loaded().items():
+        if not skill.manifest or not skill.manifest.dreams:
+            continue
+        input_builder_path = skill.manifest.dreams.input_builder
+        if not input_builder_path:
+            continue
+        try:
+            module_path, fn_name = input_builder_path.rsplit(".", 1)
+            mod = importlib.import_module(module_path)
+            fn = getattr(mod, fn_name)
+            builders[name] = lambda ctx=context, f=fn: f(ctx)
+        except Exception:
+            continue
+    return builders
 
 
 def dreaming_tool_executors(
@@ -63,7 +95,13 @@ def run(
     if not isinstance(max_signals, int) or max_signals < 1:
         return _error("invalid_arguments", "dreaming.run max_signals must be positive.")
 
+    include_memory = arguments.get("include_memory", True)
+    if not isinstance(include_memory, bool):
+        return _error("invalid_arguments", "dreaming.run include_memory must be a boolean.")
+
     selected = set(requested_skills or registry.loaded().keys())
+    if include_memory and "memory" in registry.loaded():
+        selected.add("memory")
     dream_input_builders = dream_input_builders or {}
     inputs: list[DreamInput] = []
     errors: list[str] = []

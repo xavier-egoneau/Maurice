@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
+import importlib
 import shutil
+from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import yaml
 from pydantic import ValidationError
 
 from maurice.kernel.config import SkillRootConfig
 from maurice.kernel.contracts import (
+    CommandDeclaration,
     MauriceModel,
     SkillManifest,
     SkillOrigin,
     ToolDeclaration,
 )
 from maurice.kernel.events import EventStore
+
+ToolExecutor = Callable[[dict[str, Any]], Any]
 
 
 class SkillState(StrEnum):
@@ -57,14 +62,33 @@ class LoadedSkill(MauriceModel):
     prompt: str = ""
     dreams: str = ""
     tools: list[ToolDeclaration] = []
+    commands: list[CommandDeclaration] = []
     errors: list[str] = []
     suggested_fixes: list[str] = []
     missing_dependencies: list[str] = []
 
 
+class SkillContext(MauriceModel):
+    """Runtime context passed to each skill's build_executors function."""
+
+    permission_context: Any  # PermissionContext — typed as Any to avoid circular import
+    registry: Any | None = None  # SkillRegistry — filled by build_executor_map
+    event_store: Any | None = None  # EventStore
+    skill_config: dict[str, Any] = {}  # this skill's config slice (set by build_executor_map)
+    all_skill_configs: dict[str, dict[str, Any]] = {}  # full SkillsConfig.skills
+    skill_roots: list[Any] = []  # list[SkillRoot | SkillRootConfig]
+    enabled_skills: list[str] = []
+    agent_id: str = "main"
+    session_id: str | None = None
+    extra: dict[str, Any] = {}  # host-provided hooks (callbacks, backends, etc.)
+
+    model_config = {"arbitrary_types_allowed": True, "extra": "forbid", "populate_by_name": True}
+
+
 class SkillRegistry(MauriceModel):
     skills: dict[str, LoadedSkill]
     tools: dict[str, ToolDeclaration]
+    commands: dict[str, CommandDeclaration] = {}
 
     def loaded(self) -> dict[str, LoadedSkill]:
         return {
@@ -72,6 +96,29 @@ class SkillRegistry(MauriceModel):
             for name, skill in self.skills.items()
             if skill.state == SkillState.LOADED
         }
+
+    def build_executor_map(self, ctx: SkillContext) -> dict[str, ToolExecutor]:
+        """Dynamically load and call each loaded skill's build_executors(ctx)."""
+        executors: dict[str, ToolExecutor] = {}
+        for name, skill in self.loaded().items():
+            if not skill.manifest or not skill.manifest.tools_module:
+                continue
+            try:
+                mod = importlib.import_module(skill.manifest.tools_module)
+            except ImportError:
+                continue
+            builder = getattr(mod, "build_executors", None)
+            if builder is None:
+                continue
+            skill_ctx = ctx.model_copy(update={
+                "registry": self,
+                "skill_config": ctx.all_skill_configs.get(name, {}),
+            })
+            try:
+                executors.update(builder(skill_ctx))
+            except Exception:
+                pass
+        return executors
 
 
 class SkillLoader:
@@ -114,11 +161,13 @@ class SkillLoader:
             self._resolve_dependencies(loaded, loaded_by_name)
 
         tools: dict[str, ToolDeclaration] = {}
+        commands: dict[str, CommandDeclaration] = {}
         for loaded in loaded_by_name.values():
             if loaded.state != SkillState.LOADED:
                 self._emit_skill_event(loaded)
                 continue
             registered_for_skill = []
+            registered_commands_for_skill = []
             for tool in loaded.tools:
                 if tool.name in tools:
                     loaded.state = SkillState.DISABLED_WITH_ERROR
@@ -136,9 +185,33 @@ class SkillLoader:
                     break
                 tools[tool.name] = tool
                 registered_for_skill.append(tool.name)
+            if loaded.state == SkillState.LOADED:
+                for command in loaded.commands:
+                    command_names = [command.name, *command.aliases]
+                    collision = next((name for name in command_names if name in commands), None)
+                    if collision:
+                        loaded.state = SkillState.DISABLED_WITH_ERROR
+                        loaded.errors.append(f"Command name collision: {collision}")
+                        loaded.suggested_fixes.append(
+                            f"Rename `{collision}` in {loaded.name}/skill.yaml so each command name is unique."
+                        )
+                        for registered_tool in registered_for_skill:
+                            tools.pop(registered_tool, None)
+                        for registered_command in registered_commands_for_skill:
+                            commands.pop(registered_command, None)
+                        loaded.tools = []
+                        loaded.commands = []
+                        if loaded.manifest and (
+                            loaded.manifest.required or loaded.name in self.required_skills
+                        ):
+                            raise RequiredSkillError(f"Required skill {loaded.name} has a command collision: {collision}")
+                        break
+                    for name in command_names:
+                        commands[name] = command
+                        registered_commands_for_skill.append(name)
             self._emit_skill_event(loaded)
 
-        return SkillRegistry(skills=loaded_by_name, tools=tools)
+        return SkillRegistry(skills=loaded_by_name, tools=tools, commands=commands)
 
     def _discover(self) -> list[tuple[Path, SkillRoot]]:
         discovered: list[tuple[Path, SkillRoot]] = []
@@ -209,6 +282,7 @@ class SkillLoader:
                     else skill_dir / "dreams.md"
                 ),
                 tools=self._tool_declarations(manifest),
+                commands=self._command_declarations(manifest),
             )
         except RequiredSkillError:
             raise
@@ -275,6 +349,21 @@ class SkillLoader:
                     },
                     trust=exported.trust,
                     executor=exported.executor or f"{manifest.name}.tools",
+                )
+            )
+        return declarations
+
+    def _command_declarations(self, manifest: SkillManifest) -> list[CommandDeclaration]:
+        declarations = []
+        for exported in manifest.commands:
+            declarations.append(
+                CommandDeclaration(
+                    name=exported.name,
+                    owner_skill=manifest.name,
+                    description=exported.description or manifest.description,
+                    handler=exported.handler,
+                    renderer=exported.renderer,
+                    aliases=exported.aliases,
                 )
             )
         return declarations

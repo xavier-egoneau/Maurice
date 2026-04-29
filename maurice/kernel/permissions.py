@@ -27,12 +27,24 @@ PROFILE_ORDER: dict[PermissionProfileName, int] = {
 class PermissionContext(MauriceModel):
     workspace_root: str
     runtime_root: str
+    agent_workspace_root: str | None = None
+    active_project_root: str | None = None
     home_root: str | None = None
     maurice_home_root: str | None = None
 
     def variables(self) -> dict[str, str]:
+        workspace = Path(self.workspace_root).expanduser().resolve()
+        agent_workspace = Path(self.agent_workspace_root).expanduser().resolve() if self.agent_workspace_root else workspace
+        active_project = (
+            Path(self.active_project_root).expanduser().resolve()
+            if self.active_project_root
+            else agent_workspace / "content"
+        )
         return {
-            "$workspace": str(Path(self.workspace_root).expanduser().resolve()),
+            "$workspace": str(workspace),
+            "$agent_workspace": str(agent_workspace),
+            "$agent_content": str(agent_workspace / "content"),
+            "$project": str(active_project),
             "$runtime": str(Path(self.runtime_root).expanduser().resolve()),
             "$home": str(Path(self.home_root or Path.home()).expanduser().resolve()),
             "$maurice_home": str(

@@ -7,11 +7,18 @@ import pytest
 from maurice.host.agents import update_agent
 from maurice.kernel.approvals import ApprovalStore
 from maurice.host.cli import build_parser, main
-from maurice.host.cli import _ollama_model_choices, run_one_turn
+from maurice.host.cli import (
+    _deliver_daily_digest,
+    _ensure_configured_scheduler_jobs,
+    _ollama_model_choices,
+    run_one_turn,
+)
 from maurice.host.credentials import load_workspace_credentials
 from maurice.host.paths import host_config_path
 from maurice.host.secret_capture import request_secret_capture
 from maurice.kernel.config import load_workspace_config, read_yaml_file, write_yaml_file
+from maurice.kernel.scheduler import JobStatus, JobStore
+from maurice.kernel.session import SessionStore
 
 
 def test_cli_onboard_doctor_and_run(tmp_path, capsys) -> None:
@@ -24,6 +31,8 @@ def test_cli_onboard_doctor_and_run(tmp_path, capsys) -> None:
     bundle = load_workspace_config(workspace)
     assert bundle.kernel.permissions.profile == "limited"
     assert bundle.agents.agents["main"].credentials == []
+    assert bundle.kernel.scheduler.dreaming_time == "09:00"
+    assert bundle.kernel.scheduler.daily_time == "09:30"
 
     assert main(["doctor", "--workspace", str(workspace)]) == 0
     doctor_output = capsys.readouterr().out
@@ -191,7 +200,7 @@ def test_ollama_model_choices_use_api_tags(monkeypatch) -> None:
         seen["timeout"] = timeout
         return FakeResponse()
 
-    monkeypatch.setattr("maurice.host.cli.urlrequest.urlopen", fake_urlopen)
+    monkeypatch.setattr("maurice.host.commands.onboard.urlrequest.urlopen", fake_urlopen)
 
     assert _ollama_model_choices("http://localhost:11434", api_key="secret") == [
         ("llama3.2:latest", "llama, 2.0 GB")
@@ -210,7 +219,7 @@ def test_cli_onboard_agent_model_configures_ollama_cloud_credential(tmp_path, ca
         assert api_key == "cloud-secret"
         return [("minimax-m2.7:cloud", "cloud")]
 
-    monkeypatch.setattr("maurice.host.cli._ollama_model_choices", fake_choices)
+    monkeypatch.setattr("maurice.host.commands.onboard._ollama_model_choices", fake_choices)
     answers = iter(["ollama", "cloud", "https://ollama.com", "ollama_cloud", "cloud-secret", "1"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
@@ -255,7 +264,7 @@ def test_run_one_turn_uses_agent_model_name(tmp_path, capsys, monkeypatch) -> No
         def run_turn(self, **_kwargs):
             return None
 
-    monkeypatch.setattr("maurice.host.cli.AgentLoop", FakeAgentLoop)
+    monkeypatch.setattr("maurice.host.runtime.AgentLoop", FakeAgentLoop)
 
     run_one_turn(
         workspace_root=workspace,
@@ -357,9 +366,9 @@ credentials:
         encoding="utf-8",
     )
     calls = []
-    monkeypatch.setattr("maurice.host.cli._telegram_bot_username", lambda _token: "test_bot")
+    monkeypatch.setattr("maurice.host.telegram._telegram_bot_username", lambda _token: "test_bot")
     monkeypatch.setattr(
-        "maurice.host.cli._telegram_get_updates",
+        "maurice.host.commands.gateway_server._telegram_get_updates",
         lambda _token, offset=None, timeout_seconds=0: [
             {
                 "update_id": 7,
@@ -372,12 +381,13 @@ credentials:
             }
         ],
     )
+    # _telegram_send_chat_action is called inside telegram.py's _telegram_start_chat_action thread
     monkeypatch.setattr(
-        "maurice.host.cli._telegram_send_chat_action",
+        "maurice.host.telegram._telegram_send_chat_action",
         lambda token, chat_id, action="typing": calls.append(("action", token, chat_id, action)),
     )
     monkeypatch.setattr(
-        "maurice.host.cli._telegram_send_message",
+        "maurice.host.commands.gateway_server._telegram_send_message",
         lambda token, chat_id, text: calls.append(("message", token, chat_id, text)),
     )
 
@@ -385,7 +395,8 @@ credentials:
     output = capsys.readouterr().out
 
     assert "Telegram poll complete: 1 message(s) routed." in output
-    assert calls[0] == ("action", "test-token", 222, "typing")
+    # chat action fires in a background thread — verify message was sent
+    assert any(c[0] == "message" for c in calls)
     assert calls[-1] == ("message", "test-token", 222, "Mock response: salut")
     assert (workspace / "agents" / "main" / "telegram.offset").read_text(encoding="utf-8") == "8\n"
 
@@ -423,9 +434,9 @@ credentials:
         secret_type="token",
     )
     calls = []
-    monkeypatch.setattr("maurice.host.cli._telegram_bot_username", lambda _token: "test_bot")
+    monkeypatch.setattr("maurice.host.telegram._telegram_bot_username", lambda _token: "test_bot")
     monkeypatch.setattr(
-        "maurice.host.cli._telegram_get_updates",
+        "maurice.host.commands.gateway_server._telegram_get_updates",
         lambda _token, offset=None, timeout_seconds=0: [
             {
                 "update_id": 7,
@@ -439,11 +450,11 @@ credentials:
         ],
     )
     monkeypatch.setattr(
-        "maurice.host.cli._telegram_send_chat_action",
+        "maurice.host.telegram._telegram_send_chat_action",
         lambda token, chat_id, action="typing": calls.append(("action", token, chat_id, action)),
     )
     monkeypatch.setattr(
-        "maurice.host.cli._telegram_send_message",
+        "maurice.host.commands.gateway_server._telegram_send_message",
         lambda token, chat_id, text: calls.append(("message", token, chat_id, text)),
     )
 
@@ -462,7 +473,7 @@ def test_cli_start_reports_no_services_when_disabled(tmp_path, capsys) -> None:
     main(["onboard", "--workspace", str(workspace)])
     capsys.readouterr()
 
-    assert main(["start", "--workspace", str(workspace), "--no-telegram", "--no-scheduler"]) == 0
+    assert main(["start", "--workspace", str(workspace), "--no-telegram", "--no-scheduler", "--no-gateway"]) == 0
 
     assert "No Maurice services to start." in capsys.readouterr().out
     assert not (workspace / "maurice.pid").exists()
@@ -486,8 +497,8 @@ def test_cli_start_daemon_spawns_foreground_command(tmp_path, capsys, monkeypatc
         (workspace / "maurice.pid").write_text("12345\n", encoding="utf-8")
         return FakeProcess()
 
-    monkeypatch.setattr("maurice.host.cli.subprocess.Popen", fake_popen)
-    monkeypatch.setattr("maurice.host.cli._pid_is_running", lambda pid: pid == 12345)
+    monkeypatch.setattr("maurice.host.commands.service.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("maurice.host.commands.service._pid_is_running", lambda pid: pid == 12345)
 
     assert main(["start", "--workspace", str(workspace), "--no-telegram"]) == 0
     output = capsys.readouterr().out
@@ -506,6 +517,44 @@ def test_cli_stop_reports_not_running(tmp_path, capsys) -> None:
     assert main(["stop", "--workspace", str(workspace)]) == 0
 
     assert "Maurice is not running." in capsys.readouterr().out
+
+
+def test_cli_restart_stops_then_starts_daemon(tmp_path, capsys, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace)])
+    capsys.readouterr()
+    (workspace / "maurice.pid").write_text("111\n", encoding="utf-8")
+    killed = []
+    started = {}
+
+    class FakeProcess:
+        pid = 222
+
+        def poll(self):
+            return None
+
+    def fake_kill(pid, sig):
+        killed.append((pid, sig))
+
+    def fake_popen(command, **kwargs):
+        started["command"] = command
+        started["kwargs"] = kwargs
+        (workspace / "maurice.pid").write_text("222\n", encoding="utf-8")
+        return FakeProcess()
+
+    monkeypatch.setattr("maurice.host.commands.service.os.kill", fake_kill)
+    monkeypatch.setattr("maurice.host.commands.service.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("maurice.host.commands.service._pid_is_running", lambda pid: pid in {111, 222})
+    monkeypatch.setattr("maurice.host.commands.service._wait_for_stop", lambda _path, _pid: (workspace / "maurice.pid").unlink())
+
+    assert main(["restart", "--workspace", str(workspace), "--no-telegram"]) == 0
+    output = capsys.readouterr().out
+
+    assert killed and killed[0][0] == 111
+    assert "Stop requested for Maurice pid 111." in output
+    assert "Maurice started in background with pid 222." in output
+    assert "--no-telegram" in started["command"]
+    assert started["kwargs"]["start_new_session"] is True
 
 
 def test_cli_logs_alias_reads_service_logs(tmp_path, capsys) -> None:
@@ -1312,6 +1361,77 @@ def test_cli_scheduler_runs_due_dream_job(tmp_path, capsys) -> None:
     assert "dreaming.run" in run_output
     assert "completed" in run_output
     assert list((workspace / "content" / "dreams").glob("dream_*.json"))
+
+
+def test_cli_scheduler_configure_updates_automation_times(tmp_path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
+
+    assert (
+        main(
+            [
+                "scheduler",
+                "configure",
+                "--workspace",
+                str(workspace),
+                "--dream-time",
+                "8h45",
+                "--daily-time",
+                "10:15",
+            ]
+        )
+        == 0
+    )
+
+    bundle = load_workspace_config(workspace)
+    output = capsys.readouterr().out
+    assert "dreaming on at 08:45" in output
+    assert bundle.kernel.scheduler.dreaming_time == "08:45"
+    assert bundle.kernel.scheduler.daily_time == "10:15"
+
+
+def test_scheduler_defaults_create_dream_and_daily_jobs(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
+
+    _ensure_configured_scheduler_jobs(workspace, "main")
+
+    jobs = JobStore(workspace / "agents" / "main" / "jobs.json").list(status=JobStatus.SCHEDULED)
+    by_kind = {job.payload.get("kind"): job for job in jobs}
+    assert by_kind["system.dreaming.daily"].name == "dreaming.run"
+    assert by_kind["system.dreaming.daily"].payload["time"] == "09:00"
+    assert by_kind["system.daily.digest"].name == "daily.digest"
+    assert by_kind["system.daily.digest"].payload["time"] == "09:30"
+    assert by_kind["system.daily.digest"].interval_seconds == 86400
+
+
+def test_daily_digest_delivers_to_configured_telegram_chats(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
+    host_path = host_config_path(workspace)
+    host_data = read_yaml_file(host_path)
+    host_data["host"]["channels"]["telegram"] = {
+        "adapter": "telegram",
+        "enabled": True,
+        "agent": "main",
+        "credential": "telegram_bot",
+        "allowed_users": [123],
+        "allowed_chats": [123, 456],
+    }
+    write_yaml_file(host_path, host_data)
+    sent = []
+    monkeypatch.setattr("maurice.host.delivery._credential_value", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr("maurice.host.delivery._telegram_send_message", lambda token, chat_id, text: sent.append((token, chat_id, text)))
+
+    _deliver_daily_digest(
+        workspace,
+        {"agent_id": "main", "session_id": "daily"},
+        "Bonjour, voici ton daily Maurice.",
+    )
+
+    assert [item[1] for item in sent] == [123, 456]
+    session = SessionStore(workspace / "sessions").load("main", "daily")
+    assert session.messages[-1].content == "Bonjour, voici ton daily Maurice."
 
 
 def test_cli_gateway_local_message_routes_through_runtime(tmp_path, capsys) -> None:
