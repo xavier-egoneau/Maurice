@@ -56,5 +56,6 @@ backend: null
 storage: null
 dreams:
   attachment: dreams.md
+  input_builder: maurice.system_skills.dev.commands.build_dream_input
 events:
   state_publisher: null

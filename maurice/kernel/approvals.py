@@ -147,6 +147,48 @@ class ApprovalStore:
     def deny(self, approval_id: str) -> PendingApproval:
         return self.resolve(approval_id, PendingApprovalStatus.DENIED)
 
+    def remember(
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        tool_name: str,
+        permission_class: PermissionClass | str,
+        scope: dict,
+        arguments: dict,
+        ttl_seconds: int = 600,
+    ) -> None:
+        """Record an already-approved action so it can be replayed without re-asking."""
+        hashed_arguments = arguments_hash(arguments)
+        approval = PendingApproval(
+            id=new_approval_id(),
+            agent_id=agent_id,
+            session_id=session_id,
+            correlation_id="callback",
+            tool_name=tool_name,
+            permission_class=PermissionClass(permission_class),
+            scope=scope,
+            arguments_hash=hashed_arguments,
+            summary=f"Approved via callback: {tool_name}",
+            reason="User approved interactively.",
+            created_at=utc_now(),
+            expires_at=utc_now() + timedelta(seconds=ttl_seconds),
+            rememberable=True,
+            status=PendingApprovalStatus.APPROVED,
+        )
+        envelope = ApprovalEnvelope(
+            approval=approval,
+            replay_fingerprint=replay_fingerprint(
+                permission_class=approval.permission_class,
+                scope=approval.scope,
+                tool_name=approval.tool_name,
+                arguments_hash_value=approval.arguments_hash,
+            ),
+        )
+        state = self._load()
+        state.approvals.append(envelope)
+        self._save(state)
+
     def list(self, *, status: PendingApprovalStatus | str | None = None) -> list[PendingApproval]:
         approvals = [envelope.approval for envelope in self._load().approvals]
         if status is None:

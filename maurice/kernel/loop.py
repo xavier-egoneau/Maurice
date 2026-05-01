@@ -36,6 +36,9 @@ from maurice.kernel.session import SessionMessage, SessionRecord, SessionStore
 from maurice.kernel.skills import SkillRegistry
 
 ToolExecutor = Callable[[dict[str, Any]], ToolResult | dict[str, Any]]
+ApprovalCallback = Callable[[str, dict[str, Any], str, str], bool]  # tool, args, class, reason → approved
+TextDeltaCallback = Callable[[str], None]
+ToolStartedCallback = Callable[[str, dict[str, Any]], None]  # tool_name, arguments
 
 
 @dataclass
@@ -46,10 +49,35 @@ class TurnResult:
     tool_results: list[ToolResult]
     status: str
     error: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class ToolExecutionError(RuntimeError):
     pass
+
+
+def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove tool results that have no matching tool call (orphaned after interrupted turns)."""
+    # Collect all tool call ids from kernel-recorded tool_call messages
+    tool_call_ids: set[str] = set()
+    for msg in messages:
+        meta = msg.get("metadata") or {}
+        if msg.get("role") == "assistant" and meta.get("tool_call"):
+            call_id = meta.get("tool_call_id")
+            if call_id:
+                tool_call_ids.add(call_id)
+
+    result = []
+    for msg in messages:
+        meta = msg.get("metadata") or {}
+        # Drop orphaned tool results (no matching tool call in history)
+        if msg.get("role") == "tool":
+            call_id = meta.get("tool_call_id")
+            if call_id and tool_call_ids and call_id not in tool_call_ids:
+                continue
+        result.append(msg)
+    return result
 
 
 class AgentLoop:
@@ -68,6 +96,9 @@ class AgentLoop:
         system_prompt: str = "",
         compaction_config: CompactionConfig | None = None,
         classifier: Classifier | None = None,
+        approval_callback: ApprovalCallback | None = None,
+        text_delta_callback: TextDeltaCallback | None = None,
+        tool_started_callback: ToolStartedCallback | None = None,
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -81,6 +112,9 @@ class AgentLoop:
         self.system_prompt = system_prompt
         self.compaction_config = compaction_config
         self.classifier = classifier
+        self.approval_callback = approval_callback
+        self.text_delta_callback = text_delta_callback
+        self.tool_started_callback = tool_started_callback
 
     def run_turn(
         self,
@@ -123,6 +157,8 @@ class AgentLoop:
         status = "completed"
         provider_error: str | None = None
         max_tool_iterations = _max_tool_iterations(limits)
+        total_input_tokens = 0
+        total_output_tokens = 0
         try:
             for iteration in range(max_tool_iterations):
                 iteration_text = ""
@@ -137,8 +173,25 @@ class AgentLoop:
                     chunk = ProviderChunk.model_validate(chunk)
                     if chunk.type == ProviderChunkType.TEXT_DELTA:
                         iteration_text += chunk.delta
+                        if self.text_delta_callback is not None:
+                            self.text_delta_callback(chunk.delta)
                         continue
                     if chunk.type == ProviderChunkType.TOOL_CALL and chunk.tool_call is not None:
+                        # Record the tool call in session so providers can include
+                        # the matching function_call before the function_call_output.
+                        self.session_store.append_message(
+                            agent_id,
+                            session.id,
+                            role="assistant",
+                            content="",
+                            correlation_id=correlation_id,
+                            metadata={
+                                "tool_call": True,
+                                "tool_call_id": chunk.tool_call.id,
+                                "tool_name": chunk.tool_call.name,
+                                "tool_arguments": chunk.tool_call.arguments,
+                            },
+                        )
                         iteration_tool_results.append(
                             self._handle_tool_call(
                                 chunk.tool_call,
@@ -147,6 +200,10 @@ class AgentLoop:
                                 correlation_id=correlation_id,
                             )
                         )
+                        continue
+                    if chunk.type == ProviderChunkType.USAGE and chunk.usage is not None:
+                        total_input_tokens += chunk.usage.input_tokens
+                        total_output_tokens += chunk.usage.output_tokens
                         continue
                     if chunk.type == ProviderChunkType.STATUS and chunk.status == ProviderStatus.FAILED:
                         status = "failed"
@@ -220,6 +277,14 @@ class AgentLoop:
         )
         if internal_message:
             self._remove_internal_messages(agent_id, session.id, correlation_id)
+        # Fall back to character-based estimation if provider didn't report usage
+        if not total_input_tokens:
+            from maurice.kernel.compaction import estimate_tokens
+            msgs = self._provider_messages(agent_id, session.id)
+            total_input_tokens = estimate_tokens(msgs, self._system_prompt())
+        if not total_output_tokens:
+            total_output_tokens = len(assistant_text) // 4
+
         return TurnResult(
             session=self.session_store.load(agent_id, session.id),
             correlation_id=correlation_id,
@@ -227,6 +292,8 @@ class AgentLoop:
             tool_results=tool_results,
             status=status,
             error=provider_error,
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
         )
 
     def _handle_tool_call(
@@ -298,28 +365,51 @@ class AgentLoop:
                         arguments=tool_call.arguments,
                     )
                 if approved is None:
-                    if self.approval_store is not None:
-                        self.approval_store.request(
-                            agent_id=agent_id,
-                            session_id=session_id,
-                            correlation_id=correlation_id,
-                            tool_name=declaration.name,
-                            permission_class=declaration.permission.permission_class,
-                            scope=self._requested_permission_scope(declaration, tool_call),
-                            arguments=tool_call.arguments,
-                            summary=f"Approve {declaration.name}",
-                            reason=evaluation.reason,
-                            rememberable=evaluation.rememberable,
+                    if self.approval_callback is not None:
+                        approved = self.approval_callback(
+                            declaration.name,
+                            tool_call.arguments,
+                            declaration.permission.permission_class,
+                            evaluation.reason,
                         )
-                    result = self._failed_tool_result(
-                        f"Autorisation requise pour {declaration.name}. Reponds `ok` pour approuver ou `non` pour refuser.",
-                        code="approval_required",
-                        retryable=True,
-                    )
-                    self._record_tool_result(
-                        tool_call, result, agent_id, session_id, correlation_id
-                    )
-                    return result
+                        if approved and self.approval_store is not None and evaluation.rememberable:
+                            self.approval_store.remember(
+                                agent_id=agent_id,
+                                session_id=session_id,
+                                tool_name=declaration.name,
+                                permission_class=declaration.permission.permission_class,
+                                scope=self._requested_permission_scope(declaration, tool_call),
+                                arguments=tool_call.arguments,
+                            )
+                        if not approved:
+                            result = self._failed_tool_result(
+                                f"{declaration.name} refusé.",
+                                code="approval_denied",
+                                retryable=False,
+                            )
+                            self._record_tool_result(tool_call, result, agent_id, session_id, correlation_id)
+                            return result
+                    else:
+                        if self.approval_store is not None:
+                            self.approval_store.request(
+                                agent_id=agent_id,
+                                session_id=session_id,
+                                correlation_id=correlation_id,
+                                tool_name=declaration.name,
+                                permission_class=declaration.permission.permission_class,
+                                scope=self._requested_permission_scope(declaration, tool_call),
+                                arguments=tool_call.arguments,
+                                summary=f"Approve {declaration.name}",
+                                reason=evaluation.reason,
+                                rememberable=evaluation.rememberable,
+                            )
+                        result = self._failed_tool_result(
+                            f"Autorisation requise pour {declaration.name}. Reponds `ok` pour approuver ou `non` pour refuser.",
+                            code="approval_required",
+                            retryable=True,
+                        )
+                        self._record_tool_result(tool_call, result, agent_id, session_id, correlation_id)
+                        return result
 
         self.event_store.emit(
             name="tool.started",
@@ -330,6 +420,8 @@ class AgentLoop:
             correlation_id=correlation_id,
             payload={"tool_name": declaration.name},
         )
+        if self.tool_started_callback is not None:
+            self.tool_started_callback(declaration.name, tool_call.arguments)
         result = self._execute_tool(declaration, tool_call)
         self._record_tool_result(tool_call, result, agent_id, session_id, correlation_id)
         return result
@@ -585,7 +677,7 @@ class AgentLoop:
 
     def _provider_messages(self, agent_id: str, session_id: str) -> list[dict[str, Any]]:
         session = self.session_store.load(agent_id, session_id)
-        return [
+        messages = [
             {
                 "role": message.role,
                 "content": message.content,
@@ -593,6 +685,7 @@ class AgentLoop:
             }
             for message in session.messages
         ]
+        return _sanitize_messages(messages)
 
     def _system_prompt(self) -> str:
         fragments = [
@@ -672,8 +765,11 @@ def _host_from_url(value: Any) -> str | None:
     return urlparse(value).hostname
 
 
+_DEFAULT_MAX_TOOL_ITERATIONS = 10
+
+
 def _max_tool_iterations(limits: dict[str, Any] | None) -> int:
-    raw = (limits or {}).get("max_tool_iterations", 1)
+    raw = (limits or {}).get("max_tool_iterations", _DEFAULT_MAX_TOOL_ITERATIONS)
     if not isinstance(raw, int):
-        return 1
+        return _DEFAULT_MAX_TOOL_ITERATIONS
     return max(1, min(raw, 100))

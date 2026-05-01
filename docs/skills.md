@@ -1,0 +1,186 @@
+# Skills
+
+A skill is a directory containing a `skill.yaml` manifest and optional Python modules.
+Skills are the only way to add capabilities to the agent.
+
+## Directory layout
+
+```
+my_skill/
+  skill.yaml       — manifest (required)
+  tools.py         — tool executors (if the skill declares tools)
+  commands.py      — slash command handlers (if the skill declares commands)
+  prompt.md        — prompt fragment injected each turn (optional)
+  dreams.md        — dream context injected during dreaming sessions (optional)
+```
+
+## skill.yaml
+
+Minimal example:
+
+```yaml
+name: my_skill
+version: 0.1.0
+origin: user          # "system" | "user"
+mutable: true
+required: false
+description: What this skill does.
+config_namespace: skills.my_skill
+
+requires:
+  binaries: []        # system binaries that must be present (e.g. git)
+  credentials: []     # credential names required
+
+dependencies:
+  skills: []          # skills that must be loaded first
+  optional_skills: [] # skills used if present
+
+permissions: []       # permission classes this skill may use (informational)
+
+tools: []             # list of ToolDeclaration objects (see below)
+commands: []          # list of CommandDeclaration objects (see below)
+
+tools_module: my_package.my_skill.tools  # module with build_executors(ctx)
+
+backend: null
+storage: null
+
+dreams:
+  attachment: dreams.md
+  input_builder: null  # optional: dotted path to a function(ctx) -> str
+
+events:
+  state_publisher: null
+```
+
+## Tool declarations
+
+Each entry under `tools:` is a `ToolDeclaration`:
+
+```yaml
+tools:
+  - name: my_skill.do_something
+    description: What the tool does (shown to the model).
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+      required: ["path"]
+    permission_class: fs.read     # one of the PermissionClass values
+    permission_scope:
+      paths: ["$workspace/**"]
+    trust:
+      input: local_mutable        # trusted | local_mutable | external_untrusted | skill_generated
+      output: local_mutable
+    executor: my_package.my_skill.tools.do_something  # dotted path (legacy) or use tools_module
+```
+
+**Permission classes:** `fs.read`, `fs.write`, `network.outbound`, `shell.exec`,
+`secret.read`, `agent.spawn`, `host.control`, `runtime.write`.
+
+## Tool executors
+
+The recommended pattern is `tools_module` + `build_executors`:
+
+```python
+# my_skill/tools.py
+
+def build_executors(ctx):          # ctx is SkillContext
+    return {
+        "my_skill.do_something": lambda args: _do_something(args, ctx),
+    }
+
+def _do_something(args, ctx):
+    from maurice.kernel.contracts import ToolResult, TrustLabel
+    # ... do work ...
+    return ToolResult(
+        ok=True,
+        summary="Done.",
+        data={"result": "..."},
+        trust=TrustLabel.LOCAL_MUTABLE,
+        artifacts=[], events=[], error=None,
+    )
+```
+
+`SkillContext` fields available in `build_executors`:
+
+| Field | Type | Description |
+|---|---|---|
+| `permission_context` | `PermissionContext` | Workspace/runtime root paths and scope variables |
+| `event_store` | `EventStore` | Emit events |
+| `skill_config` | `dict` | Config for this skill from `skills.yaml` |
+| `all_skill_configs` | `dict` | All skill configs |
+| `skill_roots` | `list` | Skill root paths |
+| `enabled_skills` | `list[str]` | Currently enabled skill names |
+| `agent_id` | `str` | Current agent id |
+| `session_id` | `str \| None` | Current session id |
+| `extra` | `dict` | Host-provided callbacks (e.g. `schedule_reminder`, `cancel_job`) |
+
+## Command declarations
+
+Commands are slash commands dispatched by the host (not by the model).
+
+```yaml
+commands:
+  - name: /my_command
+    description: What the command does.
+    handler: my_package.my_skill.commands.my_command
+    renderer: markdown    # "markdown" | "plain"
+```
+
+Handler signature:
+
+```python
+from maurice.host.command_registry import CommandContext, CommandResult
+
+def my_command(ctx: CommandContext) -> CommandResult:
+    text = ctx.message_text            # full message e.g. "/my_command arg1 arg2"
+    workspace = ctx.workspace_root     # Path
+    agent_id = ctx.agent_id
+    session_id = ctx.session_id
+    return CommandResult(text="Response text", format="markdown")
+```
+
+To delegate to the LLM, return an `agent_prompt` in metadata:
+
+```python
+return CommandResult(
+    text="Working on it...",
+    metadata={
+        "agent_prompt": "You are a planning assistant. Write a PLAN.md ...",
+        "agent_limits": {"max_tool_iterations": 8},
+    },
+)
+```
+
+## Skill roots
+
+Skill roots are configured in `host.yaml`:
+
+```yaml
+skill_roots:
+  - path: /path/to/runtime/system_skills
+    origin: system
+    mutable: false
+  - path: /path/to/workspace/skills
+    origin: user
+    mutable: true
+```
+
+`SkillLoader` discovers skills from all roots in order. User skills override system skills with the same name.
+
+## System skills
+
+| Name | Key capability |
+|---|---|
+| `filesystem` | read/write/list/move files in the workspace |
+| `memory` | semantic notes persisted across sessions |
+| `web` | HTTP fetch + search |
+| `vision` | image description |
+| `reminders` | schedule one-off reminders |
+| `dreaming` | background LLM reflection runs |
+| `self_update` | propose changes to the runtime (proposal-only) |
+| `skills` | inspect and author skills |
+| `host` | inspect host state (processes, dashboard data) |
+| `dev` | project-scoped development workflow (`/plan`, `/dev`, `/commit`, …) |

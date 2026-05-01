@@ -569,6 +569,20 @@ def _to_chatgpt_input(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]
         role = message.get("role") or "user"
         metadata = message.get("metadata") or {}
         content = message.get("content") or ""
+
+        # Tool call recorded by the kernel loop (must precede function_call_output)
+        if role == "assistant" and metadata.get("tool_call"):
+            import json as _json
+            args = metadata.get("tool_arguments") or {}
+            raw_name = metadata.get("tool_name") or ""
+            result.append({
+                "type": "function_call",
+                "call_id": metadata.get("tool_call_id") or "",
+                "name": _safe_tool_name(raw_name),   # must match the declared safe name
+                "arguments": _json.dumps(args) if isinstance(args, dict) else str(args),
+            })
+            continue
+
         if role == "tool":
             result.append(
                 {
@@ -578,14 +592,16 @@ def _to_chatgpt_input(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]
                 }
             )
             continue
+
         content_type = "output_text" if role == "assistant" else "input_text"
-        result.append(
-            {
-                "type": "message",
-                "role": role,
-                "content": [{"type": content_type, "text": content}],
-            }
-        )
+        if content:
+            result.append(
+                {
+                    "type": "message",
+                    "role": role,
+                    "content": [{"type": content_type, "text": content}],
+                }
+            )
     return result
 
 

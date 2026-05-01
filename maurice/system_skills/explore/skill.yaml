@@ -1,0 +1,103 @@
+name: explore
+version: 0.1.0
+origin: system
+mutable: false
+required: false
+description: Project exploration — tree view, content search, and smart project summary.
+config_namespace: skills.explore
+requires:
+  binaries: []
+  credentials: []
+dependencies:
+  skills: []
+  optional_skills: []
+permissions:
+  - class: fs.read
+    scope:
+      paths:
+        - "$workspace/**"
+tools:
+  - name: explore.tree
+    description: >
+      Return a directory tree. Use this instead of filesystem.list when you need
+      to understand the structure of a project at a glance. Respects depth and
+      filters out noise (build artifacts, caches, hidden dirs).
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Directory to explore (relative to project root or absolute).
+        depth:
+          type: integer
+          description: Max depth (default 3, max 6).
+        include_hidden:
+          type: boolean
+          description: Include hidden files and directories (default false).
+      required: ["path"]
+    permission_class: fs.read
+    permission_scope:
+      paths: ["$workspace/**"]
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: explore.tree
+
+  - name: explore.grep
+    description: >
+      Search for a pattern in files under a directory. Returns matching file
+      paths and surrounding lines. Use this to locate a function, class,
+      variable, or any text across the codebase.
+    input_schema:
+      type: object
+      properties:
+        pattern:
+          type: string
+          description: Text or regex pattern to search for.
+        path:
+          type: string
+          description: Directory or file to search in.
+        file_pattern:
+          type: string
+          description: Glob to filter files (e.g. "*.py", "*.ts"). Default is all text files.
+        max_results:
+          type: integer
+          description: Max number of matching lines to return (default 40).
+      required: ["pattern", "path"]
+    permission_class: fs.read
+    permission_scope:
+      paths: ["$workspace/**"]
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: explore.grep
+
+  - name: explore.summary
+    description: >
+      Read the key project files and return a structured summary: project type,
+      dependencies, entry points, description, and top-level structure.
+      Call this first when asked to "understand", "take stock of", or
+      "get familiar with" a project. One call replaces many filesystem.list
+      and filesystem.read calls.
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Project root directory.
+      required: ["path"]
+    permission_class: fs.read
+    permission_scope:
+      paths: ["$workspace/**"]
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: explore.summary
+
+tools_module: maurice.system_skills.explore.tools
+backend: null
+storage: null
+dreams:
+  attachment: null
+events:
+  state_publisher: null

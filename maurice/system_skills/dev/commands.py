@@ -11,7 +11,7 @@ from pathlib import Path
 from maurice.host.command_registry import CommandContext, CommandResult
 from maurice.kernel.contracts import DreamInput
 from maurice.kernel.permissions import PermissionContext
-from maurice.system_skills.dev.planner import PLAN_WIZARD_FILE, start_plan_wizard
+from maurice.system_skills.dev.planner import PLAN_WIZARD_FILE
 
 
 STATE_FILE = ".dev_state.json"
@@ -20,6 +20,10 @@ GUIDANCE_FILES = ("AGENTS.md", "PLAN.md", "DECISIONS.md")
 
 
 def projects(context: CommandContext) -> CommandResult:
+    # CLI mode: the current directory IS the project
+    if context.callbacks.get("project_root"):
+        project_root = Path(context.callbacks["project_root"]).resolve()
+        return _result(f"Projet actif : `{project_root.name}`\n\n`{project_root}`")
     content = _content_root(context)
     project_dirs = sorted(path.name for path in content.iterdir() if path.is_dir() and not path.name.startswith("."))
     if not project_dirs:
@@ -65,19 +69,18 @@ def plan(context: CommandContext) -> CommandResult:
             _ensure_project_files(path)
         content = _read_excerpt(plan_path)
         return _result(f"Plan du projet `{path.name}` :\n\n```markdown\n{content}\n```")
-    plan_path = _guidance_path(path, "PLAN.md")
     _ensure_project_files(path)
-    text = start_plan_wizard(
-        store_path=_plan_wizard_store_path(context),
-        project_path=path,
-        agent_id=context.agent_id,
-        session_id=context.session_id,
-        initial_expectations=args,
-    )
+    meta = _meta_root(path)
+    plan_path = meta / "PLAN.md"
+    decisions_path = meta / "DECISIONS.md"
+    pitch = args.strip()
     return _result(
-        f"{text}\n\n"
-        f"Le plan sera ecrit dans `{plan_path}`. "
-        "Pour seulement le relire : `/plan show`."
+        f"Je cadre le projet `{path.name}`...",
+        metadata={
+            "command": "/plan",
+            "agent_prompt": _plan_agent_prompt(path, pitch, plan_path, decisions_path),
+            "agent_limits": {"max_tool_iterations": 8},
+        },
     )
 
 
@@ -207,9 +210,50 @@ def commit(context: CommandContext) -> CommandResult:
     path = _active_project_path(context)
     if path is None:
         return _no_project()
+    if not _inside_git_repo(path):
+        return _result(
+            f"Le projet `{path.name}` n'est pas dans un depot Git.\n\n"
+            "Initialise un depot avec `git init` dans le dossier projet."
+        )
+    status = _git_short_status(path)
+    if not status:
+        return _result(f"Rien a commiter dans `{path.name}`. Le depot est propre.")
+    diff_stat = _git_diff_stat(path)
+    plan_path = _guidance_path(path, "PLAN.md")
+    done_tasks = _done_tasks(plan_path) if plan_path.exists() else []
+    context_block = "\n".join([
+        f"Projet : {path.name}",
+        f"Racine Git : {path}",
+        "",
+        "Fichiers modifies :",
+        status,
+        "",
+        f"Stats : {diff_stat}" if diff_stat else "",
+    ]).strip()
+    tasks_block = ""
+    if done_tasks:
+        tasks_block = "\nTaches recemment cochees dans PLAN.md :\n" + "\n".join(f"- {t}" for t in done_tasks[-5:])
     return _result(
-        f"Projet actif : `{path.name}`.\n\n"
-        "Preparation de commit a venir avec l'integration git du skill dev."
+        f"Preparation du commit pour `{path.name}`.",
+        metadata={
+            "command": "/commit",
+            "agent_prompt": (
+                "Commande interne `/commit` : prepare et execute un commit Git pour le projet actif.\n\n"
+                f"{context_block}{tasks_block}\n\n"
+                "Instructions :\n"
+                "1. Redige un message de commit concis en anglais (max 72 chars pour la premiere ligne).\n"
+                "   Format : `type: sujet court` ou `type(scope): sujet court`.\n"
+                "   Types acceptes : feat, fix, refactor, docs, test, chore.\n"
+                "   La description doit exprimer le POURQUOI, pas seulement le quoi.\n"
+                "2. Utilise `shell.exec` pour executer :\n"
+                f"   `git -C {path} add -A`\n"
+                f"   `git -C {path} commit -m \"<ton message>\"`\n"
+                "3. Reporte le resultat du commit (hash, fichiers, message utilise).\n"
+                "4. Si le commit echoue (hooks, rien a commiter, erreur), explique pourquoi et propose la correction.\n\n"
+                "Ne coche pas les taches dans PLAN.md — elles sont deja cochees si elles figurent dans la liste ci-dessus."
+            ),
+            "agent_limits": {"max_tool_iterations": 6},
+        },
     )
 
 
@@ -230,9 +274,6 @@ def _content_root(context: CommandContext) -> Path:
 def _state_path(context: CommandContext) -> Path:
     return _content_root(context).parent / STATE_FILE
 
-
-def _plan_wizard_store_path(context: CommandContext) -> Path:
-    return _content_root(context).parent / PLAN_WIZARD_FILE
 
 
 def _read_state(context: CommandContext) -> dict[str, str]:
@@ -258,6 +299,12 @@ def _active_project(context: CommandContext) -> str:
 
 
 def _active_project_path(context: CommandContext) -> Path | None:
+    # CLI mode: project_root callback points directly to the working directory
+    project_root = context.callbacks.get("project_root")
+    if project_root:
+        path = Path(project_root).expanduser().resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
     active = _active_project(context)
     if not active:
         return None
@@ -332,10 +379,6 @@ def _done_tasks(plan_path: Path) -> list[str]:
     return tasks
 
 
-def _is_parallelizable_task(task: str) -> bool:
-    normalized = task.lower()
-    return "[ paralle" in normalized and "non paralle" not in normalized
-
 
 def _recent_decisions(decisions_path: Path, *, limit: int = 5) -> list[str]:
     if not decisions_path.exists():
@@ -367,6 +410,34 @@ def _git_status(path: Path) -> list[str]:
     if not rows:
         return ["- Aucun changement Git detecte."]
     return ["```text", *rows[:80], "```"]
+
+
+def _git_short_status(path: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "status", "--short"],
+            check=False, capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _git_diff_stat(path: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "diff", "--cached", "--stat", "HEAD"],
+            check=False, capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            result = subprocess.run(
+                ["git", "-C", str(path), "diff", "--stat"],
+                check=False, capture_output=True, text=True, timeout=3,
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    lines = result.stdout.strip().splitlines()
+    return lines[-1].strip() if lines else ""
 
 
 def _inside_git_repo(path: Path) -> bool:
@@ -416,6 +487,51 @@ def _project_name(value: str) -> str:
 
 def _no_project() -> CommandResult:
     return _result("Aucun projet actif. Utilise `/projects` puis `/project open <nom>`.")
+
+
+def _plan_agent_prompt(
+    project_path: Path,
+    pitch: str,
+    plan_path: Path,
+    decisions_path: Path,
+) -> str:
+    existing_plan = _read_excerpt(plan_path, limit=1200) if plan_path.exists() else ""
+    existing_decisions = _read_excerpt(decisions_path, limit=600) if decisions_path.exists() else ""
+    pitch_block = f'Pitch utilisateur : "{pitch}"' if pitch else "Aucun pitch fourni — demande a l'utilisateur ce qu'il veut faire."
+    existing_block = ""
+    if existing_plan:
+        existing_block = f"\nPlan existant :\n```markdown\n{existing_plan}\n```\n"
+    if existing_decisions:
+        existing_block += f"\nDecisions existantes :\n```markdown\n{existing_decisions}\n```\n"
+
+    return (
+        "Commande interne `/plan` : cadre le projet et ecris le plan de developpement.\n\n"
+        f"Projet : {project_path.name}\n"
+        f"Dossier : {project_path}\n"
+        f"Fichier plan : {plan_path}\n"
+        f"Fichier decisions : {decisions_path}\n"
+        f"{pitch_block}\n"
+        f"{existing_block}\n"
+        "Ta mission en 4 etapes :\n\n"
+        "1. **Critique** : identifie les risques, les zones floues, les choix techniques implicites.\n"
+        "   Sois precis — pas de critique generique. Adapte-toi au pitch et au contexte du projet.\n\n"
+        "2. **Approche** : propose une approche concrete et une stack technique adaptee.\n"
+        "   Si le projet a deja une stack, lis les fichiers existants avant de proposer.\n"
+        "   Justifie brievement les choix techniques importants.\n\n"
+        "3. **Plan** : propose des taches ordonnees logiquement.\n"
+        "   Chaque tache doit :\n"
+        "   - etre concrete et produire un resultat verifiable\n"
+        "   - etre marquee `[ parallellisable ]` si elle peut se faire en parallele d'une autre\n"
+        "   - etre marquee `[ non parallellisable ]` si elle bloque les suivantes\n"
+        "   Format : `- [ ] Description de la tache. [ parallellisable ]`\n\n"
+        "4. **Validation** : presente ta critique, ton approche et tes taches a l'utilisateur.\n"
+        "   Demande : 'Tu valides ? Reponds `oui` pour ecrire les fichiers ou indique ce qu'il faut ajuster.'\n"
+        "   Si l'utilisateur valide :\n"
+        f"   - Ecris `{plan_path}` avec la structure : # Plan > ## Objectif > ## Approche > ## Taches\n"
+        f"   - Ecris `{decisions_path}` avec la structure : # Decisions > une ligne par decision cle\n"
+        "   Si l'utilisateur demande des ajustements, integre-les et represente.\n\n"
+        "Ne cree pas les fichiers avant la validation explicite de l'utilisateur."
+    )
 
 
 def _dev_execution_prompt(project_path: Path, open_tasks: list[str]) -> str:

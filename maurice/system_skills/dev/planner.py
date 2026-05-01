@@ -29,29 +29,6 @@ class PlanWizardStore(MauriceModel):
     sessions: dict[str, PlanWizardState] = Field(default_factory=dict)
 
 
-def start_plan_wizard(
-    *,
-    store_path: Path,
-    project_path: Path,
-    agent_id: str,
-    session_id: str,
-    initial_expectations: str = "",
-) -> str:
-    store = _load_store(store_path)
-    state = PlanWizardState(
-        project_path=str(project_path),
-        project_name=project_path.name,
-    )
-    if initial_expectations.strip():
-        state.data["expectations"] = initial_expectations.strip()
-        state.step = "audience"
-        text = _audience_question(state)
-    else:
-        text = _expectations_question(state)
-    store.sessions[_key(agent_id, session_id)] = state
-    _write_store(store_path, store)
-    return text
-
 
 def handle_plan_wizard(
     *,

@@ -151,8 +151,9 @@ def test_mock_provider_can_call_declared_filesystem_tool(tmp_path) -> None:
     ]
     assert [message.role for message in result.session.messages] == [
         "user",
-        "tool",
-        "assistant",
+        "assistant",  # tool call record
+        "tool",       # tool result
+        "assistant",  # final text
     ]
 
 
@@ -448,7 +449,8 @@ def test_reminder_tool_can_schedule_job_through_agent_loop(tmp_path) -> None:
         executors=reminders_tool_executors(context, schedule_reminder=schedule),
     )
 
-    result = loop.run_turn(agent_id="main", session_id="sess_1", message="Remind me")
+    result = loop.run_turn(agent_id="main", session_id="sess_1", message="Remind me",
+                           limits={"max_tool_iterations": 1})
 
     assert result.tool_results[0].ok
     assert job_ids == [result.tool_results[0].data["reminder"]["id"]]

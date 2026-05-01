@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from maurice.host.command_registry import CommandContext, CommandRegistry
 from maurice.kernel.skills import SkillLoader, SkillRoot
-from maurice.system_skills.dev.planner import handle_plan_wizard
 
 
 def _context(tmp_path, text: str) -> CommandContext:
@@ -37,7 +36,8 @@ def test_command_registry_executes_dev_project_commands(tmp_path) -> None:
     assert listed is not None
     assert "`app`" in listed.text
     assert plan is not None
-    assert "On cadre le plan du projet `app`" in plan.text
+    assert "app" in plan.text
+    assert "agent_prompt" in plan.metadata
     assert (project / ".maurice" / ".gitignore").read_text(encoding="utf-8") == "*\n"
     assert (project / ".maurice" / "AGENTS.md").is_file()
     assert (project / ".maurice" / "PLAN.md").is_file()
@@ -61,64 +61,22 @@ def test_dev_project_open_moves_legacy_memory_files(tmp_path) -> None:
     assert (project / ".maurice" / "PLAN.md").read_text(encoding="utf-8") == "# Old plan\n"
 
 
-def test_dev_plan_wizard_writes_plan_md(tmp_path) -> None:
+def test_dev_plan_returns_agent_prompt(tmp_path) -> None:
     registry = SkillLoader(
         [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
         enabled_skills=["dev"],
     ).load()
     commands = CommandRegistry.from_skill_registry(registry)
-    context = _context(tmp_path, "/project open app")
-    commands.dispatch(context)
+    commands.dispatch(_context(tmp_path, "/project open app"))
 
-    start = commands.dispatch(_context(tmp_path, "/plan"))
-    store = tmp_path / "agents" / "main" / ".dev_plan_wizards.json"
+    result = commands.dispatch(_context(tmp_path, "/plan"))
 
-    assert start is not None
-    assert "Pitch le projet" in start.text
-    assert "Pour qui" in handle_plan_wizard(
-        store_path=store,
-        agent_id="main",
-        session_id="local:peer_1",
-        text="Un chat navigateur pour piloter Maurice",
-    )
-    assert "Quelles contraintes" in handle_plan_wizard(
-        store_path=store,
-        agent_id="main",
-        session_id="local:peer_1",
-        text="Utilisateur non technique",
-    )
-    assert "Derniere question" in handle_plan_wizard(
-        store_path=store,
-        agent_id="main",
-        session_id="local:peer_1",
-        text="Interface simple et markdown lisible",
-    )
-    proposal = handle_plan_wizard(
-        store_path=store,
-        agent_id="main",
-        session_id="local:peer_1",
-        text="On peut discuter, planifier et verifier depuis le navigateur",
-    )
-    assert proposal is not None
-    assert "Voici ma proposition" in proposal
-    assert "Critique" in proposal
-    done = handle_plan_wizard(
-        store_path=store,
-        agent_id="main",
-        session_id="local:peer_1",
-        text="oui",
-    )
-
-    plan_path = tmp_path / "agents" / "main" / "content" / "app" / ".maurice" / "PLAN.md"
-    decisions_path = tmp_path / "agents" / "main" / "content" / "app" / ".maurice" / "DECISIONS.md"
-    assert done is not None
-    assert "Plan cree" in done
-    content = plan_path.read_text(encoding="utf-8")
-    assert "Un chat navigateur" in content
-    assert "Utilisateur non technique" in content
-    assert "- [ ]" in content
-    assert "[ parallellisable ]" in content
-    assert "Un chat navigateur" in decisions_path.read_text(encoding="utf-8")
+    assert result is not None
+    assert "app" in result.text
+    assert "agent_prompt" in result.metadata
+    prompt = result.metadata["agent_prompt"]
+    assert "PLAN.md" in prompt
+    assert "DECISIONS.md" in prompt
 
 
 def test_command_registry_executes_dev_decision_command(tmp_path) -> None:

@@ -74,7 +74,7 @@ from maurice.host.commands.service import (
     _remove_pid, _pid_is_running, _doctor_workspace,
 )
 from maurice.host.commands.onboard import (
-    _print_host_checks, _onboarding_existing_values, _onboarding_provider_choice,
+    _onboarding_existing_values, _onboarding_provider_choice,
     _model_existing_values, _ask_model_config, _onboard_agent, _onboard_agent_model,
     _write_kernel_model, _onboard_interactive, _write_onboarding_config,
     _existing_config, _existing_search_config, _ask_telegram_config,
@@ -87,7 +87,7 @@ from maurice.host.commands.onboard import (
 )
 from maurice.host.output import (
     _yes_no, _status_marker, _short, _ansi_padding, _compact_text,
-    _supports_color, _color, _print_title, _print_dim,
+    _supports_color, _color, _print_title, _print_dim, _print_host_checks,
 )
 from maurice.host.telegram import (
     _credential_value, _telegram_channel_configured, _telegram_channel_configs,
@@ -179,7 +179,6 @@ from maurice.kernel.runs import RunApprovalStore, RunCoordinationStore, RunExecu
 from maurice.kernel.scheduler import JobRunner, JobStatus, JobStore, SchedulerService, utc_now
 from maurice.kernel.session import SessionStore
 from maurice.kernel.skills import SkillContext, SkillLoader
-from maurice.system_skills.dev.planner import PLAN_WIZARD_FILE, clear_plan_wizard, handle_plan_wizard
 from maurice.system_skills.reminders.tools import fire_reminder
 
 
@@ -272,6 +271,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--session", default="default", help="Session id to use.")
     run_parser.add_argument("--agent", help="Agent id to use. Defaults to the configured default agent.")
     run_parser.add_argument("--message", required=True, help="Message to send to the agent.")
+
+    chat_parser = subparsers.add_parser("chat", help="Start an interactive REPL in the current directory.")
+    chat_parser.add_argument("--session", default="default", help="Session id to use.")
+    chat_parser.add_argument("--dir", help="Project root (defaults to CWD).")
 
     agents_parser = subparsers.add_parser("agents", help="Manage permanent agents.")
     agents_subparsers = agents_parser.add_subparsers(dest="agents_command")
@@ -1040,6 +1043,12 @@ def main(argv: list[str] | None = None) -> int:
                 run_tests=not args.skip_tests,
             )
             return 0
+
+    if args.command in (None, "chat"):
+        from maurice.host.repl import launch
+        cwd = Path(args.dir).resolve() if hasattr(args, "dir") and args.dir else None
+        session_id = args.session if hasattr(args, "session") else "default"
+        return launch(cwd=cwd, session_id=session_id)
 
     parser.print_help()
     return 0

@@ -81,7 +81,6 @@ from maurice.kernel.runs import RunApprovalStore, RunCoordinationStore, RunExecu
 from maurice.kernel.scheduler import JobRunner, JobStatus, JobStore, SchedulerService, utc_now
 from maurice.kernel.session import SessionStore
 from maurice.kernel.skills import SkillContext, SkillLoader
-from maurice.system_skills.dev.planner import PLAN_WIZARD_FILE, clear_plan_wizard, handle_plan_wizard
 from maurice.system_skills.reminders.tools import fire_reminder
 
 PROVIDER_HELP = {
@@ -92,12 +91,6 @@ PROVIDER_HELP = {
 DEFAULT_SEARXNG_URL = "http://localhost:8080"
 DEFAULT_WORKSPACE = Path.home() / "Documents" / "workspace_maurice"
 
-
-def _print_host_checks(title: str, ok: bool, checks) -> None:
-    status = "ok" if ok else "failed"
-    print(f"{title}: {status}")
-    for check in checks:
-        print(f"- {check.name}: {check.state} - {check.summary}")
 
 
 
