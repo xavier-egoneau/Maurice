@@ -89,10 +89,10 @@ def test_search_parses_searxng_results(tmp_path) -> None:
     result = search(
         {
             "query": "maurice runtime",
-            "base_url": "https://search.example",
             "max_results": 1,
         },
         context(tmp_path),
+        {"base_url": "https://search.example"},
         opener=opener,
     )
 
@@ -111,8 +111,18 @@ def test_search_parses_searxng_results(tmp_path) -> None:
     assert calls[0][1] == 20
 
 
-def test_search_requires_base_url(tmp_path) -> None:
+def test_search_requires_configured_base_url(tmp_path) -> None:
     result = search({"query": "maurice"}, context(tmp_path))
+
+    assert not result.ok
+    assert result.error.code == "not_configured"
+
+
+def test_search_rejects_model_supplied_base_url(tmp_path) -> None:
+    result = search(
+        {"query": "maurice", "base_url": "https://search.example"},
+        context(tmp_path),
+    )
 
     assert not result.ok
     assert result.error.code == "invalid_arguments"

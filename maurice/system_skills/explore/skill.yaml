@@ -16,6 +16,7 @@ permissions:
     scope:
       paths:
         - "$workspace/**"
+        - "$project/**"
 tools:
   - name: explore.tree
     description: >
@@ -37,7 +38,7 @@ tools:
       required: ["path"]
     permission_class: fs.read
     permission_scope:
-      paths: ["$workspace/**"]
+      paths: ["$workspace/**", "$project/**"]
     trust:
       input: local_mutable
       output: local_mutable
@@ -66,7 +67,7 @@ tools:
       required: ["pattern", "path"]
     permission_class: fs.read
     permission_scope:
-      paths: ["$workspace/**"]
+      paths: ["$workspace/**", "$project/**"]
     trust:
       input: local_mutable
       output: local_mutable
@@ -88,7 +89,7 @@ tools:
       required: ["path"]
     permission_class: fs.read
     permission_scope:
-      paths: ["$workspace/**"]
+      paths: ["$workspace/**", "$project/**"]
     trust:
       input: local_mutable
       output: local_mutable

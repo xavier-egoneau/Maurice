@@ -22,8 +22,8 @@ Three built-in profiles, assigned per agent (`permission_profile` in `agents.yam
 
 | Class | Decision | Scope |
 |---|---|---|
-| `fs.read` | allow | `$workspace/**` (excluding secrets) |
-| `fs.write` | ask | `$workspace/**` |
+| `fs.read` | allow | `$workspace/**` + `$project/**` (excluding secrets) |
+| `fs.write` | ask | `$workspace/**` + `$project/**` |
 | `network.outbound` | ask | all hosts |
 | `shell.exec` | **deny** | — |
 | `secret.read` | ask | — |
@@ -35,8 +35,8 @@ Three built-in profiles, assigned per agent (`permission_profile` in `agents.yam
 
 | Class | Decision | Scope |
 |---|---|---|
-| `fs.read` | allow | `$workspace/**` |
-| `fs.write` | allow | `$workspace/**` |
+| `fs.read` | allow | `$workspace/**` + `$project/**` |
+| `fs.write` | allow | `$workspace/**` + `$project/**` |
 | `network.outbound` | ask | all hosts |
 | `shell.exec` | ask | — |
 | `secret.read` | ask | — |
@@ -48,8 +48,8 @@ Three built-in profiles, assigned per agent (`permission_profile` in `agents.yam
 
 | Class | Decision | Scope |
 |---|---|---|
-| `fs.read` | allow | `$workspace/**` + `$runtime/**` |
-| `fs.write` | allow | `$workspace/**` + `$runtime/**` |
+| `fs.read` | allow | `$workspace/**` + `$project/**` + `$home/**` except protected paths |
+| `fs.write` | allow | `$workspace/**` + `$project/**` |
 | `network.outbound` | allow | all hosts |
 | `shell.exec` | ask | — |
 | `secret.read` | ask | — |
@@ -63,10 +63,10 @@ Available in `permission_scope` rules and resolved at runtime:
 
 | Variable | Resolves to |
 |---|---|
-| `$workspace` | Host workspace root |
-| `$agent_workspace` | Agent-specific workspace |
+| `$workspace` | Current context content root: folder context or assistant workspace context |
+| `$agent_workspace` | Agent-specific workspace, or the local folder when there is no separate agent workspace |
 | `$agent_content` | Agent content directory |
-| `$project` | Active dev project root |
+| `$project` | Active project root: folder context root, global web launch folder, or selected agent-content project |
 | `$runtime` | Runtime installation directory |
 | `$home` | User home directory |
 | `$maurice_home` | `~/.maurice` |
@@ -77,6 +77,10 @@ Available in `permission_scope` rules and resolved at runtime:
 
 - **`ask`** — the agent pauses and asks the user for every `ask`-class action.
   Approved actions can be remembered for `remember_ttl_seconds` (default 10 min).
+  Human approval is one feature with surface-specific UI: CLI prompts, web
+  buttons/controls, and text channels all resolve the same `ApprovalStore`.
+  A user can approve a single exact action or approve the same tool/class/scope
+  for the current session; session grants do not cross agent/session boundaries.
 
 - **`auto_deny`** — all `ask`-class actions are denied silently. Safe for unattended runs.
 
@@ -103,9 +107,10 @@ Three risk levels:
 
 ## Runtime write isolation
 
-The runtime root (`kernel/`, `host/`, `system_skills/`) is a separate directory from the workspace.
-Normal agents cannot write to it through `fs.write` unless the profile is `power`.
-The `self_update` skill can only propose changes — it never applies them directly.
+The runtime root (`kernel/`, `host/`, `system_skills/`) is separate from both
+local and global context roots. Normal agents cannot write to it through
+`fs.write` unless the profile is `power`. The `self_update` skill can only
+propose changes — it never applies them directly.
 
 ## Trust labels
 

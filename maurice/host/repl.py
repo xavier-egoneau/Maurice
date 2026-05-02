@@ -6,11 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from rich.columns import Columns
 from rich.console import Console
-from rich.layout import Layout
-from rich.live import Live
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.status import Status
 from rich.table import Table
@@ -18,13 +14,18 @@ from rich.text import Text
 from rich.theme import Theme
 
 from maurice.host.client import MauriceClient
-from maurice.host.project import ensure_maurice_dir, resolve_project_root
+from maurice.host.context_meter import context_bar, context_summary, context_usage
+from maurice.host.project import ensure_maurice_dir, resolve_project_root, sessions_dir
+from maurice.kernel.session import SessionRecord, SessionStore
+from maurice.kernel.tool_labels import tool_short_label, tool_target
 
 
 _THEME = Theme({
     "prompt":         "bold white",
     "dim":            "dim",
-    "tool.running":   "dim cyan",
+    "tool.bullet":    "bold dim",
+    "tool.verb":      "bold",
+    "tool.target":    "dim",
     "tool.ok":        "dim green",
     "tool.err":       "dim red",
     "approval":       "yellow",
@@ -42,46 +43,22 @@ _console = Console(theme=_THEME, highlight=False)
 
 
 
-_TOOL_LABELS: dict[str, tuple[str, str]] = {
-    "filesystem.read":   ("📖", "Lecture"),
-    "filesystem.write":  ("✏️ ", "Écriture"),
-    "filesystem.list":   ("📂", "Liste"),
-    "filesystem.mkdir":  ("📁", "Création dossier"),
-    "filesystem.move":   ("📦", "Déplacement"),
-    "memory.remember":   ("🧠", "Mémorisation"),
-    "memory.search":     ("🔍", "Recherche mémoire"),
-    "memory.forget":     ("🗑️ ", "Oubli"),
-    "web.fetch":         ("🌐", "Fetch"),
-    "web.search":        ("🔎", "Recherche web"),
-    "host.status":       ("📊", "État host"),
-}
+def _tool_verb_target(tool_name: str, arguments: dict) -> tuple[str, str]:
+    return tool_short_label(tool_name), tool_target(tool_name, arguments)
 
 
-def _tool_label(tool_name: str, arguments: dict) -> str:
-    icon, verb = _TOOL_LABELS.get(tool_name, ("🔧", tool_name))
-    detail = (
-        arguments.get("path")
-        or arguments.get("url")
-        or arguments.get("query")
-        or arguments.get("command", "")
-    )
-    if detail:
-        short = os.path.basename(str(detail)) if "/" in str(detail) else str(detail)
-        short = short[:60]
-        return f"{icon} {verb}  {short}"
-    return f"{icon} {verb}…"
-
-
-def _approval_prompt(tool: str, arguments: dict, permission_class: str, reason: str) -> bool:
+def _approval_prompt(tool: str, arguments: dict, permission_class: str, reason: str) -> bool | str:
     args_str = ", ".join(f"{k}={v!r}" for k, v in list(arguments.items())[:3])
     _console.print()
     _console.print(f"  [approval.label]Permission requise[/] [approval]{tool}({args_str})[/]")
     _console.print(f"  [dim]{permission_class}  ·  {reason}[/]")
     try:
-        answer = _console.input("  [approval]Autoriser ?[/] [y/N] ").strip().lower()
+        answer = _console.input("  [approval]Autoriser ?[/] [y/N/session] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
         return False
+    if answer in {"session", "s"}:
+        return "session"
     return answer in {"y", "yes", "o", "oui"}
 
 
@@ -99,6 +76,7 @@ _TIPS = [
     ("/dev",    "exécuter le plan en autonomie"),
     ("/commit", "préparer un commit"),
     ("/check",  "vérifier l'état du projet"),
+    ("/setup",  "configurer ou passer en assistant de bureau"),
     ("/help",   "toutes les commandes"),
 ]
 
@@ -171,8 +149,9 @@ def run_repl(project_root: Path, *, session_id: str = "default") -> None:
     client = MauriceClient(project_root)
     client.ensure_running()
     client.connect()
+    current_session = session_id
 
-    _welcome(project_root, session_id)
+    _welcome(project_root, current_session)
 
     try:
         while True:
@@ -186,8 +165,16 @@ def run_repl(project_root: Path, *, session_id: str = "default") -> None:
                 continue
             if message in {"/exit", "/quit", "/q"}:
                 break
+            if message == "/sessions":
+                _print_sessions(project_root, current_session)
+                continue
+            if message == "/session" or message.startswith("/session "):
+                switched = _switch_session(project_root, message, current_session)
+                if switched:
+                    current_session = switched
+                continue
 
-            _stream_turn(client, message, session_id)
+            _stream_turn(client, message, current_session)
 
     finally:
         client.close()
@@ -207,21 +194,15 @@ def _next_spinner_word() -> str:
     return word
 
 
-_CONTEXT_WINDOW = 128_000  # default; could be read from config
-
-
 def _print_context_bar(input_tokens: int, output_tokens: int) -> None:
-    if not input_tokens and not output_tokens:
+    usage = context_usage(input_tokens, output_tokens)
+    if usage is None:
         return
-    total = input_tokens + output_tokens
-    pct = total / _CONTEXT_WINDOW
-    bar_width = 20
-    filled = round(pct * bar_width)
-    bar = "█" * filled + "░" * (bar_width - filled)
-    color = "green" if pct < 0.5 else "yellow" if pct < 0.8 else "red"
+    bar = context_bar(usage, available_width=_console.width or 80)
+    color = {"low": "green", "medium": "yellow", "high": "red"}[usage["level"]]
     _console.print(
         f"\n  [dim]context[/dim]  [{color}]{bar}[/{color}]"
-        f"  [dim]{total:,} / {_CONTEXT_WINDOW:,} tokens  ({pct:.0%})[/dim]"
+        f"  [dim]{context_summary(usage).removeprefix('context ')}[/dim]"
     )
 
 
@@ -229,6 +210,7 @@ def _stream_turn(client: MauriceClient, message: str, session_id: str) -> None:
     text_buf = ""
     ctx_tokens = (0, 0)
     first_event = True
+    last_kind: str | None = None  # "text" | "tool"
     status = Status(
         f"[dim]{_next_spinner_word()}…[/dim]",
         spinner="dots",
@@ -252,25 +234,32 @@ def _stream_turn(client: MauriceClient, message: str, session_id: str) -> None:
             if etype == "text_delta":
                 delta = event.get("delta", "")
                 if not text_buf and delta:
-                    _console.print()  # blank line before first text
+                    _console.print()
                 print(delta, end="", flush=True)
                 text_buf += delta
+                last_kind = "text"
 
             elif etype == "tool_started":
                 tool = event.get("tool", "")
                 args = event.get("arguments", {})
-                label = _tool_label(tool, args)
-                _console.print(f"\n  [tool.running]{label}[/]", end="")
+                verb, target = _tool_verb_target(tool, args)
+                if last_kind == "text":
+                    _console.print()
+                if target:
+                    _console.print(f"\n  [tool.bullet]●[/] [tool.verb]{verb}[/]  [tool.target]{target}[/]")
+                else:
+                    _console.print(f"\n  [tool.bullet]●[/] [tool.verb]{verb}[/]")
+                last_kind = "tool"
 
             elif etype == "tool_result":
                 ok = event.get("ok", False)
                 summary = event.get("summary", "")
                 error = event.get("error")
                 style = "tool.ok" if ok else "tool.err"
-                icon = "✓" if ok else "✗"
-                code = f" [{error}]" if error else ""
-                short = summary.splitlines()[0] if summary else ""
-                _console.print(f"\r  [{style}]{icon} {short}{code}[/]")
+                short = summary.splitlines()[0][:80] if summary else ""
+                code = f"  [{error}]" if error and not ok else ""
+                if short:
+                    _console.print(f"    [{style}]{short}{code}[/]")
 
             elif etype == "error":
                 _console.print(f"\n[error]  {event.get('message', '')}[/]")
@@ -291,13 +280,68 @@ def _stream_turn(client: MauriceClient, message: str, session_id: str) -> None:
             _console.print(f"[error]  Reconnexion échouée : {exc2}[/]")
         return
 
-    if text_buf:
-        # Re-render final response as markdown (replaces raw streamed text)
-        lines = text_buf.count("\n") + 1
-        print(f"\033[{lines}A\033[J", end="")
-        _console.print(Markdown(text_buf))
     _console.print()
     _print_context_bar(*ctx_tokens)
+
+
+def _session_store(project_root: Path) -> SessionStore:
+    return SessionStore(sessions_dir(project_root))
+
+
+def _print_sessions(project_root: Path, current_session: str) -> None:
+    rows = _session_rows(_session_store(project_root).list("main"), current_session)
+    if not rows:
+        _console.print("[dim]Aucune session enregistrée pour ce projet.[/]")
+        return
+    table = Table("Session", "Messages", "Tours", "Mise à jour", show_header=True)
+    for session_id, messages, turns, updated_at in rows:
+        style = "bold" if session_id == current_session else ""
+        table.add_row(session_id, str(messages), str(turns), updated_at, style=style)
+    _console.print(table)
+
+
+def _session_rows(
+    sessions: list[SessionRecord],
+    current_session: str,
+) -> list[tuple[str, int, int, str]]:
+    rows = [
+        (
+            session.id,
+            len(session.messages),
+            len(session.turns),
+            session.updated_at.strftime("%Y-%m-%d %H:%M"),
+        )
+        for session in sessions
+    ]
+    if current_session and all(row[0] != current_session for row in rows):
+        rows.insert(0, (current_session, 0, 0, "nouvelle"))
+    return rows
+
+
+def _switch_session(project_root: Path, message: str, current_session: str) -> str | None:
+    parts = message.split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip():
+        _console.print(f"[dim]Session courante :[/] {current_session}")
+        _console.print("[dim]Usage : /session <nom>[/]")
+        return None
+    session_id = parts[1].strip()
+    if not _valid_session_id(session_id):
+        _console.print("[error]Nom de session invalide.[/]")
+        return None
+    store = _session_store(project_root)
+    try:
+        store.load("main", session_id)
+        created = False
+    except FileNotFoundError:
+        store.create("main", session_id=session_id)
+        created = True
+    status = "créée" if created else "ouverte"
+    _console.print(f"[dim]Session `{session_id}` {status}.[/]")
+    return session_id
+
+
+def _valid_session_id(session_id: str) -> bool:
+    return bool(session_id) and "/" not in session_id and "\\" not in session_id
 
 
 def launch(cwd: Path | None = None, *, session_id: str = "default") -> int:

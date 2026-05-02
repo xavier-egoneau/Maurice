@@ -14,21 +14,37 @@ from maurice.kernel.permissions import PermissionContext
 
 
 def build_executors(ctx: Any) -> dict[str, Any]:
-    return memory_tool_executors(ctx.permission_context)
+    memory_path = ctx.hooks.memory_path or None
+    return memory_tool_executors(ctx.permission_context, memory_path=memory_path)
 
 
-def memory_tool_executors(context: PermissionContext) -> dict[str, Any]:
+def memory_tool_executors(
+    context: PermissionContext,
+    *,
+    memory_path: str | Path | None = None,
+) -> dict[str, Any]:
     return {
-        "memory.remember": lambda arguments: remember(arguments, context),
-        "memory.search": lambda arguments: search(arguments, context),
-        "memory.get": lambda arguments: get(arguments, context),
-        "maurice.system_skills.memory.tools.remember": lambda arguments: remember(arguments, context),
-        "maurice.system_skills.memory.tools.search": lambda arguments: search(arguments, context),
-        "maurice.system_skills.memory.tools.get": lambda arguments: get(arguments, context),
+        "memory.remember": lambda arguments: remember(arguments, context, memory_path=memory_path),
+        "memory.search": lambda arguments: search(arguments, context, memory_path=memory_path),
+        "memory.get": lambda arguments: get(arguments, context, memory_path=memory_path),
+        "maurice.system_skills.memory.tools.remember": lambda arguments: remember(
+            arguments, context, memory_path=memory_path
+        ),
+        "maurice.system_skills.memory.tools.search": lambda arguments: search(
+            arguments, context, memory_path=memory_path
+        ),
+        "maurice.system_skills.memory.tools.get": lambda arguments: get(
+            arguments, context, memory_path=memory_path
+        ),
     }
 
 
-def remember(arguments: dict[str, Any], context: PermissionContext) -> ToolResult:
+def remember(
+    arguments: dict[str, Any],
+    context: PermissionContext,
+    *,
+    memory_path: str | Path | None = None,
+) -> ToolResult:
     content = arguments.get("content")
     if not isinstance(content, str) or not content.strip():
         return _error("invalid_arguments", "memory.remember requires non-empty content.")
@@ -43,7 +59,7 @@ def remember(arguments: dict[str, Any], context: PermissionContext) -> ToolResul
 
     memory_id = f"mem_{uuid4().hex}"
     now = datetime.now(UTC).isoformat()
-    with _connect(context) as connection:
+    with _connect(context, memory_path=memory_path) as connection:
         _init_db(connection)
         connection.execute(
             """
@@ -58,13 +74,18 @@ def remember(arguments: dict[str, Any], context: PermissionContext) -> ToolResul
         summary=f"Memory stored: {memory_id}",
         data={"id": memory_id, "content": content, "tags": tags, "source": source},
         trust="local_mutable",
-        artifacts=[{"type": "sqlite", "path": str(_db_path(context))}],
+        artifacts=[{"type": "sqlite", "path": str(_db_path(context, memory_path=memory_path))}],
         events=[{"name": "memory.remembered", "payload": {"id": memory_id}}],
         error=None,
     )
 
 
-def search(arguments: dict[str, Any], context: PermissionContext) -> ToolResult:
+def search(
+    arguments: dict[str, Any],
+    context: PermissionContext,
+    *,
+    memory_path: str | Path | None = None,
+) -> ToolResult:
     query = arguments.get("query")
     if not isinstance(query, str):
         return _error("invalid_arguments", "memory.search requires query.")
@@ -73,7 +94,7 @@ def search(arguments: dict[str, Any], context: PermissionContext) -> ToolResult:
         return _error("invalid_arguments", "memory.search limit must be a positive integer.")
 
     pattern = f"%{query}%"
-    with _connect(context) as connection:
+    with _connect(context, memory_path=memory_path) as connection:
         _init_db(connection)
         rows = connection.execute(
             """
@@ -92,18 +113,23 @@ def search(arguments: dict[str, Any], context: PermissionContext) -> ToolResult:
         summary=f"Found {len(memories)} memories.",
         data={"query": query, "memories": memories},
         trust="local_mutable",
-        artifacts=[{"type": "sqlite", "path": str(_db_path(context))}],
+        artifacts=[{"type": "sqlite", "path": str(_db_path(context, memory_path=memory_path))}],
         events=[{"name": "memory.searched", "payload": {"query": query, "count": len(memories)}}],
         error=None,
     )
 
 
-def get(arguments: dict[str, Any], context: PermissionContext) -> ToolResult:
+def get(
+    arguments: dict[str, Any],
+    context: PermissionContext,
+    *,
+    memory_path: str | Path | None = None,
+) -> ToolResult:
     memory_id = arguments.get("id")
     if not isinstance(memory_id, str) or not memory_id:
         return _error("invalid_arguments", "memory.get requires id.")
 
-    with _connect(context) as connection:
+    with _connect(context, memory_path=memory_path) as connection:
         _init_db(connection)
         row = connection.execute(
             """
@@ -123,7 +149,7 @@ def get(arguments: dict[str, Any], context: PermissionContext) -> ToolResult:
         summary=f"Memory fetched: {memory_id}",
         data={"memory": memory},
         trust="local_mutable",
-        artifacts=[{"type": "sqlite", "path": str(_db_path(context))}],
+        artifacts=[{"type": "sqlite", "path": str(_db_path(context, memory_path=memory_path))}],
         events=[{"name": "memory.fetched", "payload": {"id": memory_id}}],
         error=None,
     )
@@ -163,8 +189,12 @@ def build_dream_input(context: PermissionContext, *, limit: int = 10) -> DreamIn
     )
 
 
-def _connect(context: PermissionContext) -> sqlite3.Connection:
-    path = _db_path(context)
+def _connect(
+    context: PermissionContext,
+    *,
+    memory_path: str | Path | None = None,
+) -> sqlite3.Connection:
+    path = _db_path(context, memory_path=memory_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
@@ -189,7 +219,9 @@ def _init_db(connection: sqlite3.Connection) -> None:
     )
 
 
-def _db_path(context: PermissionContext) -> Path:
+def _db_path(context: PermissionContext, *, memory_path: str | Path | None = None) -> Path:
+    if memory_path:
+        return Path(memory_path).expanduser().resolve()
     return Path(context.variables()["$workspace"]) / "skills" / "memory" / "memory.sqlite"
 
 

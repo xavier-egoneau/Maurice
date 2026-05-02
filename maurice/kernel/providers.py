@@ -177,9 +177,11 @@ class OpenAICompatibleProvider:
             payload["max_tokens"] = limits["max_tokens"]
 
         pending_tool_calls: dict[int, dict[str, str]] = {}
+        stream_done = {"seen": False}
         try:
             for event in _iter_sse_json(
-                self._transport(f"{self.base_url}/chat/completions", payload, self._headers())
+                self._transport(f"{self.base_url}/chat/completions", payload, self._headers()),
+                done_flag=stream_done,
             ):
                 usage = event.get("usage")
                 if usage:
@@ -208,6 +210,13 @@ class OpenAICompatibleProvider:
                         if function.get("arguments"):
                             acc["arguments"] += function["arguments"]
 
+            if not stream_done["seen"]:
+                yield _failed_status(
+                    "incomplete_stream",
+                    "Provider stream ended before the completion marker.",
+                    retryable=True,
+                )
+                return
             for index in sorted(pending_tool_calls):
                 call = pending_tool_calls[index]
                 if not call["name"]:
@@ -310,19 +319,17 @@ class ChatGPTCodexProvider:
         payload: dict[str, Any] = {
             "model": model,
             "input": _to_chatgpt_input(messages),
+            "instructions": system or "You are Maurice.",
             "stream": True,
             "store": False,
         }
-        if system:
-            payload["instructions"] = system
         tool_name_map = _tool_name_map(tools)
         if tools:
             payload["tools"] = _to_chatgpt_tools(tools, name_map=tool_name_map)
-        if limits and limits.get("max_tokens"):
-            payload["max_output_tokens"] = limits["max_tokens"]
 
         streamed_text = False
         pending_tool_calls: list[dict[str, Any]] = []
+        completed = False
         try:
             for event in _iter_sse_json(
                 self._transport(f"{self.base_url}/responses", payload, self._headers())
@@ -343,6 +350,7 @@ class ChatGPTCodexProvider:
                         pending_tool_calls.append(call)
                     continue
                 if event_type == "response.completed":
+                    completed = True
                     response = event.get("response") or {}
                     usage = response.get("usage") or {}
                     if usage:
@@ -360,6 +368,16 @@ class ChatGPTCodexProvider:
                         yield ProviderChunk(type="text_delta", delta=final_text)
                     yield ProviderChunk(type="status", status=ProviderStatus.COMPLETED)
                     return
+                if event_type == "response.incomplete":
+                    response = event.get("response") or {}
+                    details = response.get("incomplete_details") or event.get("incomplete_details") or {}
+                    reason = details.get("reason") or "response_incomplete"
+                    yield _failed_status(
+                        "incomplete_response",
+                        f"ChatGPT provider returned an incomplete response: {reason}",
+                        retryable=True,
+                    )
+                    return
                 if event_type == "response.failed":
                     error = event.get("error") or {}
                     yield ProviderChunk(
@@ -372,6 +390,12 @@ class ChatGPTCodexProvider:
                         },
                     )
                     return
+            if not completed:
+                yield _failed_status(
+                    "incomplete_stream",
+                    "ChatGPT provider stream ended before response.completed.",
+                    retryable=True,
+                )
         except Exception as exc:
             yield ProviderChunk(
                 type="status",
@@ -442,6 +466,7 @@ class OllamaCompatibleProvider:
             payload["options"] = {"num_predict": limits["max_tokens"]}
 
         pending_tool_calls: list[dict[str, Any]] = []
+        completed = False
         try:
             for item in self._transport(f"{self.base_url}/api/chat", payload, self._headers()):
                 if isinstance(item, bytes):
@@ -487,6 +512,7 @@ class OllamaCompatibleProvider:
                     pending_tool_calls.append(normalized)
 
                 if chunk.get("done"):
+                    completed = True
                     usage = {
                         "input_tokens": int(chunk.get("prompt_eval_count") or 0),
                         "output_tokens": int(chunk.get("eval_count") or 0),
@@ -497,6 +523,12 @@ class OllamaCompatibleProvider:
                         yield ProviderChunk(type="tool_call", tool_call=call)
                     yield ProviderChunk(type="status", status=ProviderStatus.COMPLETED)
                     return
+            if not completed:
+                yield _failed_status(
+                    "incomplete_stream",
+                    "Ollama provider stream ended before a done message.",
+                    retryable=True,
+                )
         except Exception as exc:
             yield ProviderChunk(
                 type="status",
@@ -532,11 +564,20 @@ def _to_ollama_messages(messages: Sequence[dict[str, Any]], system: str) -> list
         result.append({"role": "system", "content": system})
     for message in messages:
         role = message.get("role") or "user"
+        metadata = message.get("metadata") or {}
+        if role == "tool_call":
+            result.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [_provider_tool_call(metadata)],
+                }
+            )
+            continue
         payload = {
             "role": role,
             "content": message.get("content") or "",
         }
-        metadata = message.get("metadata") or {}
         if role == "tool" and metadata.get("tool_call_id"):
             payload["tool_call_id"] = metadata["tool_call_id"]
         result.append(payload)
@@ -550,6 +591,15 @@ def _to_openai_messages(messages: Sequence[dict[str, Any]], system: str) -> list
     for message in messages:
         role = message.get("role") or "user"
         metadata = message.get("metadata") or {}
+        if role == "tool_call":
+            result.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [_provider_tool_call(metadata)],
+                }
+            )
+            continue
         if role == "tool":
             result.append(
                 {
@@ -569,9 +619,11 @@ def _to_chatgpt_input(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]
         role = message.get("role") or "user"
         metadata = message.get("metadata") or {}
         content = message.get("content") or ""
+        if role == "system":
+            role = "user"
+            content = f"[System context]\n{content}"
 
-        # Tool call recorded by the kernel loop (must precede function_call_output)
-        if role == "assistant" and metadata.get("tool_call"):
+        if role == "tool_call":
             import json as _json
             args = metadata.get("tool_arguments") or {}
             raw_name = metadata.get("tool_name") or ""
@@ -603,6 +655,20 @@ def _to_chatgpt_input(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]
                 }
             )
     return result
+
+
+def _provider_tool_call(metadata: dict[str, Any]) -> dict[str, Any]:
+    import json as _json
+
+    args = metadata.get("tool_arguments") or {}
+    return {
+        "id": metadata.get("tool_call_id") or "",
+        "type": "function",
+        "function": {
+            "name": metadata.get("tool_name") or "",
+            "arguments": _json.dumps(args) if isinstance(args, dict) else str(args),
+        },
+    }
 
 
 def _to_ollama_tools(tools: Sequence[ToolDeclaration]) -> list[dict[str, Any]]:
@@ -757,7 +823,19 @@ def _chatgpt_account_id_from_jwt(token: str) -> str:
         return ""
 
 
-def _iter_sse_json(lines: Iterable[bytes | str]) -> Iterable[dict[str, Any]]:
+def _failed_status(code: str, message: str, *, retryable: bool) -> ProviderChunk:
+    return ProviderChunk(
+        type="status",
+        status=ProviderStatus.FAILED,
+        error={"code": code, "message": message, "retryable": retryable},
+    )
+
+
+def _iter_sse_json(
+    lines: Iterable[bytes | str],
+    *,
+    done_flag: dict[str, bool] | None = None,
+) -> Iterable[dict[str, Any]]:
     for item in lines:
         if isinstance(item, bytes):
             item = item.decode("utf-8")
@@ -769,6 +847,8 @@ def _iter_sse_json(lines: Iterable[bytes | str]) -> Iterable[dict[str, Any]]:
                 continue
             line = line.removeprefix("data:").strip()
             if line == "[DONE]":
+                if done_flag is not None:
+                    done_flag["seen"] = True
                 return
             yield json.loads(line)
 

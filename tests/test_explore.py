@@ -31,6 +31,21 @@ def _exec(tmp_path: Path) -> dict:
     return build_executors(ctx)
 
 
+def _exec_with_project(workspace: Path, project: Path) -> dict:
+    from maurice.kernel.skills import SkillContext
+
+    ctx = SkillContext(
+        permission_context=PermissionContext(
+            workspace_root=str(workspace),
+            runtime_root=str(workspace),
+            agent_workspace_root=str(workspace / "agents" / "main"),
+            active_project_root=str(project),
+        ),
+        agent_id="main",
+    )
+    return build_executors(ctx)
+
+
 class TestExploreTree:
     def test_basic_tree(self, tmp_path):
         (tmp_path / "src").mkdir()
@@ -69,6 +84,19 @@ class TestExploreTree:
         result = ex["explore.tree"]({"path": "/etc"})
         assert not result.ok
 
+    def test_allows_active_project_outside_workspace(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        project = tmp_path / "project"
+        workspace.mkdir()
+        project.mkdir()
+        (project / "README.md").write_text("hello")
+        ex = _exec_with_project(workspace, project)
+
+        result = ex["explore.tree"]({"path": str(project)})
+
+        assert result.ok
+        assert "README.md" in result.data["tree"]
+
 
 class TestExploreGrep:
     def test_finds_pattern(self, tmp_path):
@@ -104,6 +132,19 @@ class TestExploreGrep:
         ex = _exec(tmp_path)
         result = ex["explore.grep"]({"pattern": "root", "path": "/etc"})
         assert not result.ok
+
+    def test_allows_active_project_outside_workspace(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        project = tmp_path / "project"
+        workspace.mkdir()
+        project.mkdir()
+        (project / "app.js").write_text("const bug = true")
+        ex = _exec_with_project(workspace, project)
+
+        result = ex["explore.grep"]({"pattern": "bug", "path": str(project)})
+
+        assert result.ok
+        assert result.data["matches"][0]["file"].endswith("app.js")
 
 
 class TestExploreSummary:
@@ -154,6 +195,19 @@ class TestExploreSummary:
         ex = _exec(tmp_path)
         result = ex["explore.summary"]({"path": "/etc"})
         assert not result.ok
+
+    def test_allows_active_project_outside_workspace(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        project = tmp_path / "project"
+        workspace.mkdir()
+        project.mkdir()
+        (project / "package.json").write_text('{"name": "demo"}')
+        ex = _exec_with_project(workspace, project)
+
+        result = ex["explore.summary"]({"path": str(project)})
+
+        assert result.ok
+        assert result.data["project_type"] == "JavaScript/TypeScript"
 
 
 class TestDetectType:

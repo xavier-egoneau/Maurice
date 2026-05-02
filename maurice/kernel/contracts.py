@@ -11,7 +11,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class MauriceModel(BaseModel):
@@ -216,6 +216,7 @@ class PendingApproval(MauriceModel):
     created_at: datetime
     expires_at: datetime
     rememberable: bool = False
+    replay_scope: Literal["exact", "tool_session"] = "exact"
     status: PendingApprovalStatus = PendingApprovalStatus.PENDING
 
 
@@ -247,6 +248,10 @@ class SkillCommandExport(MauriceModel):
     handler: str = ""
     renderer: Literal["text", "markdown"] = "markdown"
     aliases: list[str] = Field(default_factory=list)
+    available_in: list[Literal["local", "global"]] = Field(
+        default_factory=lambda: ["local", "global"],
+        validation_alias=AliasChoices("available_in", "visible_in"),
+    )
 
     @field_validator("name")
     @classmethod
@@ -271,6 +276,7 @@ class CommandDeclaration(MauriceModel):
     handler: str = ""
     renderer: Literal["text", "markdown"] = "markdown"
     aliases: list[str] = Field(default_factory=list)
+    available_in: list[Literal["local", "global"]] = Field(default_factory=lambda: ["local", "global"])
 
 
 class SkillRequires(MauriceModel):
@@ -299,6 +305,18 @@ class SkillEvents(MauriceModel):
     state_publisher: str | None = None
 
 
+class SkillDocker(MauriceModel):
+    """Docker Compose service that this skill depends on.
+
+    The host starts the service automatically when the skill is loaded.
+    compose_file is relative to the Maurice project root.
+    """
+    service: str
+    compose_file: str = "docker-compose.yml"
+    health_url: str = ""
+    startup_timeout: int = 15
+
+
 class SkillManifest(MauriceModel):
     name: str
     version: str
@@ -306,6 +324,7 @@ class SkillManifest(MauriceModel):
     mutable: bool
     description: str
     config_namespace: str
+    available_in: list[Literal["local", "global"]] = Field(default_factory=lambda: ["local", "global"])
     required: bool = False
     requires: SkillRequires = Field(default_factory=SkillRequires)
     dependencies: SkillDependencies = Field(default_factory=SkillDependencies)
@@ -317,6 +336,7 @@ class SkillManifest(MauriceModel):
     dreams: SkillDreams | None = None
     events: SkillEvents | None = None
     tools_module: str | None = None
+    docker: SkillDocker | None = None
 
 
 class AgentConfig(MauriceModel):

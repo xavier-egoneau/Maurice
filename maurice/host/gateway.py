@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import functools
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import sys
 from urllib.parse import parse_qs, urlparse
-from time import monotonic
 from typing import Any
 from uuid import uuid4
 
 from pydantic import Field
 
+from maurice.host.autonomy import run_autonomous_command, should_continue_autonomous_command
 from maurice.host.command_registry import CommandContext, CommandRegistry, default_command_registry
+from maurice.host.context_meter import context_usage
 from maurice.kernel.contracts import MauriceModel
 from maurice.kernel.events import EventStore
 from maurice.kernel.loop import TurnResult
@@ -55,10 +57,35 @@ ApprovalStoreFor = Callable[[str], Any]
 ResetSession = Callable[[str, str], None]
 InterceptMessage = Callable[[InboundMessage, str, str, str], str | None]
 RecordExchange = Callable[[InboundMessage, OutboundMessage, bool], None]
+WebUploads = Callable[[str, str, list[dict[str, Any]]], list[dict[str, Any]]]
+WebAttachment = Callable[[str], tuple[str, bytes] | None]
 
 
 APPROVAL_ACCEPT_WORDS = {"ok", "oui", "yes", "y", "go", "vas-y", "vasy", "approve", "approuve"}
+APPROVAL_SESSION_WORDS = {
+    "session",
+    "ok session",
+    "oui session",
+    "yes session",
+    "approve session",
+    "approuve session",
+}
 APPROVAL_DENY_WORDS = {"non", "no", "n", "deny", "refuse", "annule", "annuler", "stop"}
+
+
+def _turn_context_usage(turn: TurnResult) -> dict[str, Any] | None:
+    return context_usage(
+        int(getattr(turn, "input_tokens", 0) or 0),
+        int(getattr(turn, "output_tokens", 0) or 0),
+    )
+
+
+def _turn_response_text(turn: TurnResult) -> str:
+    text = turn.assistant_text or "\n".join(result.summary for result in turn.tool_results)
+    if turn.status != "completed" and turn.error:
+        warning = f"Réponse interrompue : {turn.error}"
+        return f"{text}\n\n{warning}".strip() if text else warning
+    return text
 
 
 class MessageRouter:
@@ -134,7 +161,7 @@ class MessageRouter:
                 if not isinstance(autonomy, dict):
                     autonomy = {}
                 command_name = command_result.metadata.get("command") or ""
-                turn = self.run_turn(
+                initial_turn = self.run_turn(
                     message=agent_prompt,
                     session_id=session_id,
                     agent_id=agent_id,
@@ -153,56 +180,21 @@ class MessageRouter:
                         "visible_user_message": message.text,
                     },
                 )
-                tool_activity = bool(turn.tool_results)
-                any_tool_activity = tool_activity
-                _log_autonomy_turn(command_name, 0, turn)
-                max_continuations = _positive_int(autonomy.get("max_continuations"), default=0)
-                max_seconds = _positive_int(autonomy.get("max_seconds"), default=0)
-                continue_without_activity = autonomy.get("continue_without_activity") is True
-                continuation_count = 0
-                started_at = monotonic()
-                while (
-                    continuation_count < max_continuations
-                    and (not tool_activity or continue_without_activity)
-                    and (max_seconds <= 0 or monotonic() - started_at < max_seconds)
-                    and _should_continue_autonomous_command(
-                        turn.assistant_text,
-                        continue_without_activity=continue_without_activity,
-                    )
-                ):
-                    continuation_count += 1
-                    continue_prompt = autonomy.get("continue_prompt")
-                    if not isinstance(continue_prompt, str) or not continue_prompt.strip():
-                        continue_prompt = (
-                            "Continue en mode autonome. Tu viens d'annoncer une action sans la realiser. "
-                            "Avance concretement dans le projet actif avec les capacites disponibles. "
-                            "Si tu es bloque, explique le blocage precis."
-                        )
-                    turn = self.run_turn(
-                        message=continue_prompt,
-                        session_id=session_id,
-                        agent_id=agent_id,
-                        correlation_id=correlation_id,
-                        source_channel=message.channel,
-                        source_peer_id=message.peer_id,
-                        source_metadata={
-                            **message.metadata,
-                            "command": command_name,
-                            "original_text": message.text,
-                            "autonomy_continuation": continuation_count,
-                        },
-                        limits=agent_limits,
-                        message_metadata={
-                            "autonomy_internal": True,
-                            "command": command_name,
-                            "visible_user_message": message.text,
-                            "autonomy_continuation": continuation_count,
-                        },
-                    )
-                    tool_activity = bool(turn.tool_results)
-                    any_tool_activity = any_tool_activity or tool_activity
-                    _log_autonomy_turn(command_name, continuation_count, turn)
-                text = turn.assistant_text or "\n".join(result.summary for result in turn.tool_results)
+                turn, any_tool_activity = run_autonomous_command(
+                    run_turn=self.run_turn,
+                    initial_turn=initial_turn,
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    correlation_id=correlation_id,
+                    source_channel=message.channel,
+                    source_peer_id=message.peer_id,
+                    source_metadata={**message.metadata},
+                    agent_limits=agent_limits,
+                    command_name=command_name,
+                    autonomy_config=autonomy,
+                    original_text=message.text,
+                )
+                text = _turn_response_text(turn)
                 if autonomy.get("requires_activity") is True and not any_tool_activity:
                     no_activity_text = autonomy.get("no_activity_text")
                     if not isinstance(no_activity_text, str) or not no_activity_text.strip():
@@ -223,6 +215,9 @@ class MessageRouter:
                         "command": command_name,
                         "format": command_result.format,
                         "turn_status": turn.status,
+                        "kernel_correlation_id": getattr(turn, "correlation_id", "") or correlation_id,
+                        "tool_activity": getattr(turn, "tool_activity", []),
+                        "context": _turn_context_usage(turn),
                     },
                 )
                 self._emit(
@@ -317,6 +312,11 @@ class MessageRouter:
             self._record_exchange(message, outbound, include_user=True)
             return GatewayResult(inbound=message, outbound=outbound, status="completed")
 
+        message_metadata: dict[str, Any] = {}
+        if message.metadata.get("attachments"):
+            message_metadata["attachments"] = message.metadata["attachments"]
+        if message.metadata.get("visible_user_message") is not None:
+            message_metadata["visible_user_message"] = message.metadata.get("visible_user_message")
         turn = self.run_turn(
             message=message.text,
             session_id=session_id,
@@ -326,8 +326,9 @@ class MessageRouter:
             source_peer_id=message.peer_id,
             source_metadata=message.metadata,
             limits={"max_tool_iterations": 8},
+            **({"message_metadata": message_metadata} if message_metadata else {}),
         )
-        text = turn.assistant_text or "\n".join(result.summary for result in turn.tool_results)
+        text = _turn_response_text(turn)
         outbound = OutboundMessage(
             channel=message.channel,
             peer_id=message.peer_id,
@@ -335,7 +336,12 @@ class MessageRouter:
             session_id=session_id,
             correlation_id=correlation_id,
             text=text,
-            metadata={"turn_status": turn.status},
+            metadata={
+                "turn_status": turn.status,
+                "kernel_correlation_id": getattr(turn, "correlation_id", "") or correlation_id,
+                "tool_activity": getattr(turn, "tool_activity", []),
+                "context": _turn_context_usage(turn),
+            },
         )
         self._emit(
             "gateway.message.sent",
@@ -373,7 +379,11 @@ class MessageRouter:
         if self.approval_store_for is None:
             return None
         normalized = message.text.strip().lower()
-        if normalized not in APPROVAL_ACCEPT_WORDS and normalized not in APPROVAL_DENY_WORDS:
+        if (
+            normalized not in APPROVAL_ACCEPT_WORDS
+            and normalized not in APPROVAL_SESSION_WORDS
+            and normalized not in APPROVAL_DENY_WORDS
+        ):
             return None
         store = self.approval_store_for(agent_id)
         pending = [
@@ -396,13 +406,23 @@ class MessageRouter:
             )
             return "denied"
         store.approve(approval.id)
+        replay_scope = "tool_session" if normalized in APPROVAL_SESSION_WORDS else "exact"
+        if replay_scope == "tool_session" and approval.rememberable:
+            store.remember_tool_for_session(
+                agent_id=approval.agent_id,
+                session_id=approval.session_id,
+                tool_name=approval.tool_name,
+                permission_class=approval.permission_class,
+                scope=approval.scope,
+                reason=approval.reason,
+            )
         self._emit(
             "approval.approved.from_channel",
             message,
             agent_id=agent_id,
             session_id=session_id,
             correlation_id=correlation_id,
-            payload={"approval_id": approval.id},
+            payload={"approval_id": approval.id, "replay_scope": replay_scope},
         )
         return "approved"
 
@@ -436,70 +456,6 @@ class MessageRouter:
         )
 
 
-def _positive_int(value: Any, *, default: int = 0) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
-
-
-def _should_continue_autonomous_command(text: str, *, continue_without_activity: bool = False) -> bool:
-    normalized = " ".join((text or "").strip().lower().split())
-    if not normalized:
-        return True
-    if "?" in normalized:
-        return False
-    if any(marker in normalized for marker in ("bloque", "blocked", "besoin de", "il manque", "je ne peux pas")):
-        return False
-    done_markers = (
-        "c'est fait", "c'est fini", "j'ai terminé", "j'ai termine",
-        "tout est fait", "tout est terminé", "tout est termine",
-        "tâche terminée", "tache terminee", "mission accomplie",
-        "all done", "travail terminé", "travail termine",
-    )
-    if any(marker in normalized for marker in done_markers):
-        return False
-    if continue_without_activity:
-        return True
-    intent_prefixes = (
-        "je commence",
-        "je vais",
-        "je verifie",
-        "je vérifie",
-        "je corrige",
-        "je cree",
-        "je crée",
-        "je reprends",
-        "je passe",
-        "je demarre",
-        "je démarre",
-        "je lance",
-    )
-    if normalized.startswith(intent_prefixes):
-        return True
-    return normalized.endswith(":")
-
-
-def _log_autonomy_turn(command: str, turn_number: int, turn: Any) -> None:
-    tool_count = len(turn.tool_results)
-    ok_count = sum(1 for r in turn.tool_results if r.ok)
-    err_count = tool_count - ok_count
-    error_codes = [r.error.code for r in turn.tool_results if r.error and r.error.code]
-    write_count = sum(
-        1 for r in turn.tool_results
-        if r.ok and any(w in (r.summary or "") for w in ("écrit", "deplace", "cree", "mkdir"))
-    )
-    text_preview = (turn.assistant_text or "").strip().replace("\n", " ")[:80]
-    parts = [f"[autonomy] {command} tour={turn_number} outils={ok_count}/{tool_count}"]
-    if write_count:
-        parts.append(f"ecritures={write_count}")
-    if err_count:
-        parts.append(f"erreurs={err_count} codes={error_codes}")
-    if text_preview:
-        parts.append(f"texte={text_preview!r}")
-    print(" ".join(parts), file=sys.stderr, flush=True)
-
 
 class GatewayHttpServer:
     """Small stdlib HTTP server for channel-neutral local gateway traffic."""
@@ -515,6 +471,15 @@ class GatewayHttpServer:
         web_agents: Callable[[], list[dict[str, Any]]] | None = None,
         web_session_history: Callable[[str, str], list[dict[str, Any]]] | None = None,
         web_session_reset: Callable[[str, str], bool] | None = None,
+        web_git_status: Callable[[], dict[str, Any]] | None = None,
+        web_git_diff: Callable[[str], dict[str, Any]] | None = None,
+        web_model_status: Callable[[str], dict[str, Any]] | None = None,
+        web_model_update: Callable[[str, str], dict[str, Any]] | None = None,
+        web_agent_config: Callable[[str], dict[str, Any]] | None = None,
+        web_agent_update: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+        web_uploads: WebUploads | None = None,
+        web_attachment: WebAttachment | None = None,
+        web_token: str | None = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -528,6 +493,15 @@ class GatewayHttpServer:
             web_agents=web_agents,
             web_session_history=web_session_history,
             web_session_reset=web_session_reset,
+            web_git_status=web_git_status,
+            web_git_diff=web_git_diff,
+            web_model_status=web_model_status,
+            web_model_update=web_model_update,
+            web_agent_config=web_agent_config,
+            web_agent_update=web_agent_update,
+            web_uploads=web_uploads,
+            web_attachment=web_attachment,
+            web_token=web_token,
         )
         self.server = ThreadingHTTPServer((host, port), handler)
 
@@ -552,21 +526,39 @@ class GatewayHttpServer:
         web_agents: Callable[[], list[dict[str, Any]]] | None,
         web_session_history: Callable[[str, str], list[dict[str, Any]]] | None,
         web_session_reset: Callable[[str, str], bool] | None,
+        web_git_status: Callable[[], dict[str, Any]] | None,
+        web_git_diff: Callable[[str], dict[str, Any]] | None,
+        web_model_status: Callable[[str], dict[str, Any]] | None,
+        web_model_update: Callable[[str, str], dict[str, Any]] | None,
+        web_agent_config: Callable[[str], dict[str, Any]] | None,
+        web_agent_update: Callable[[str, dict[str, Any]], dict[str, Any]] | None,
+        web_uploads: WebUploads | None,
+        web_attachment: WebAttachment | None,
+        web_token: str | None,
     ):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 parsed = urlparse(self.path)
                 if parsed.path == "/":
+                    if not self._authorized(parsed):
+                        self._write_json(403, {"ok": False, "error": "forbidden"})
+                        return
                     self._write_html(200, _web_ui_html())
                     return
                 if parsed.path == "/health":
                     self._write_json(200, {"ok": True, "status": "ready"})
                     return
                 if parsed.path == "/api/agents":
+                    if not self._authorized(parsed):
+                        self._write_json(403, {"ok": False, "error": "forbidden"})
+                        return
                     agents = web_agents() if web_agents is not None else [{"id": router.default_agent_id}]
                     self._write_json(200, {"ok": True, "agents": agents})
                     return
                 if parsed.path == "/api/session":
+                    if not self._authorized(parsed):
+                        self._write_json(403, {"ok": False, "error": "forbidden"})
+                        return
                     query = parse_qs(parsed.query)
                     agent_id = query.get("agent_id", [router.default_agent_id])[0]
                     session_id = query.get("session_id", [""])[0]
@@ -588,20 +580,111 @@ class GatewayHttpServer:
                         },
                     )
                     return
+                if parsed.path == "/api/attachment":
+                    if not self._authorized(parsed):
+                        self._write_json(403, {"ok": False, "error": "forbidden"})
+                        return
+                    if web_attachment is None:
+                        self._write_json(404, {"ok": False, "error": "attachment_unavailable"})
+                        return
+                    query = parse_qs(parsed.query)
+                    path = query.get("path", [""])[0]
+                    if not path:
+                        self._write_json(400, {"ok": False, "error": "missing_path"})
+                        return
+                    attachment = web_attachment(path)
+                    if attachment is None:
+                        self._write_json(404, {"ok": False, "error": "attachment_not_found"})
+                        return
+                    mime_type, body = attachment
+                    self._write_bytes(200, body, mime_type)
+                    return
+                if parsed.path == "/api/git/status":
+                    if not self._authorized(parsed):
+                        self._write_json(403, {"ok": False, "error": "forbidden"})
+                        return
+                    payload = web_git_status() if web_git_status is not None else {"ok": True, "available": False}
+                    self._write_json(200, payload)
+                    return
+                if parsed.path == "/api/git/diff":
+                    if not self._authorized(parsed):
+                        self._write_json(403, {"ok": False, "error": "forbidden"})
+                        return
+                    query = parse_qs(parsed.query)
+                    path = query.get("path", [""])[0]
+                    if not path:
+                        self._write_json(400, {"ok": False, "error": "missing_path"})
+                        return
+                    payload = (
+                        web_git_diff(path)
+                        if web_git_diff is not None
+                        else {"ok": False, "error": "git_diff_unavailable", "diff": ""}
+                    )
+                    self._write_json(200, payload)
+                    return
+                if parsed.path == "/api/model":
+                    if not self._authorized(parsed):
+                        self._write_json(403, {"ok": False, "error": "forbidden"})
+                        return
+                    query = parse_qs(parsed.query)
+                    agent_id = query.get("agent_id", [router.default_agent_id])[0]
+                    payload = (
+                        web_model_status(agent_id)
+                        if web_model_status is not None
+                        else {"ok": False, "available": False, "error": "model_unavailable"}
+                    )
+                    self._write_json(200, payload)
+                    return
+                if parsed.path == "/api/agent":
+                    if not self._authorized(parsed):
+                        self._write_json(403, {"ok": False, "error": "forbidden"})
+                        return
+                    query = parse_qs(parsed.query)
+                    agent_id = query.get("agent_id", [router.default_agent_id])[0]
+                    payload = (
+                        web_agent_config(agent_id)
+                        if web_agent_config is not None
+                        else {"ok": False, "available": False, "error": "agent_config_unavailable"}
+                    )
+                    self._write_json(200, payload)
+                    return
                 self._write_json(404, {"ok": False, "error": "not_found"})
 
             def do_POST(self) -> None:
-                if self.path == "/api/message":
+                parsed = urlparse(self.path)
+                if parsed.path == "/api/message":
+                    if not self._authorized(parsed):
+                        self._write_json(403, {"ok": False, "error": "forbidden"})
+                        return
                     try:
                         payload = self._read_payload()
+                        agent_id = str(payload.get("agent_id") or router.default_agent_id)
+                        session_id = payload.get("session_id")
+                        session_id = str(session_id) if session_id else ""
+                        message_text = str(payload.get("message") or payload.get("text") or "")
+                        attachments = payload.get("attachments")
+                        uploaded: list[dict[str, Any]] = []
+                        if isinstance(attachments, list) and attachments:
+                            if web_uploads is None:
+                                self._write_json(400, {"ok": False, "error": "uploads_unavailable"})
+                                return
+                            # Decode and persist browser-provided base64 before the agent turn.
+                            # The paid/main model only receives local paths; image bytes are sent
+                            # later by the vision tool to the configured local vision backend.
+                            uploaded = web_uploads(agent_id, session_id, attachments)
+                            message_text = _message_with_uploads(message_text, uploaded)
+                        metadata = {"persist": payload.get("persist", True) is not False}
+                        if uploaded:
+                            metadata["attachments"] = uploaded
+                            metadata["visible_user_message"] = str(payload.get("message") or payload.get("text") or "")
                         result = router.handle(
                             {
                                 "channel": "web",
                                 "peer_id": str(payload.get("peer_id") or payload.get("session_id") or "browser"),
-                                "text": str(payload.get("message") or payload.get("text") or ""),
-                                "agent_id": str(payload.get("agent_id") or router.default_agent_id),
-                                "session_id": payload.get("session_id"),
-                                "metadata": {"persist": payload.get("persist", True) is not False},
+                                "text": message_text,
+                                "agent_id": agent_id,
+                                "session_id": session_id or None,
+                                "metadata": metadata,
                             }
                         )
                     except Exception as exc:
@@ -609,7 +692,45 @@ class GatewayHttpServer:
                         return
                     self._write_json(200, {"ok": True, "result": result.model_dump(mode="json")})
                     return
-                if self.path != "/message":
+                if parsed.path == "/api/model":
+                    if not self._authorized(parsed):
+                        self._write_json(403, {"ok": False, "error": "forbidden"})
+                        return
+                    try:
+                        payload = self._read_payload()
+                        agent_id = str(payload.get("agent_id") or router.default_agent_id)
+                        model = str(payload.get("model") or "").strip()
+                        if not model:
+                            self._write_json(400, {"ok": False, "error": "missing_model"})
+                            return
+                        result = (
+                            web_model_update(agent_id, model)
+                            if web_model_update is not None
+                            else {"ok": False, "error": "model_update_unavailable"}
+                        )
+                    except Exception as exc:
+                        self._write_json(400, {"ok": False, "error": str(exc)})
+                        return
+                    self._write_json(200, result)
+                    return
+                if parsed.path == "/api/agent":
+                    if not self._authorized(parsed):
+                        self._write_json(403, {"ok": False, "error": "forbidden"})
+                        return
+                    try:
+                        payload = self._read_payload()
+                        agent_id = str(payload.get("agent_id") or router.default_agent_id)
+                        result = (
+                            web_agent_update(agent_id, payload)
+                            if web_agent_update is not None
+                            else {"ok": False, "error": "agent_update_unavailable"}
+                        )
+                    except Exception as exc:
+                        self._write_json(400, {"ok": False, "error": str(exc)})
+                        return
+                    self._write_json(200, result)
+                    return
+                if parsed.path != "/message":
                     channel = self._channel_path()
                     if channel is None or channels is None:
                         self._write_json(404, {"ok": False, "error": "not_found"})
@@ -644,6 +765,9 @@ class GatewayHttpServer:
                 if parsed.path != "/api/session":
                     self._write_json(404, {"ok": False, "error": "not_found"})
                     return
+                if not self._authorized(parsed):
+                    self._write_json(403, {"ok": False, "error": "forbidden"})
+                    return
                 query = parse_qs(parsed.query)
                 agent_id = query.get("agent_id", [router.default_agent_id])[0]
                 session_id = query.get("session_id", [""])[0]
@@ -676,10 +800,20 @@ class GatewayHttpServer:
             def _channel_path(self) -> str | None:
                 prefix = "/channels/"
                 suffix = "/message"
-                if not self.path.startswith(prefix) or not self.path.endswith(suffix):
+                parsed = urlparse(self.path)
+                if not parsed.path.startswith(prefix) or not parsed.path.endswith(suffix):
                     return None
-                channel = self.path[len(prefix) : -len(suffix)]
+                channel = parsed.path[len(prefix) : -len(suffix)]
                 return channel or None
+
+            def _authorized(self, parsed: Any) -> bool:
+                if not web_token:
+                    return True
+                supplied = self.headers.get("X-Maurice-Token", "")
+                if supplied == web_token:
+                    return True
+                query = parse_qs(parsed.query)
+                return query.get("token", [""])[0] == web_token
 
             def _write_json(self, status: int, payload: dict[str, Any]) -> None:
                 body = json.dumps(payload).encode("utf-8")
@@ -697,11 +831,42 @@ class GatewayHttpServer:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _write_bytes(self, status: int, body: bytes, content_type: str) -> None:
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "private, max-age=3600")
+                self.end_headers()
+                self.wfile.write(body)
+
             def log_message(self, *_args: Any) -> None:
                 pass
 
         return Handler
 
 
+@functools.cache
 def _web_ui_html() -> str:
     return (Path(__file__).parent / "web_ui.html").read_text(encoding="utf-8")
+
+
+def _message_with_uploads(message: str, uploads: list[dict[str, Any]]) -> str:
+    text = message.strip() or "Analyse l'image jointe."
+    if not uploads:
+        return text
+    lines = [
+        text,
+        "",
+        "Images jointes par l'utilisateur :",
+    ]
+    for upload in uploads:
+        name = upload.get("name") or Path(str(upload.get("path") or "")).name
+        lines.append(f"- {name}: `{upload.get('path')}`")
+    lines.extend(
+        [
+            "",
+            "Utilise `vision.inspect` ou `vision.analyze` sur ces chemins si la demande porte sur l'image. "
+            "Pour une description visuelle, appelle `vision.analyze` avec le prompt utilisateur.",
+        ]
+    )
+    return "\n".join(lines)

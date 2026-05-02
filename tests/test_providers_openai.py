@@ -178,6 +178,21 @@ def test_openai_provider_reports_invalid_json_tool_arguments() -> None:
     assert chunks[-1].error.code == "invalid_tool_arguments"
 
 
+def test_openai_provider_reports_missing_done_marker() -> None:
+    def transport(_url, _payload, _headers):
+        yield _sse({"choices": [{"delta": {"content": "J'ai seulement"}}]})
+
+    provider = OpenAICompatibleProvider(api_key="secret", transport=transport)
+
+    chunks = list(
+        provider.stream(messages=[], model="gpt-test", tools=[], system="")
+    )
+
+    assert chunks[0].delta == "J'ai seulement"
+    assert chunks[-1].status == ProviderStatus.FAILED
+    assert chunks[-1].error.code == "incomplete_stream"
+
+
 def test_openai_message_and_tool_conversion() -> None:
     declaration = ToolDeclaration.model_validate(
         {
@@ -199,6 +214,15 @@ def test_openai_message_and_tool_conversion() -> None:
         [
             {"role": "user", "content": "Bonjour", "metadata": {}},
             {
+                "role": "tool_call",
+                "content": "",
+                "metadata": {
+                    "tool_call_id": "call_1",
+                    "tool_name": "filesystem.read",
+                    "tool_arguments": {"path": "notes.md"},
+                },
+            },
+            {
                 "role": "tool",
                 "content": "File read.",
                 "metadata": {"tool_call_id": "call_1"},
@@ -208,6 +232,20 @@ def test_openai_message_and_tool_conversion() -> None:
     ) == [
         {"role": "system", "content": "System"},
         {"role": "user", "content": "Bonjour"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "filesystem.read",
+                        "arguments": "{\"path\": \"notes.md\"}",
+                    },
+                }
+            ],
+        },
         {"role": "tool", "tool_call_id": "call_1", "content": "File read."},
     ]
     assert _to_openai_tools([declaration]) == [

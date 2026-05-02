@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Literal
 
 from maurice import __version__
+from maurice.host.client import _desired_server_meta, _server_meta_compatible
+from maurice.host.context import MauriceContext, resolve_global_context
 from maurice.host.credentials import credentials_path, ensure_workspace_credentials_migrated
 from maurice.host.paths import (
     agents_config_path,
@@ -89,6 +92,7 @@ def inspect_service_status(workspace_root: str | Path) -> ServiceStatusReport:
             summary=f"{bundle.host.gateway.host}:{bundle.host.gateway.port}",
         )
     )
+    checks.append(_daemon_context_check(resolve_global_context(workspace, agent=default_agent, bundle=bundle)))
     checks.append(
         HostCheck(
             name="credentials_store",
@@ -98,6 +102,34 @@ def inspect_service_status(workspace_root: str | Path) -> ServiceStatusReport:
     )
 
     return ServiceStatusReport(ok=all(check.state != "error" for check in checks), checks=checks)
+
+
+def _daemon_context_check(ctx: MauriceContext) -> HostCheck:
+    try:
+        meta = json.loads(ctx.server_meta_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return HostCheck(
+            name="daemon_context",
+            state="warn",
+            summary="not running",
+        )
+    except json.JSONDecodeError:
+        return HostCheck(
+            name="daemon_context",
+            state="error",
+            summary=f"invalid metadata: {ctx.server_meta_path}",
+        )
+    if not _server_meta_compatible(meta, _desired_server_meta(ctx)):
+        return HostCheck(
+            name="daemon_context",
+            state="error",
+            summary="incompatible metadata",
+        )
+    return HostCheck(
+        name="daemon_context",
+        state="ok",
+        summary=f"{ctx.scope}/{ctx.lifecycle} pid={meta.get('pid', '?')}",
+    )
 
 
 def read_service_logs(workspace_root: str | Path, *, agent_id: str | None = None, limit: int = 20) -> list[Event]:

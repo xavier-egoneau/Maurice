@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from maurice.host.auth import CHATGPT_CREDENTIAL_NAME, get_valid_chatgpt_access_token
+from maurice.host.context import MauriceContext, resolve_global_context
 from maurice.host.credentials import CredentialsStore, load_workspace_credentials
 from maurice.host.delivery import _cancel_job_callback, _schedule_reminder_callback
 from maurice.host.paths import maurice_home
@@ -26,7 +27,136 @@ from maurice.kernel.providers import (
     UnsupportedProvider,
 )
 from maurice.kernel.session import SessionStore
-from maurice.kernel.skills import SkillContext, SkillLoader
+from maurice.kernel.skills import SkillContext, SkillHooks, SkillLoader
+from maurice.host.docker_services import ensure_skill_services
+from maurice.host.vision_backend import build_vision_backend
+
+
+def build_global_agent_loop(
+    *,
+    ctx: MauriceContext,
+    message: str,
+    session_id: str,
+    agent_id: str | None = None,
+    source_channel: str | None = None,
+    source_peer_id: str | None = None,
+    source_metadata: dict[str, Any] | None = None,
+    approval_callback: Any = None,
+    text_delta_callback: Any = None,
+    tool_started_callback: Any = None,
+    _prebuilt_registry: Any = None,
+) -> tuple[AgentLoop, Any]:
+    if not isinstance(ctx.config, ConfigBundle):
+        raise TypeError("build_global_agent_loop requires a global MauriceContext")
+    bundle = ctx.config
+    agent = _resolve_agent(bundle, agent_id)
+    workspace = Path(bundle.host.workspace_root)
+    ctx = resolve_global_context(
+        ctx.context_root,
+        agent=agent,
+        bundle=bundle,
+        active_project=ctx.active_project_root,
+    )
+    active_project_root = _turn_active_project_path(ctx, agent, source_metadata)
+    permission_context = PermissionContext(
+        workspace_root=str(ctx.content_root),
+        runtime_root=str(ctx.runtime_root),
+        maurice_home_root=str(maurice_home()),
+        agent_workspace_root=agent.workspace,
+        active_project_root=active_project_root,
+    )
+    event_store = EventStore(ctx.events_path)
+    credentials = load_workspace_credentials(workspace).visible_to(agent.credentials)
+    if _prebuilt_registry is not None:
+        registry = _prebuilt_registry
+    else:
+        registry = SkillLoader(
+            ctx.skill_roots,
+            enabled_skills=agent.skills or bundle.kernel.skills or None,
+            available_credentials=credentials.credentials.keys(),
+            scope=ctx.scope,
+            event_store=event_store,
+            agent_id=agent.id,
+            session_id=session_id,
+        ).load()
+        ensure_skill_services(registry)
+    model_config = _effective_model_config(bundle, agent)
+    provider = _provider_for_config(bundle, message, credentials, agent=agent)
+    skill_ctx = SkillContext(
+        permission_context=permission_context,
+        event_store=event_store,
+        all_skill_configs=ctx.skills_config,
+        skill_roots=ctx.skill_roots,
+        enabled_skills=agent.skills or bundle.kernel.skills,
+        agent_id=agent.id,
+        session_id=session_id,
+        hooks=SkillHooks(
+            context_root=str(ctx.context_root),
+            content_root=str(ctx.content_root),
+            state_root=str(ctx.state_root),
+            memory_path=str(ctx.memory_path),
+            scope=ctx.scope,
+            lifecycle=ctx.lifecycle,
+            schedule_reminder=_schedule_reminder_callback(
+                workspace,
+                agent.id,
+                session_id=session_id,
+                source_channel=source_channel,
+                source_peer_id=source_peer_id,
+                source_metadata=source_metadata,
+            ),
+            cancel_job=_cancel_job_callback(workspace, agent.id),
+            vision_backend=build_vision_backend(ctx.skills_config.get("vision")),
+        ),
+    )
+    sessions_cfg = bundle.kernel.sessions
+    approvals_cfg = bundle.kernel.approvals
+    compaction_config = (
+        CompactionConfig(
+            context_window_tokens=sessions_cfg.context_window_tokens,
+            trim_threshold=sessions_cfg.trim_threshold,
+            summarize_threshold=sessions_cfg.summarize_threshold,
+            reset_threshold=sessions_cfg.reset_threshold,
+            keep_recent_turns=sessions_cfg.keep_recent_turns,
+        )
+        if sessions_cfg.compaction
+        else None
+    )
+    classifier = None
+    if approvals_cfg.mode == "auto":
+        classifier_model = approvals_cfg.classifier_model or str(model_config.get("name") or bundle.kernel.model.name)
+        classifier = Classifier(
+            provider=provider,
+            model=classifier_model,
+            cache_ttl_seconds=approvals_cfg.classifier_cache_ttl_seconds,
+        )
+    return (
+        AgentLoop(
+            provider=provider,
+            registry=registry,
+            session_store=SessionStore(ctx.sessions_path),
+            event_store=event_store,
+            permission_context=permission_context,
+            permission_profile=agent.permission_profile,
+            tool_executors=registry.build_executor_map(skill_ctx),
+            approval_store=ApprovalStore(
+                ctx.approvals_path,
+                event_store=event_store,
+            ),
+            model=str(model_config.get("name") or bundle.kernel.model.name),
+            system_prompt=_agent_system_prompt(
+                workspace,
+                agent=agent,
+                active_project=active_project_root,
+            ),
+            compaction_config=compaction_config,
+            classifier=classifier,
+            approval_callback=approval_callback,
+            text_delta_callback=text_delta_callback,
+            tool_started_callback=tool_started_callback,
+        ),
+        agent,
+    )
 
 
 def _effective_model_label(bundle: ConfigBundle, agent: Any = None) -> str:
@@ -74,11 +204,35 @@ def _active_dev_project_path(agent: Any | None) -> str | None:
     return str((agent_workspace / "content" / active.strip()).resolve())
 
 
-def _agent_system_prompt(workspace: Path, *, agent: Any | None = None) -> str:
+def _turn_active_project_path(
+    ctx: MauriceContext,
+    agent: Any | None,
+    source_metadata: dict[str, Any] | None,
+) -> str | None:
+    metadata_project = (
+        source_metadata.get("active_project_root")
+        if isinstance(source_metadata, dict)
+        else None
+    )
+    if isinstance(metadata_project, str) and metadata_project.strip():
+        return str(Path(metadata_project).expanduser().resolve())
+    if ctx.active_project_root is not None:
+        return str(ctx.active_project_root)
+    return _active_dev_project_path(agent)
+
+
+def _agent_system_prompt(
+    workspace: Path,
+    *,
+    agent: Any | None = None,
+    active_project: str | Path | None = None,
+) -> str:
     from maurice.kernel.system_prompt import build_base_prompt
     agent_workspace = Path(agent.workspace).expanduser().resolve() if agent is not None else None
     agent_content = agent_workspace / "content" if agent_workspace is not None else workspace / "content"
-    project = _active_dev_project_path(agent) if agent is not None else None
+    project = active_project if active_project is not None else (
+        _active_dev_project_path(agent) if agent is not None else None
+    )
     return build_base_prompt(
         workspace=workspace,
         agent_content=agent_content,
@@ -174,86 +328,15 @@ def run_one_turn(
     bundle = load_workspace_config(workspace_root)
     agent = _resolve_agent(bundle, agent_id)
     workspace = Path(bundle.host.workspace_root)
-    event_stream = (
-        Path(agent.event_stream) if agent.event_stream
-        else workspace / "agents" / agent.id / "events.jsonl"
-    )
-    permission_context = PermissionContext(
-        workspace_root=bundle.host.workspace_root,
-        runtime_root=bundle.host.runtime_root,
-        maurice_home_root=str(maurice_home()),
-        agent_workspace_root=agent.workspace,
-        active_project_root=_active_dev_project_path(agent),
-    )
-    event_store = EventStore(event_stream)
-    credentials = load_workspace_credentials(workspace).visible_to(agent.credentials)
-    registry = SkillLoader(
-        bundle.host.skill_roots,
-        enabled_skills=agent.skills or bundle.kernel.skills or None,
-        available_credentials=credentials.credentials.keys(),
-        event_store=event_store,
-        agent_id=agent.id,
+    ctx = resolve_global_context(workspace, agent=agent, bundle=bundle)
+    loop, agent = build_global_agent_loop(
+        ctx=ctx,
+        message=message,
         session_id=session_id,
-    ).load()
-    model_config = _effective_model_config(bundle, agent)
-    provider = _provider_for_config(bundle, message, credentials, agent=agent)
-    skill_ctx = SkillContext(
-        permission_context=permission_context,
-        event_store=event_store,
-        all_skill_configs=bundle.skills.skills,
-        skill_roots=bundle.host.skill_roots,
-        enabled_skills=agent.skills or bundle.kernel.skills,
         agent_id=agent.id,
-        session_id=session_id,
-        extra={
-            "schedule_reminder": _schedule_reminder_callback(
-                workspace,
-                agent.id,
-                session_id=session_id,
-                source_channel=source_channel,
-                source_peer_id=source_peer_id,
-                source_metadata=source_metadata,
-            ),
-            "cancel_job": _cancel_job_callback(workspace, agent.id),
-        },
-    )
-    sessions_cfg = bundle.kernel.sessions
-    approvals_cfg = bundle.kernel.approvals
-    compaction_config = (
-        CompactionConfig(
-            context_window_tokens=sessions_cfg.context_window_tokens,
-            trim_threshold=sessions_cfg.trim_threshold,
-            summarize_threshold=sessions_cfg.summarize_threshold,
-            reset_threshold=sessions_cfg.reset_threshold,
-            keep_recent_turns=sessions_cfg.keep_recent_turns,
-        )
-        if sessions_cfg.compaction
-        else None
-    )
-    classifier = None
-    if approvals_cfg.mode == "auto":
-        classifier_model = approvals_cfg.classifier_model or str(model_config.get("name") or bundle.kernel.model.name)
-        classifier = Classifier(
-            provider=provider,
-            model=classifier_model,
-            cache_ttl_seconds=approvals_cfg.classifier_cache_ttl_seconds,
-        )
-    loop = AgentLoop(
-        provider=provider,
-        registry=registry,
-        session_store=SessionStore(workspace / "sessions"),
-        event_store=event_store,
-        permission_context=permission_context,
-        permission_profile=agent.permission_profile,
-        tool_executors=registry.build_executor_map(skill_ctx),
-        approval_store=ApprovalStore(
-            workspace / "agents" / agent.id / "approvals.json",
-            event_store=event_store,
-        ),
-        model=str(model_config.get("name") or bundle.kernel.model.name),
-        system_prompt=_agent_system_prompt(workspace, agent=agent),
-        compaction_config=compaction_config,
-        classifier=classifier,
+        source_channel=source_channel,
+        source_peer_id=source_peer_id,
+        source_metadata=source_metadata,
     )
     return loop.run_turn(
         agent_id=agent.id,

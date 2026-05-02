@@ -12,14 +12,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-from maurice.host.project import (
-    approvals_path,
-    events_path,
-    global_config_path,
-    config_path,
-    sessions_dir,
-    ensure_maurice_dir,
+from maurice.host.context import (
+    MauriceContext,
+    build_command_callbacks,
+    resolve_global_context,
+    resolve_local_context,
 )
+from maurice.host.runtime import build_global_agent_loop
+from maurice.kernel.config import load_workspace_config
 from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.config import KernelSessionsConfig
 from maurice.kernel.compaction import CompactionConfig
@@ -27,7 +27,9 @@ from maurice.kernel.events import EventStore
 from maurice.kernel.loop import AgentLoop
 from maurice.kernel.permissions import PermissionContext
 from maurice.kernel.session import SessionStore
-from maurice.kernel.skills import SkillContext, SkillLoader, SkillRoot
+from maurice.kernel.skills import SkillContext, SkillHooks, SkillLoader
+from maurice.kernel.tool_labels import tool_action_label
+from maurice.host.vision_backend import build_vision_backend
 
 
 # --- protocol helpers --------------------------------------------------------
@@ -60,21 +62,6 @@ def _read_credential(name: str) -> str | None:
         return record.value if record else None
     except Exception:
         return None
-
-
-# --- config ------------------------------------------------------------------
-
-def _load_project_config(project_root: Path) -> dict[str, Any]:
-    """Merge global ~/.maurice/config.yaml with local .maurice/config.yaml."""
-    import yaml
-
-    cfg: dict[str, Any] = {}
-    for path in (global_config_path(), config_path(project_root)):
-        if path.exists():
-            with open(path, encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            cfg.update(data)
-    return cfg
 
 
 def _build_provider(cfg: dict[str, Any], message: str = "") -> Any:
@@ -111,9 +98,15 @@ def _build_provider(cfg: dict[str, Any], message: str = "") -> Any:
         )
 
     if kind == "ollama":
+        credential = provider_cfg.get("credential")
+        api_key = (
+            cfg.get("credentials", {}).get(credential) or _read_credential(credential)
+            if credential
+            else ""
+        )
         return OllamaCompatibleProvider(
             base_url=provider_cfg.get("base_url", "http://localhost:11434"),
-            api_key="",
+            api_key=api_key,
         )
 
     if kind == "auth":
@@ -168,36 +161,45 @@ def _build_provider(cfg: dict[str, Any], message: str = "") -> Any:
 class MauriceServer:
     IDLE_TIMEOUT = 600  # seconds before auto-shutdown
 
-    def __init__(self, project_root: Path) -> None:
-        self.project_root = project_root.resolve()
-        self.cfg = _load_project_config(self.project_root)
+    def __init__(self, context: Path | MauriceContext) -> None:
+        self.ctx = (
+            context
+            if isinstance(context, MauriceContext)
+            else resolve_local_context(context)
+        )
+        self.cfg = self.ctx.config if isinstance(self.ctx.config, dict) else {}
         self._last_activity = time.monotonic()
         self._lock = threading.Lock()
+        self._active_connections = 0
         self._running = True
 
-        ensure_maurice_dir(self.project_root)
-        sessions_dir(self.project_root).mkdir(parents=True, exist_ok=True)
+        self.ctx.sessions_path.mkdir(parents=True, exist_ok=True)
 
-        from maurice.host.paths import maurice_home
-        runtime_root = str(Path(sys.modules["maurice"].__file__).parent.parent)
-
-        skill_roots = [
-            SkillRoot(path=str(Path(__file__).parent.parent / "system_skills"), origin="system", mutable=False),
-        ]
-        enabled = self.cfg.get("skills") or None
-        self.registry = SkillLoader(skill_roots, enabled_skills=enabled).load()
+        self.registry = SkillLoader(
+            self.ctx.skill_roots,
+            enabled_skills=self.ctx.enabled_skills,
+            scope=self.ctx.scope,
+        ).load()
 
         from maurice.host.command_registry import CommandRegistry
         self.command_registry = CommandRegistry.from_skill_registry(self.registry)
 
-        self.permission_context = PermissionContext(
-            workspace_root=str(self.project_root),
-            runtime_root=runtime_root,
-            agent_workspace_root=str(self.project_root),
-            active_project_root=str(self.project_root),
+        self.permission_context = (
+            PermissionContext(
+                workspace_root=str(self.ctx.content_root),
+                runtime_root=str(self.ctx.runtime_root),
+                agent_workspace_root=str(self.ctx.content_root),
+                active_project_root=str(self.ctx.content_root),
+            )
+            if self.ctx.scope == "local"
+            else None
         )
-        self.permission_profile = self.cfg.get("permission_profile", "limited")
-        sessions_cfg = KernelSessionsConfig()
+        self.permission_profile = self.ctx.permission_profile
+        sessions_cfg = (
+            KernelSessionsConfig()
+            if isinstance(self.ctx.config, dict)
+            else self.ctx.config.kernel.sessions
+        )
         self.compaction_config = CompactionConfig(
             context_window_tokens=sessions_cfg.context_window_tokens,
             trim_threshold=sessions_cfg.trim_threshold,
@@ -207,21 +209,31 @@ class MauriceServer:
         )
 
     def _make_loop(self, provider: Any, conn: socket.socket, buf: bytearray) -> AgentLoop:
-        event_store = EventStore(events_path(self.project_root))
+        event_store = EventStore(self.ctx.events_path)
         skill_ctx = SkillContext(
             permission_context=self.permission_context,
             event_store=event_store,
-            all_skill_configs=self.cfg.get("skills_config", {}),
-            skill_roots=[],
+            all_skill_configs=self.ctx.skills_config,
+            skill_roots=self.ctx.skill_roots,
             enabled_skills=list(self.registry.loaded().keys()),
             agent_id="main",
             session_id=None,
+            hooks=SkillHooks(
+                context_root=str(self.ctx.context_root),
+                content_root=str(self.ctx.content_root),
+                state_root=str(self.ctx.state_root),
+                memory_path=str(self.ctx.memory_path),
+                scope=self.ctx.scope,
+                lifecycle=self.ctx.lifecycle,
+                vision_backend=build_vision_backend(self.ctx.skills_config.get("vision")),
+            ),
         )
 
         def approval_callback(tool_name: str, arguments: dict, permission_class: str, reason: str) -> bool:
             _send(conn, {
                 "type": "approval_required",
                 "tool": tool_name,
+                "label": tool_action_label(tool_name, arguments),
                 "arguments": arguments,
                 "class": permission_class,
                 "reason": reason,
@@ -229,7 +241,10 @@ class MauriceServer:
             msg = _recv_line(conn, buf)
             if msg is None:
                 return False
-            return bool(msg.get("approved", False))
+            return {
+                "approved": bool(msg.get("approved", False)),
+                "scope": msg.get("remember_scope") or msg.get("scope") or "exact",
+            }
 
         def text_delta_callback(delta: str) -> None:
             _send(conn, {"type": "text_delta", "delta": delta})
@@ -239,21 +254,21 @@ class MauriceServer:
 
         from maurice.kernel.system_prompt import build_base_prompt
         system_prompt = build_base_prompt(
-            workspace=self.project_root,
-            agent_content=self.project_root,
-            active_project=self.project_root,
+            workspace=self.ctx.content_root,
+            agent_content=self.ctx.content_root,
+            active_project=self.ctx.content_root,
         )
 
         return AgentLoop(
             provider=provider,
             registry=self.registry,
-            session_store=SessionStore(sessions_dir(self.project_root)),
+            session_store=SessionStore(self.ctx.sessions_path),
             event_store=event_store,
             permission_context=self.permission_context,
             permission_profile=self.permission_profile,
             tool_executors=self.registry.build_executor_map(skill_ctx),
             approval_store=ApprovalStore(
-                approvals_path(self.project_root),
+                self.ctx.approvals_path,
                 event_store=event_store,
             ),
             model=self.cfg.get("provider", {}).get("model", "mock"),
@@ -265,6 +280,7 @@ class MauriceServer:
         )
 
     def _handle_connection(self, conn: socket.socket) -> None:
+        self._connection_opened()
         buf = bytearray()
         try:
             while True:
@@ -290,46 +306,55 @@ class MauriceServer:
                 conn.close()
             except OSError:
                 pass
+            self._connection_closed()
 
     def _handle_turn(self, conn: socket.socket, buf: bytearray, msg: dict) -> None:
         message = msg.get("message", "")
         session_id = msg.get("session_id", "default")
+        agent_id = msg.get("agent_id")
 
         # Slash command routing — dispatch through CommandRegistry before the LLM
         if message.startswith("/"):
-            self._handle_command(conn, buf, message, session_id)
+            self._handle_command(
+                conn,
+                buf,
+                message,
+                session_id,
+                source_metadata=msg.get("source_metadata"),
+            )
             return
 
-        self._run_agent_turn(conn, buf, message, session_id)
+        self._run_agent_turn(
+            conn,
+            buf,
+            message,
+            session_id,
+            agent_id=agent_id,
+            limits=msg.get("limits"),
+            source_channel=msg.get("source_channel"),
+            source_peer_id=msg.get("source_peer_id"),
+            source_metadata=msg.get("source_metadata"),
+            message_metadata=msg.get("message_metadata"),
+        )
 
     def _handle_command(
-        self, conn: socket.socket, buf: bytearray, message: str, session_id: str
+        self,
+        conn: socket.socket,
+        buf: bytearray,
+        message: str,
+        session_id: str,
+        *,
+        source_metadata: dict | None = None,
     ) -> None:
         from maurice.host.command_registry import CommandContext
 
-        def _compact_session(agent_id: str, sid: str) -> str:
-            from maurice.kernel.session import SessionStore
-            from maurice.host.output import _compact_text
-            store = SessionStore(sessions_dir(self.project_root))
-            try:
-                session = store.load(agent_id, sid)
-            except FileNotFoundError:
-                return "Session vide. Rien à compacter."
-            if not session.messages:
-                return "Session vide. Rien à compacter."
-            n = len(session.messages)
-            u = sum(1 for m in session.messages if m.role == "user")
-            a = sum(1 for m in session.messages if m.role == "assistant")
-            recent = [
-                f"- {m.role}: {_compact_text(m.content, 200)}"
-                for m in session.messages[-6:]
-            ]
-            store.reset(agent_id, sid)
-            return (
-                f"Session compactée — {n} messages ({u} user, {a} assistant) effacés.\n\n"
-                "Derniers éléments conservés :\n" + "\n".join(recent)
-            )
+        def _model_summary(agent_id: str) -> str:
+            provider = self.cfg.get("provider") or {}
+            kind = provider.get("type", "mock")
+            model = provider.get("model", "")
+            return f"{kind}:{model or 'mock'}"
 
+        resolved_ctx = self._ctx_with_active_project(source_metadata)
         ctx = CommandContext(
             message_text=message,
             channel="cli",
@@ -337,12 +362,11 @@ class MauriceServer:
             agent_id="main",
             session_id=session_id,
             correlation_id="cli",
-            callbacks={
-                "workspace": str(self.project_root),
-                "agent_workspace": str(self.project_root),
-                "project_root": str(self.project_root),
-                "compact_session": _compact_session,
-            },
+            callbacks=build_command_callbacks(
+                resolved_ctx,
+                command_registry=self.command_registry,
+                model_summary=_model_summary,
+            ),
         )
         try:
             result = self.command_registry.dispatch(ctx)
@@ -354,7 +378,7 @@ class MauriceServer:
 
         if result is None:
             # Unknown command — fall through to LLM
-            self._run_agent_turn(conn, buf, message, session_id)
+            self._run_agent_turn(conn, buf, message, session_id, source_metadata=source_metadata)
             return
 
         # Send command response text
@@ -365,7 +389,14 @@ class MauriceServer:
         agent_prompt = result.metadata.get("agent_prompt")
         if agent_prompt:
             limits = result.metadata.get("agent_limits")
-            self._run_agent_turn(conn, buf, agent_prompt, session_id, limits=limits)
+            self._run_agent_turn(
+                conn,
+                buf,
+                agent_prompt,
+                session_id,
+                limits=limits,
+                source_metadata=source_metadata,
+            )
             return
 
         _send(conn, {"type": "done", "status": "completed"})
@@ -377,8 +408,27 @@ class MauriceServer:
         message: str,
         session_id: str,
         *,
+        agent_id: str | None = None,
         limits: dict | None = None,
+        source_channel: str | None = None,
+        source_peer_id: str | None = None,
+        source_metadata: dict | None = None,
+        message_metadata: dict | None = None,
     ) -> None:
+        if self.ctx.scope == "global":
+            self._run_global_agent_turn(
+                conn,
+                buf,
+                message,
+                session_id,
+                agent_id=agent_id,
+                limits=limits,
+                source_channel=source_channel,
+                source_peer_id=source_peer_id,
+                source_metadata=source_metadata,
+                message_metadata=message_metadata,
+            )
+            return
         provider = _build_provider(self.cfg, message)
         loop = self._make_loop(provider, conn, buf)
         try:
@@ -387,6 +437,7 @@ class MauriceServer:
                 session_id=session_id,
                 message=message,
                 limits=limits,
+                message_metadata=message_metadata,
             )
             if result.error:
                 _send(conn, {"type": "error", "message": result.error})
@@ -396,6 +447,7 @@ class MauriceServer:
             _send(conn, {
                 "type": "done",
                 "status": result.status,
+                "correlation_id": result.correlation_id,
                 "input_tokens": result.input_tokens,
                 "output_tokens": result.output_tokens,
             })
@@ -404,12 +456,116 @@ class MauriceServer:
             _send(conn, {"type": "error", "message": traceback.format_exc()})
             _send(conn, {"type": "done", "status": "failed"})
 
+    def _ctx_with_active_project(self, source_metadata: dict | None) -> MauriceContext:
+        if self.ctx.scope != "global" or not isinstance(source_metadata, dict):
+            return self.ctx
+        active_project = source_metadata.get("active_project_root")
+        if not isinstance(active_project, str) or not active_project.strip():
+            return self.ctx
+        return resolve_global_context(
+            self.ctx.context_root,
+            bundle=self.ctx.config if not isinstance(self.ctx.config, dict) else None,
+            lifecycle=self.ctx.lifecycle,
+            active_project=Path(active_project),
+        )
+
+    def _run_global_agent_turn(
+        self,
+        conn: socket.socket,
+        buf: bytearray,
+        message: str,
+        session_id: str,
+        *,
+        agent_id: str | None = None,
+        limits: dict | None = None,
+        source_channel: str | None = None,
+        source_peer_id: str | None = None,
+        source_metadata: dict | None = None,
+        message_metadata: dict | None = None,
+    ) -> None:
+        def approval_callback(tool_name: str, arguments: dict, permission_class: str, reason: str) -> bool:
+            _send(conn, {
+                "type": "approval_required",
+                "tool": tool_name,
+                "label": tool_action_label(tool_name, arguments),
+                "arguments": arguments,
+                "class": permission_class,
+                "reason": reason,
+            })
+            msg = _recv_line(conn, buf)
+            if msg is None:
+                return False
+            return {
+                "approved": bool(msg.get("approved", False)),
+                "scope": msg.get("remember_scope") or msg.get("scope") or "exact",
+            }
+
+        def text_delta_callback(delta: str) -> None:
+            _send(conn, {"type": "text_delta", "delta": delta})
+
+        def tool_started_callback(tool_name: str, arguments: dict) -> None:
+            _send(conn, {"type": "tool_started", "tool": tool_name, "arguments": arguments})
+
+        try:
+            loop, agent = build_global_agent_loop(
+                ctx=self.ctx,
+                message=message,
+                session_id=session_id,
+                agent_id=agent_id,
+                source_channel=source_channel,
+                source_peer_id=source_peer_id,
+                source_metadata=source_metadata,
+                approval_callback=approval_callback,
+                text_delta_callback=text_delta_callback,
+                tool_started_callback=tool_started_callback,
+            )
+            result = loop.run_turn(
+                agent_id=agent.id,
+                session_id=session_id,
+                message=message,
+                limits=limits,
+                message_metadata=message_metadata,
+            )
+            if result.error:
+                _send(conn, {"type": "error", "message": result.error})
+            for tr in result.tool_results:
+                _send(conn, {"type": "tool_result", "summary": tr.summary, "ok": tr.ok,
+                             "error": tr.error.code if tr.error else None})
+            _send(conn, {
+                "type": "done",
+                "status": result.status,
+                "correlation_id": result.correlation_id,
+                "assistant_text": result.assistant_text,
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens,
+            })
+        except Exception:
+            import traceback
+            _send(conn, {"type": "error", "message": traceback.format_exc()})
+            _send(conn, {"type": "done", "status": "failed"})
+
     def _idle_watchdog(self) -> None:
         while self._running:
             time.sleep(30)
-            if time.monotonic() - self._last_activity > self.IDLE_TIMEOUT:
+            if self._should_stop_for_idle(time.monotonic()):
                 self._running = False
                 os.kill(os.getpid(), signal.SIGTERM)
+
+    def _connection_opened(self) -> None:
+        with self._lock:
+            self._active_connections += 1
+            self._last_activity = time.monotonic()
+
+    def _connection_closed(self) -> None:
+        with self._lock:
+            self._active_connections = max(0, self._active_connections - 1)
+            self._last_activity = time.monotonic()
+
+    def _should_stop_for_idle(self, now: float) -> bool:
+        with self._lock:
+            if self._active_connections:
+                return False
+            return now - self._last_activity > self.IDLE_TIMEOUT
 
     def serve(self, socket_path: Path) -> None:
         if socket_path.exists():
@@ -421,7 +577,8 @@ class MauriceServer:
         srv.listen(8)
         srv.settimeout(2.0)
 
-        threading.Thread(target=self._idle_watchdog, daemon=True).start()
+        if self.ctx.lifecycle == "transient":
+            threading.Thread(target=self._idle_watchdog, daemon=True).start()
 
         def _shutdown(*_: Any) -> None:
             self._running = False
@@ -444,13 +601,20 @@ class MauriceServer:
 
 
 def main() -> None:
-    """Entry point when spawned as a subprocess: python -m maurice.host.server <project_root>."""
+    """Entry point when spawned as a subprocess."""
+    if len(sys.argv) >= 3 and sys.argv[1] == "--global":
+        workspace = Path(sys.argv[2]).resolve()
+        bundle = load_workspace_config(workspace)
+        agent = next((item for item in bundle.agents.agents.values() if item.default), None)
+        ctx = resolve_global_context(workspace, agent=agent, bundle=bundle)
+        MauriceServer(ctx).serve(ctx.server_socket_path)
+        return
     if len(sys.argv) < 2:
-        print("usage: maurice-server <project_root>", file=sys.stderr)
+        print("usage: maurice-server [--global <workspace_root>] <project_root>", file=sys.stderr)
         sys.exit(1)
     project_root = Path(sys.argv[1]).resolve()
-    socket_path = project_root / ".maurice" / "run" / "server.socket"
-    MauriceServer(project_root).serve(socket_path)
+    ctx = resolve_local_context(project_root)
+    MauriceServer(ctx).serve(ctx.server_socket_path)
 
 
 if __name__ == "__main__":

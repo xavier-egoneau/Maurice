@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import getpass
 import json
 import os
 import signal
+import secrets
 import subprocess
 import threading
+import webbrowser
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sys
@@ -52,13 +55,14 @@ from maurice.host.commands.scheduler import (
 )
 from maurice.host.commands.gateway_server import (
     _gateway_local_message, _gateway_serve, _gateway_serve_until_stopped,
-    _build_gateway_http_server, _gateway_telegram_poll,
+    _build_gateway_http_server, _build_gateway_http_server_for_context, _gateway_telegram_poll,
     _gateway_web_agents, _gateway_web_session_history,
     _looks_like_internal_gateway_message, _gateway_web_session_reset,
     _telegram_poll_until_stopped, _telegram_poll_once,
     _gateway_router_for, _reset_gateway_session, _record_gateway_exchange,
-    _compact_gateway_session, _dev_plan_wizard_store_path, _gateway_model_summary,
+    _compact_gateway_session, _gateway_model_summary,
 )
+from maurice.host.context import MauriceContext, resolve_global_context, resolve_local_context
 from maurice.host.commands.dashboard import (
     _dashboard, _dashboard_textual, _dashboard_rich,
     _rich_table, _cluster_rows, _log_level_text,
@@ -85,6 +89,7 @@ from maurice.host.commands.onboard import (
     _chatgpt_model_choices, _ollama_model_choices, _is_local_ollama_url,
     _format_bytes, _real_provider_default, _ask_yes_no,
 )
+from maurice.host.setup import run_setup
 from maurice.host.output import (
     _yes_no, _status_marker, _short, _ansi_padding, _compact_text,
     _supports_color, _color, _print_title, _print_dim, _print_host_checks,
@@ -152,6 +157,7 @@ from maurice.host.paths import (
     maurice_home,
     workspace_skills_config_path,
 )
+from maurice.host.project import global_config_path, resolve_project_root
 from maurice.host.secret_capture import capture_pending_secret
 from maurice.host.self_update import (
     apply_runtime_proposal,
@@ -191,14 +197,121 @@ DEFAULT_SEARXNG_URL = "http://localhost:8080"
 DEFAULT_WORKSPACE = Path.home() / "Documents" / "workspace_maurice"
 
 
+def _resolve_service_workspace(workspace_arg: str | None, *, command: str) -> Path:
+    if workspace_arg:
+        return Path(workspace_arg)
+    config = read_yaml_file(global_config_path())
+    usage = config.get("usage") if isinstance(config.get("usage"), dict) else {}
+    mode = str(usage.get("mode") or "local")
+    configured_workspace = usage.get("workspace")
+    if mode == "global":
+        return Path(str(configured_workspace)).expanduser() if configured_workspace else DEFAULT_WORKSPACE
+    raise SystemExit(
+        f"`maurice {command}` démarre l'assistant de bureau, mais Maurice est réglé pour démarrer dans un dossier.\n"
+        "Utilise `maurice` ou `maurice chat` dans un dossier.\n"
+        "Pour passer au contexte global, lance `maurice setup`, choisis `global`, "
+        "puis relance `maurice start`.\n"
+        "Tu peux aussi passer explicitement `--workspace /chemin/du/workspace-global` "
+        "pour démarrer un daemon global ponctuel."
+    )
+
+
+def _resolve_web_context(*, dir_arg: str | None, workspace_arg: str | None) -> MauriceContext:
+    if dir_arg and workspace_arg:
+        raise SystemExit("Utilise soit `--dir` pour un contexte local, soit `--workspace` pour un contexte global.")
+    if workspace_arg:
+        return resolve_global_context(
+            Path(workspace_arg),
+            active_project=resolve_project_root(Path.cwd(), confirm=False),
+        )
+    if dir_arg:
+        return resolve_local_context(Path(dir_arg))
+
+    config = read_yaml_file(global_config_path())
+    usage = config.get("usage") if isinstance(config.get("usage"), dict) else {}
+    mode = str(usage.get("mode") or "local")
+    if mode == "global":
+        workspace = Path(str(usage.get("workspace") or DEFAULT_WORKSPACE)).expanduser()
+        return resolve_global_context(
+            workspace,
+            active_project=resolve_project_root(Path.cwd(), confirm=False),
+        )
+
+    project_root = resolve_project_root(Path.cwd(), confirm=True)
+    if project_root is None:
+        raise SystemExit("Aucun dossier de travail choisi.")
+    return resolve_local_context(project_root)
+
+
+def _web_chat(
+    *,
+    dir_arg: str | None,
+    workspace_arg: str | None,
+    agent_id: str | None,
+    host: str,
+    port: int,
+    open_browser: bool,
+) -> None:
+    ctx = _resolve_web_context(dir_arg=dir_arg, workspace_arg=workspace_arg)
+    if ctx.scope == "local" and agent_id not in {None, "main"}:
+        raise SystemExit("Le contexte local expose seulement l'agent `main`.")
+    token = secrets.token_urlsafe(24)
+    try:
+        server = _build_gateway_http_server_for_context(
+            ctx,
+            agent_id=agent_id,
+            host=host,
+            port=port,
+            web_token=token,
+        )
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            raise SystemExit(
+                f"Le port {port} est déjà utilisé. Relance avec `maurice web --port 0` "
+                "pour choisir un port libre automatiquement."
+            ) from exc
+        raise
+    bound_host, bound_port = server.address
+    url_host = "127.0.0.1" if bound_host in {"", "0.0.0.0", "::"} else bound_host
+    if ":" in url_host and not url_host.startswith("["):
+        url_host = f"[{url_host}]"
+    url = f"http://{url_host}:{bound_port}?token={token}"
+    print(f"Maurice web chat ({ctx.scope}) listening on {url}")
+    if ctx.active_project_root is not None:
+        print(f"Working directory: {ctx.active_project_root}")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("Maurice web chat stopped")
+    finally:
+        server.shutdown()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="maurice",
-        description="Maurice agent runtime.",
+        description="Maurice: un assistant, ouvert sur un dossier ou disponible comme assistant de bureau.",
+        epilog=(
+            "Parcours rapides:\n"
+            "  Dossier : cd /chemin/du/projet && maurice\n"
+            "  Web    : maurice web\n"
+            "  Bureau : maurice setup  # choisir global, puis maurice start\n"
+            "\n"
+            "Le contexte global n'est pas un second produit: il utilise la même brique agentique "
+            "avec un workspace et une mémoire centralisés, comme un niveau au-dessus du dossier."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--session",
+        default="default",
+        help="Session id for interactive chat when no subcommand is provided.",
+    )
 
-    subparsers = parser.add_subparsers(dest="command")
+    subparsers = parser.add_subparsers(dest="command", metavar="command")
     doctor_parser = subparsers.add_parser("doctor", help="Check the local Maurice installation.")
     doctor_parser.add_argument(
         "--workspace",
@@ -209,51 +322,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--workspace",
         help="Optional workspace root to include in install checks.",
     )
-    onboard_parser = subparsers.add_parser("onboard", help="Initialize a Maurice workspace.")
-    onboard_parser.add_argument(
-        "--workspace",
-        default=str(DEFAULT_WORKSPACE),
-        help=f"Workspace root to create or update. Defaults to {DEFAULT_WORKSPACE}.",
-    )
-    onboard_parser.add_argument(
-        "--agent",
-        nargs="?",
-        const="",
-        help="Onboard a new durable agent. If omitted after --agent, the wizard asks for the id.",
-    )
-    onboard_parser.add_argument(
-        "--model",
+    setup_parser = subparsers.add_parser("setup", help="Configure context level, provider, permissions, and workspace.")
+    setup_parser.add_argument(
+        "--show-mock",
         action="store_true",
-        help="With --agent, update only this agent's model configuration.",
-    )
-    onboard_parser.add_argument(
-        "--permission-profile",
-        choices=["safe", "limited", "power"],
-        default="safe",
-        help="Default permission profile for the main agent.",
-    )
-    onboard_parser.add_argument(
-        "--interactive",
-        action="store_true",
-        help="Ask for model, gateway, and provider basics after workspace creation.",
+        help="Show the mock provider option for tests and runtime development.",
     )
     start_parser = subparsers.add_parser("start", help="Start Maurice background services.")
-    start_parser.add_argument("--workspace", default=str(DEFAULT_WORKSPACE), help="Workspace root to use.")
+    start_parser.add_argument("--workspace", help="Global workspace root to use.")
     start_parser.add_argument("--agent", help="Agent id to use. Defaults to configured agents.")
     start_parser.add_argument("--poll-seconds", type=float, default=2.0, help="Polling interval.")
     start_parser.add_argument("--no-telegram", action="store_true", help="Do not start Telegram polling.")
     start_parser.add_argument("--no-scheduler", action="store_true", help="Do not start the scheduler.")
     start_parser.add_argument("--no-gateway", action="store_true", help="Do not start the local HTTP gateway.")
+    start_parser.add_argument("--no-browser", action="store_true", help="Do not open the browser after start.")
     start_parser.add_argument("--foreground", action="store_true", help="Keep services attached to this terminal.")
     stop_parser = subparsers.add_parser("stop", help="Stop a running Maurice instance.")
     stop_parser.add_argument("--workspace", default=str(DEFAULT_WORKSPACE), help="Workspace root to use.")
     restart_parser = subparsers.add_parser("restart", help="Restart Maurice background services.")
-    restart_parser.add_argument("--workspace", default=str(DEFAULT_WORKSPACE), help="Workspace root to use.")
+    restart_parser.add_argument("--workspace", help="Global workspace root to use.")
     restart_parser.add_argument("--agent", help="Agent id to use. Defaults to configured agents.")
     restart_parser.add_argument("--poll-seconds", type=float, default=2.0, help="Polling interval.")
     restart_parser.add_argument("--no-telegram", action="store_true", help="Do not start Telegram polling.")
     restart_parser.add_argument("--no-scheduler", action="store_true", help="Do not start the scheduler.")
     restart_parser.add_argument("--no-gateway", action="store_true", help="Do not start the local HTTP gateway.")
+    restart_parser.add_argument("--no-browser", action="store_true", help="Do not open the browser after restart.")
     logs_parser = subparsers.add_parser("logs", help="Show recent Maurice event logs.")
     logs_parser.add_argument("--workspace", default=str(DEFAULT_WORKSPACE), help="Workspace root to inspect.")
     logs_parser.add_argument("--agent", help="Agent id to inspect. Defaults to the configured default agent.")
@@ -275,6 +368,13 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser = subparsers.add_parser("chat", help="Start an interactive REPL in the current directory.")
     chat_parser.add_argument("--session", default="default", help="Session id to use.")
     chat_parser.add_argument("--dir", help="Project root (defaults to CWD).")
+    web_parser = subparsers.add_parser("web", help="Open a browser chat for the configured context.")
+    web_parser.add_argument("--dir", help="Project root for a local browser chat.")
+    web_parser.add_argument("--workspace", help="Global workspace root for a global browser chat.")
+    web_parser.add_argument("--agent", help="Agent id for global browser chat. Local chat uses main.")
+    web_parser.add_argument("--host", default="127.0.0.1", help="Host to bind. Defaults to 127.0.0.1.")
+    web_parser.add_argument("--port", type=int, default=0, help="Port to bind. Defaults to a free port.")
+    web_parser.add_argument("--no-browser", action="store_true", help="Do not open the browser.")
 
     agents_parser = subparsers.add_parser("agents", help="Manage permanent agents.")
     agents_subparsers = agents_parser.add_subparsers(dest="agents_command")
@@ -615,9 +715,78 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_onboard_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="maurice onboard",
+        description="Deprecated compatibility alias for legacy workspace onboarding.",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=str(DEFAULT_WORKSPACE),
+        help=f"Workspace root to create or update. Defaults to {DEFAULT_WORKSPACE}.",
+    )
+    parser.add_argument(
+        "--agent",
+        nargs="?",
+        const="",
+        help="Onboard a new durable agent. If omitted after --agent, the wizard asks for the id.",
+    )
+    parser.add_argument(
+        "--model",
+        action="store_true",
+        help="With --agent, update only this agent's model configuration.",
+    )
+    parser.add_argument(
+        "--permission-profile",
+        choices=["safe", "limited", "power"],
+        default="safe",
+        help="Default permission profile for the main agent.",
+    )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Ask for model, gateway, and provider basics after workspace creation.",
+    )
+    return parser
+
+
+def _run_onboard_command(args: argparse.Namespace) -> int:
+    runtime_root = Path(__file__).resolve().parents[2]
+    workspace_arg = Path(args.workspace)
+    if args.agent is not None and not host_config_path(workspace_arg).exists():
+        initialize_workspace(
+            workspace_arg,
+            runtime_root,
+            permission_profile=args.permission_profile,
+        )
+    if args.model and args.agent is None:
+        raise SystemExit("Use --model with --agent <id>.")
+    if args.agent is not None:
+        if args.model:
+            _onboard_agent_model(workspace_arg, agent_id=args.agent)
+        else:
+            _onboard_agent(workspace_arg, agent_id=args.agent)
+        return 0
+    existing = _onboarding_existing_values(workspace_arg) if args.interactive else {}
+    workspace = initialize_workspace(
+        workspace_arg,
+        runtime_root,
+        permission_profile=args.permission_profile,
+    )
+    if args.interactive:
+        _onboard_interactive(workspace, existing=existing)
+    else:
+        print(f"Maurice workspace initialized: {workspace}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == "onboard":
+        return _run_onboard_command(_build_onboard_parser().parse_args(raw_argv[1:]))
+
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
 
     if args.command == "doctor":
         if args.workspace:
@@ -630,34 +799,14 @@ def main(argv: list[str] | None = None) -> int:
         _install(workspace_root=Path(args.workspace) if args.workspace else None)
         return 0
 
-    if args.command == "onboard":
-        runtime_root = Path(__file__).resolve().parents[2]
-        workspace_arg = Path(args.workspace)
-        if args.agent is not None and not host_config_path(workspace_arg).exists():
-            initialize_workspace(
-                workspace_arg,
-                runtime_root,
-                permission_profile=args.permission_profile,
-            )
-        if args.model and args.agent is None:
-            raise SystemExit("Use --model with --agent <id>.")
-        if args.agent is not None:
-            if args.model:
-                _onboard_agent_model(workspace_arg, agent_id=args.agent)
-            else:
-                _onboard_agent(workspace_arg, agent_id=args.agent)
-            return 0
-        existing = _onboarding_existing_values(workspace_arg) if args.interactive else {}
-        workspace = initialize_workspace(
-            workspace_arg,
-            runtime_root,
-            permission_profile=args.permission_profile,
-        )
-        if args.interactive:
-            _onboard_interactive(workspace, existing=existing)
-        else:
-            print(f"Maurice workspace initialized: {workspace}")
-        return 0
+    if args.command == "setup":
+        if args.show_mock:
+            os.environ["MAURICE_SETUP_SHOW_MOCK"] = "1"
+        try:
+            return 0 if run_setup() else 1
+        except (EOFError, KeyboardInterrupt):
+            print("\nAnnulé.", file=sys.stderr)
+            return 1
 
     if args.command == "run":
         result = run_one_turn(
@@ -676,23 +825,26 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "start":
+        workspace = _resolve_service_workspace(args.workspace, command="start")
         if args.foreground:
             _start_services(
-                Path(args.workspace),
+                workspace,
                 agent_id=args.agent,
                 poll_seconds=args.poll_seconds,
                 telegram=not args.no_telegram,
                 scheduler=not args.no_scheduler,
                 gateway=not args.no_gateway,
+                open_browser=not args.no_browser,
             )
         else:
             _start_services_daemon(
-                Path(args.workspace),
+                workspace,
                 agent_id=args.agent,
                 poll_seconds=args.poll_seconds,
                 telegram=not args.no_telegram,
                 scheduler=not args.no_scheduler,
                 gateway=not args.no_gateway,
+                open_browser=not args.no_browser,
             )
         return 0
 
@@ -701,13 +853,26 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "restart":
+        workspace = _resolve_service_workspace(args.workspace, command="restart")
         _restart_services_daemon(
-            Path(args.workspace),
+            workspace,
             agent_id=args.agent,
             poll_seconds=args.poll_seconds,
             telegram=not args.no_telegram,
             scheduler=not args.no_scheduler,
             gateway=not args.no_gateway,
+            open_browser=not args.no_browser,
+        )
+        return 0
+
+    if args.command == "web":
+        _web_chat(
+            dir_arg=args.dir,
+            workspace_arg=args.workspace,
+            agent_id=args.agent,
+            host=args.host,
+            port=args.port,
+            open_browser=not args.no_browser,
         )
         return 0
 

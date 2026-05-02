@@ -1,0 +1,16 @@
+use_default_settings: true
+
+server:
+  # Change this key before any network exposure
+  secret_key: "maurice-searxng-local-only"
+  base_url: "http://localhost:18080"
+  bind_address: "0.0.0.0:8080"
+
+search:
+  formats:
+    - html
+    - json
+
+ui:
+  default_theme: simple
+  default_locale: fr

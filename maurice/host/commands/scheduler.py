@@ -26,6 +26,7 @@ from maurice.host.auth import (
 )
 from maurice.host.channels import ChannelAdapterRegistry
 from maurice.host.command_registry import CommandRegistry, default_command_registry
+from maurice.host.context import resolve_global_context
 from maurice.host.credentials import (
     CredentialRecord, CredentialsStore, credentials_path,
     ensure_workspace_credentials_migrated, load_workspace_credentials, write_workspace_credentials,
@@ -80,7 +81,8 @@ from maurice.kernel.providers import (
 from maurice.kernel.runs import RunApprovalStore, RunCoordinationStore, RunExecutor, RunStore
 from maurice.kernel.scheduler import JobRunner, JobStatus, JobStore, SchedulerService, utc_now
 from maurice.kernel.session import SessionStore
-from maurice.kernel.skills import SkillContext, SkillLoader
+from maurice.kernel.skills import SkillContext, SkillHooks, SkillLoader
+from maurice.host.vision_backend import build_vision_backend
 from maurice.system_skills.reminders.tools import fire_reminder
 
 def _scheduler_schedule_dream(
@@ -218,15 +220,11 @@ def _job_store_for(workspace_root: Path, agent_id: str | None):
     bundle = load_workspace_config(workspace_root)
     agent = _resolve_agent(bundle, agent_id)
     workspace = Path(bundle.host.workspace_root)
-    event_stream = (
-        Path(agent.event_stream)
-        if agent.event_stream
-        else workspace / "agents" / agent.id / "events.jsonl"
-    )
+    ctx = resolve_global_context(workspace, agent=agent, bundle=bundle)
     return (
         JobStore(
             workspace / "agents" / agent.id / "jobs.json",
-            event_store=EventStore(event_stream),
+            event_store=EventStore(ctx.events_path),
         ),
         agent,
     )
@@ -352,23 +350,21 @@ def _scheduler_handlers(workspace_root: Path, agent_id: str):
     bundle = load_workspace_config(workspace_root)
     agent = _resolve_agent(bundle, agent_id)
     workspace = Path(bundle.host.workspace_root)
-    event_stream = (
-        Path(agent.event_stream)
-        if agent.event_stream
-        else workspace / "agents" / agent.id / "events.jsonl"
-    )
-    event_store = EventStore(event_stream)
+    ctx = resolve_global_context(workspace, agent=agent, bundle=bundle)
+    event_store = EventStore(ctx.events_path)
     credentials = load_workspace_credentials(workspace).visible_to(agent.credentials)
     context = PermissionContext(
-        workspace_root=bundle.host.workspace_root,
-        runtime_root=bundle.host.runtime_root,
+        workspace_root=str(ctx.content_root),
+        runtime_root=str(ctx.runtime_root),
         maurice_home_root=str(maurice_home()),
         agent_workspace_root=agent.workspace,
+        active_project_root=_active_dev_project_path(agent),
     )
     registry = SkillLoader(
-        bundle.host.skill_roots,
+        ctx.skill_roots,
         enabled_skills=agent.skills or bundle.kernel.skills or None,
         available_credentials=credentials.credentials.keys(),
+        scope=ctx.scope,
         event_store=event_store,
         agent_id=agent.id,
         session_id="scheduler",
@@ -376,11 +372,20 @@ def _scheduler_handlers(workspace_root: Path, agent_id: str):
     skill_ctx = SkillContext(
         permission_context=context,
         event_store=event_store,
-        all_skill_configs=bundle.skills.skills,
-        skill_roots=bundle.host.skill_roots,
+        all_skill_configs=ctx.skills_config,
+        skill_roots=ctx.skill_roots,
         enabled_skills=agent.skills or bundle.kernel.skills,
         agent_id=agent.id,
         session_id="scheduler",
+        hooks=SkillHooks(
+            context_root=str(ctx.context_root),
+            content_root=str(ctx.content_root),
+            state_root=str(ctx.state_root),
+            memory_path=str(ctx.memory_path),
+            scope=ctx.scope,
+            lifecycle=ctx.lifecycle,
+            vision_backend=build_vision_backend(ctx.skills_config.get("vision")),
+        ),
     )
     dreaming = registry.build_executor_map(skill_ctx)
 
@@ -405,4 +410,3 @@ def _scheduler_handlers(workspace_root: Path, agent_id: str):
         return result
 
     return {"dreaming.run": run_dream, "daily.digest": run_daily, "reminders.fire": run_reminder}
-

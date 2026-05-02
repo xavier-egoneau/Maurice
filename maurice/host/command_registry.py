@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib import import_module
-from typing import Any
+from typing import Any, Literal
 
 from maurice.kernel.skills import SkillRegistry
 
@@ -30,6 +30,7 @@ class CommandContext:
 
 
 CommandHandler = Callable[[CommandContext], CommandResult]
+CommandScope = Literal["local", "global"]
 
 
 @dataclass(frozen=True)
@@ -40,9 +41,13 @@ class RuntimeCommand:
     handler: CommandHandler | None = None
     renderer: str = "markdown"
     aliases: tuple[str, ...] = ()
+    available_in: tuple[CommandScope, ...] = ("local", "global")
 
     def all_names(self) -> tuple[str, ...]:
         return (self.name, *self.aliases)
+
+    def available_for(self, scope: str | None) -> bool:
+        return scope not in {"local", "global"} or scope in self.available_in
 
 
 class CommandRegistry:
@@ -71,10 +76,11 @@ class CommandRegistry:
             return None
         return command.handler(context)
 
-    def help_text(self, *, title: str = "Commandes Maurice") -> str:
+    def help_text(self, *, title: str = "Commandes Maurice", scope: str | None = None) -> str:
         unique: dict[str, RuntimeCommand] = {}
         for command in self._commands.values():
-            unique[command.name] = command
+            if command.available_for(scope):
+                unique[command.name] = command
         grouped: dict[str, list[RuntimeCommand]] = defaultdict(list)
         for command in unique.values():
             grouped[command.owner].append(command)
@@ -107,6 +113,7 @@ class CommandRegistry:
                 handler=_handler_from_path(command.handler),
                 renderer=command.renderer,
                 aliases=tuple(command.aliases),
+                available_in=tuple(command.available_in),
             )
             if all(command_registry.command_for_text(name) is None for name in runtime.all_names()):
                 command_registry.register(runtime)
@@ -141,6 +148,12 @@ def core_commands() -> list[RuntimeCommand]:
             owner="system",
             handler=_model_handler,
         ),
+        RuntimeCommand(
+            name="/setup",
+            description="configurer Maurice ou passer en assistant de bureau",
+            owner="system",
+            handler=_setup_handler,
+        ),
     ]
 
 
@@ -151,6 +164,7 @@ def default_command_registry() -> CommandRegistry:
             name="/add_agent",
             description="creer un nouvel agent",
             owner="host",
+            available_in=("global",),
         )
     )
     registry.register(
@@ -158,6 +172,7 @@ def default_command_registry() -> CommandRegistry:
             name="/edit_agent",
             description="modifier un agent (`/edit_agent <agent>`)",
             owner="host",
+            available_in=("global",),
         )
     )
     return registry
@@ -173,10 +188,12 @@ def command_name_from_text(text: str) -> str:
 
 def _help_handler(context: CommandContext) -> CommandResult:
     registry = context.callbacks.get("command_registry")
+    scope = context.callbacks.get("scope")
+    scope_value = str(scope) if scope is not None else None
     if isinstance(registry, CommandRegistry):
-        text = registry.help_text()
+        text = registry.help_text(scope=scope_value)
     else:
-        text = default_command_registry().help_text()
+        text = default_command_registry().help_text(scope=scope_value)
     return CommandResult(text=text, metadata={"command": "/help"})
 
 
@@ -210,6 +227,24 @@ def _model_handler(context: CommandContext) -> CommandResult:
         )
     text = model_summary(context.agent_id)
     return CommandResult(text=str(text), metadata={"command": "/model"})
+
+
+def _setup_handler(context: CommandContext) -> CommandResult:
+    scope = str(context.callbacks.get("scope") or "")
+    if scope == "global":
+        text = (
+            "Maurice est deja ouvert au niveau assistant de bureau pour cette surface.\n\n"
+            "Pour reconfigurer le niveau de contexte, le provider, les permissions ou le workspace, lance :\n\n"
+            "```bash\nmaurice setup\n```"
+        )
+    else:
+        text = (
+            "Tu es dans un contexte dossier. Pour configurer Maurice ou passer en assistant de bureau, lance :\n\n"
+            "```bash\nmaurice setup\n```\n\n"
+            "Le wizard proposera le contexte dossier ou le contexte global. En global, Maurice "
+            "choisira un workspace, une memoire centrale et pourra rester disponible avec `maurice start`."
+        )
+    return CommandResult(text=text, metadata={"command": "/setup"})
 
 
 def _owner_title(owner: str) -> str:

@@ -35,6 +35,18 @@ class ClassifierDecision:
     cached: bool = False
 
 
+@dataclass(frozen=True)
+class ClassifierOutcome:
+    """Envelope returned by AgentLoop._run_classifier."""
+    decision: ClassifierDecision | None
+    circuit_open: bool = False
+
+    @property
+    def ran(self) -> bool:
+        """True if the classifier produced a decision (not absent, not circuit-open)."""
+        return self.decision is not None and not self.circuit_open
+
+
 @dataclass
 class CircuitBreaker:
     consecutive_limit: int = 3

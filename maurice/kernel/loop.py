@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 from typing import Any
 from urllib.parse import urlparse
 
 from maurice.kernel.approvals import ApprovalStore
-from maurice.kernel.classifier import Classifier, ClassifierDecision
+from maurice.kernel.classifier import Classifier, ClassifierDecision, ClassifierOutcome
 from maurice.kernel.compaction import CompactionConfig, CompactionLevel, compact_messages
 from maurice.kernel.shell_parser import parse as parse_shell
 from maurice.kernel.contracts import (
@@ -34,9 +34,10 @@ from maurice.kernel.permissions import (
 from maurice.kernel.providers import Provider
 from maurice.kernel.session import SessionMessage, SessionRecord, SessionStore
 from maurice.kernel.skills import SkillRegistry
+from maurice.kernel.tool_labels import tool_action_label, tool_short_label, tool_target
 
 ToolExecutor = Callable[[dict[str, Any]], ToolResult | dict[str, Any]]
-ApprovalCallback = Callable[[str, dict[str, Any], str, str], bool]  # tool, args, class, reason → approved
+ApprovalCallback = Callable[[str, dict[str, Any], str, str], bool | str | dict[str, Any]]
 TextDeltaCallback = Callable[[str], None]
 ToolStartedCallback = Callable[[str, dict[str, Any]], None]  # tool_name, arguments
 
@@ -51,30 +52,41 @@ class TurnResult:
     error: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    tool_activity: list[dict[str, Any]] = field(default_factory=list)
 
 
 class ToolExecutionError(RuntimeError):
     pass
 
 
+def _approval_response(value: bool | str | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return {
+            "approved": bool(value.get("approved")),
+            "scope": str(value.get("scope") or "exact"),
+        }
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return {
+            "approved": normalized in {"y", "yes", "o", "oui", "ok", "session", "tool_session"},
+            "scope": "session" if normalized in {"session", "tool_session"} else "exact",
+        }
+    return {"approved": bool(value), "scope": "exact"}
+
+
 def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Remove tool results that have no matching tool call (orphaned after interrupted turns)."""
-    # Collect all tool call ids from kernel-recorded tool_call messages
-    tool_call_ids: set[str] = set()
+    result: list[dict[str, Any]] = []
+    previous_tool_call_ids: set[str] = set()
     for msg in messages:
         meta = msg.get("metadata") or {}
-        if msg.get("role") == "assistant" and meta.get("tool_call"):
+        if msg.get("role") == "tool_call":
             call_id = meta.get("tool_call_id")
             if call_id:
-                tool_call_ids.add(call_id)
-
-    result = []
-    for msg in messages:
-        meta = msg.get("metadata") or {}
-        # Drop orphaned tool results (no matching tool call in history)
+                previous_tool_call_ids.add(call_id)
         if msg.get("role") == "tool":
             call_id = meta.get("tool_call_id")
-            if call_id and tool_call_ids and call_id not in tool_call_ids:
+            if call_id and call_id not in previous_tool_call_ids:
                 continue
         result.append(msg)
     return result
@@ -154,6 +166,7 @@ class AgentLoop:
 
         assistant_text = ""
         tool_results: list[ToolResult] = []
+        tool_activity: list[dict[str, Any]] = []
         status = "completed"
         provider_error: str | None = None
         max_tool_iterations = _max_tool_iterations(limits)
@@ -163,6 +176,7 @@ class AgentLoop:
             for iteration in range(max_tool_iterations):
                 iteration_text = ""
                 iteration_tool_results: list[ToolResult] = []
+                terminal_status_seen = False
                 for chunk in self.provider.stream(
                     messages=self._provider_messages(agent_id, session.id),
                     model=self.model,
@@ -182,45 +196,66 @@ class AgentLoop:
                         self.session_store.append_message(
                             agent_id,
                             session.id,
-                            role="assistant",
+                            role="tool_call",
                             content="",
                             correlation_id=correlation_id,
                             metadata={
-                                "tool_call": True,
                                 "tool_call_id": chunk.tool_call.id,
                                 "tool_name": chunk.tool_call.name,
                                 "tool_arguments": chunk.tool_call.arguments,
                             },
                         )
-                        iteration_tool_results.append(
-                            self._handle_tool_call(
-                                chunk.tool_call,
-                                agent_id=agent_id,
-                                session_id=session.id,
-                                correlation_id=correlation_id,
-                            )
+                        _result = self._handle_tool_call(
+                            chunk.tool_call,
+                            agent_id=agent_id,
+                            session_id=session.id,
+                            correlation_id=correlation_id,
+                        )
+                        iteration_tool_results.append(_result)
+                        tool_activity.append(
+                            _tool_activity_entry(chunk.tool_call.name, chunk.tool_call.arguments, _result)
                         )
                         continue
                     if chunk.type == ProviderChunkType.USAGE and chunk.usage is not None:
                         total_input_tokens += chunk.usage.input_tokens
                         total_output_tokens += chunk.usage.output_tokens
                         continue
-                    if chunk.type == ProviderChunkType.STATUS and chunk.status == ProviderStatus.FAILED:
-                        status = "failed"
-                        if chunk.error is not None:
-                            provider_error = f"{chunk.error.code}: {chunk.error.message}"
+                    if chunk.type == ProviderChunkType.STATUS:
+                        terminal_status_seen = True
+                        if chunk.status == ProviderStatus.FAILED:
+                            status = "failed"
+                            if chunk.error is not None:
+                                provider_error = f"{chunk.error.code}: {chunk.error.message}"
+                        continue
+                if not terminal_status_seen:
+                    status = "failed"
+                    provider_error = "provider_error: Provider stream ended without terminal status."
                 if limits and limits.get("allow_text_tool_calls") and iteration_text:
                     text_tool_calls = self._text_tool_calls(iteration_text)
                     if text_tool_calls:
                         iteration_text = ""
                         for tool_call in text_tool_calls:
-                            iteration_tool_results.append(
-                                self._handle_tool_call(
-                                    tool_call,
-                                    agent_id=agent_id,
-                                    session_id=session.id,
-                                    correlation_id=correlation_id,
-                                )
+                            self.session_store.append_message(
+                                agent_id,
+                                session.id,
+                                role="tool_call",
+                                content="",
+                                correlation_id=correlation_id,
+                                metadata={
+                                    "tool_call_id": tool_call.id,
+                                    "tool_name": tool_call.name,
+                                    "tool_arguments": tool_call.arguments,
+                                },
+                            )
+                            _result = self._handle_tool_call(
+                                tool_call,
+                                agent_id=agent_id,
+                                session_id=session.id,
+                                correlation_id=correlation_id,
+                            )
+                            iteration_tool_results.append(_result)
+                            tool_activity.append(
+                                _tool_activity_entry(tool_call.name, tool_call.arguments, _result)
                             )
                 if iteration_text:
                     assistant_text += iteration_text
@@ -294,6 +329,7 @@ class AgentLoop:
             error=provider_error,
             input_tokens=total_input_tokens,
             output_tokens=total_output_tokens,
+            tool_activity=tool_activity,
         )
 
     def _handle_tool_call(
@@ -341,20 +377,17 @@ class AgentLoop:
                 return shell_result
 
         if evaluation.decision == PermissionDecision.ASK:
-            classifier_decision = self._run_classifier(
+            outcome = self._run_classifier(
                 declaration, tool_call, agent_id, session_id, correlation_id
             )
-            # classifier_decision is a ClassifierDecision if the classifier ran and gave a result.
-            # None means no classifier or circuit breaker open — use normal ask flow.
-            classifier_ran = isinstance(classifier_decision, ClassifierDecision)
-            if classifier_ran and classifier_decision.block:
+            if outcome.ran and outcome.decision.block:
                 result = self._failed_tool_result(
-                    f"Classifier: {classifier_decision.reason}",
+                    f"Classifier: {outcome.decision.reason}",
                     code="classifier_blocked",
                 )
                 self._record_tool_result(tool_call, result, agent_id, session_id, correlation_id)
                 return result
-            if not classifier_ran:
+            if not outcome.ran:
                 # Normal ask flow: check saved approval or request human approval
                 approved = None
                 if self.approval_store is not None:
@@ -363,16 +396,35 @@ class AgentLoop:
                         scope=self._requested_permission_scope(declaration, tool_call),
                         tool_name=declaration.name,
                         arguments=tool_call.arguments,
+                        agent_id=agent_id,
+                        session_id=session_id,
                     )
                 if approved is None:
                     if self.approval_callback is not None:
-                        approved = self.approval_callback(
-                            declaration.name,
-                            tool_call.arguments,
-                            declaration.permission.permission_class,
-                            evaluation.reason,
+                        approval_response = _approval_response(
+                            self.approval_callback(
+                                declaration.name,
+                                tool_call.arguments,
+                                declaration.permission.permission_class,
+                                evaluation.reason,
+                            )
                         )
-                        if approved and self.approval_store is not None and evaluation.rememberable:
+                        approved = approval_response["approved"]
+                        if (
+                            approved
+                            and self.approval_store is not None
+                            and evaluation.rememberable
+                            and approval_response["scope"] == "session"
+                        ):
+                            self.approval_store.remember_tool_for_session(
+                                agent_id=agent_id,
+                                session_id=session_id,
+                                tool_name=declaration.name,
+                                permission_class=declaration.permission.permission_class,
+                                scope=self._requested_permission_scope(declaration, tool_call),
+                                reason=evaluation.reason,
+                            )
+                        elif approved and self.approval_store is not None and evaluation.rememberable:
                             self.approval_store.remember(
                                 agent_id=agent_id,
                                 session_id=session_id,
@@ -382,14 +434,16 @@ class AgentLoop:
                                 arguments=tool_call.arguments,
                             )
                         if not approved:
+                            action_label = tool_action_label(declaration.name, tool_call.arguments)
                             result = self._failed_tool_result(
-                                f"{declaration.name} refusé.",
+                                f"{action_label} refusé.",
                                 code="approval_denied",
                                 retryable=False,
                             )
                             self._record_tool_result(tool_call, result, agent_id, session_id, correlation_id)
                             return result
                     else:
+                        action_label = tool_action_label(declaration.name, tool_call.arguments)
                         if self.approval_store is not None:
                             self.approval_store.request(
                                 agent_id=agent_id,
@@ -399,12 +453,12 @@ class AgentLoop:
                                 permission_class=declaration.permission.permission_class,
                                 scope=self._requested_permission_scope(declaration, tool_call),
                                 arguments=tool_call.arguments,
-                                summary=f"Approve {declaration.name}",
+                                summary=f"Autoriser : {action_label}",
                                 reason=evaluation.reason,
                                 rememberable=evaluation.rememberable,
                             )
                         result = self._failed_tool_result(
-                            f"Autorisation requise pour {declaration.name}. Reponds `ok` pour approuver ou `non` pour refuser.",
+                            f"Autorisation requise pour {action_label}. Reponds `ok` pour approuver, `session` pour approuver cette action dans cette session, ou `non` pour refuser.",
                             code="approval_required",
                             retryable=True,
                         )
@@ -433,10 +487,9 @@ class AgentLoop:
         agent_id: str,
         session_id: str,
         correlation_id: str,
-    ) -> ClassifierDecision | str | None:
-        """Return ClassifierDecision, 'fallback' (circuit open), or None (no classifier)."""
+    ) -> ClassifierOutcome:
         if self.classifier is None:
-            return None
+            return ClassifierOutcome(decision=None)
         decision = self.classifier.classify(
             tool_name=tool_call.name,
             arguments=tool_call.arguments,
@@ -453,7 +506,7 @@ class AgentLoop:
                 correlation_id=correlation_id,
                 payload={"tool_name": tool_call.name},
             )
-            return "fallback"
+            return ClassifierOutcome(decision=None, circuit_open=True)
         self.event_store.emit(
             name="classifier.decided",
             kind="audit",
@@ -469,7 +522,7 @@ class AgentLoop:
                 "reason": decision.reason,
             },
         )
-        return decision
+        return ClassifierOutcome(decision=decision)
 
     def _check_shell_command(
         self,
@@ -632,7 +685,7 @@ class AgentLoop:
             agent_id,
             session_id,
             role="tool",
-            content=result.summary,
+            content=_tool_result_content(result),
             correlation_id=correlation_id,
             metadata={
                 "tool_call_id": tool_call.id,
@@ -757,6 +810,27 @@ class AgentLoop:
             events=[],
             error=ToolError(code=code, message=message, retryable=retryable),
         )
+
+
+def _tool_activity_entry(name: str, arguments: dict[str, Any], result: ToolResult) -> dict[str, Any]:
+    return {
+        "name": name,
+        "label": tool_short_label(name),
+        "target": tool_target(name, arguments),
+        "ok": result.ok,
+        "summary": result.summary.splitlines()[0][:100] if result.summary else "",
+        "error": result.error.code if result.error else None,
+    }
+
+
+def _tool_result_content(result: ToolResult) -> str:
+    if result.data is None:
+        return result.summary
+    try:
+        data = json.dumps(result.data, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        data = str(result.data)
+    return f"{result.summary}\n\nData:\n{data}"
 
 
 def _host_from_url(value: Any) -> str | None:

@@ -68,6 +68,59 @@ def test_limited_profile_allows_workspace_write_and_denies_runtime_write_path(tm
     assert runtime_eval.denied
 
 
+def test_limited_profile_allows_active_project_outside_workspace(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    project = tmp_path / "project"
+    workspace.mkdir()
+    runtime.mkdir()
+    project.mkdir()
+    context = PermissionContext(
+        workspace_root=str(workspace),
+        runtime_root=str(runtime),
+        active_project_root=str(project),
+    )
+
+    evaluation = evaluate_permission(
+        "limited",
+        "fs.write",
+        {"paths": [str(project / "PLAN.md")]},
+        context,
+    )
+
+    assert evaluation.allowed
+
+
+def test_limited_profile_resolves_relative_paths_under_active_project(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    project = tmp_path / "project"
+    workspace.mkdir()
+    runtime.mkdir()
+    project.mkdir()
+    context = PermissionContext(
+        workspace_root=str(workspace),
+        runtime_root=str(runtime),
+        active_project_root=str(project),
+    )
+
+    allowed = evaluate_permission(
+        "limited",
+        "fs.write",
+        {"paths": ["PLAN.md"]},
+        context,
+    )
+    denied = evaluate_permission(
+        "limited",
+        "fs.write",
+        {"paths": ["secrets/token.txt"]},
+        context,
+    )
+
+    assert allowed.allowed
+    assert denied.denied
+
+
 def test_runtime_write_defaults_to_proposal_flow_in_limited_profile(tmp_path) -> None:
     context = PermissionContext(
         workspace_root=str(tmp_path / "workspace"),
@@ -217,3 +270,40 @@ def test_approval_replay_requires_identical_scope_and_arguments(tmp_path) -> Non
         "approval.requested",
         "approval.resolved",
     ]
+
+
+def test_approval_tool_session_grant_replays_different_arguments_in_same_session(tmp_path) -> None:
+    approvals = ApprovalStore(tmp_path / "approvals.json")
+    scope = {"hosts": ["*"]}
+    approvals.remember_tool_for_session(
+        agent_id="main",
+        session_id="sess_1",
+        tool_name="web.search",
+        permission_class="network.outbound",
+        scope=scope,
+    )
+
+    assert approvals.approved_for_replay(
+        permission_class="network.outbound",
+        scope=scope,
+        tool_name="web.search",
+        arguments={"query": "maurice"},
+        agent_id="main",
+        session_id="sess_1",
+    )
+    assert approvals.approved_for_replay(
+        permission_class="network.outbound",
+        scope=scope,
+        tool_name="web.search",
+        arguments={"query": "autre recherche"},
+        agent_id="main",
+        session_id="sess_1",
+    )
+    assert approvals.approved_for_replay(
+        permission_class="network.outbound",
+        scope=scope,
+        tool_name="web.search",
+        arguments={"query": "autre recherche"},
+        agent_id="main",
+        session_id="sess_2",
+    ) is None

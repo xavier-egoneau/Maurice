@@ -159,7 +159,58 @@ class ApprovalStore:
         ttl_seconds: int = 600,
     ) -> None:
         """Record an already-approved action so it can be replayed without re-asking."""
-        hashed_arguments = arguments_hash(arguments)
+        self._remember(
+            agent_id=agent_id,
+            session_id=session_id,
+            tool_name=tool_name,
+            permission_class=permission_class,
+            scope=scope,
+            arguments_hash_value=arguments_hash(arguments),
+            ttl_seconds=ttl_seconds,
+            replay_scope="exact",
+            summary=f"Approved via callback: {tool_name}",
+            reason="User approved interactively.",
+        )
+
+    def remember_tool_for_session(
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        tool_name: str,
+        permission_class: PermissionClass | str,
+        scope: dict,
+        ttl_seconds: int = 1800,
+        reason: str = "User approved this tool for the session.",
+    ) -> None:
+        """Approve future calls to the same tool/class/scope in this session."""
+        self._remember(
+            agent_id=agent_id,
+            session_id=session_id,
+            tool_name=tool_name,
+            permission_class=permission_class,
+            scope=scope,
+            arguments_hash_value="tool_session:*",
+            ttl_seconds=ttl_seconds,
+            replay_scope="tool_session",
+            summary=f"Approved for session: {tool_name}",
+            reason=reason,
+        )
+
+    def _remember(
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        tool_name: str,
+        permission_class: PermissionClass | str,
+        scope: dict,
+        arguments_hash_value: str,
+        ttl_seconds: int,
+        replay_scope: str,
+        summary: str,
+        reason: str,
+    ) -> None:
         approval = PendingApproval(
             id=new_approval_id(),
             agent_id=agent_id,
@@ -168,12 +219,13 @@ class ApprovalStore:
             tool_name=tool_name,
             permission_class=PermissionClass(permission_class),
             scope=scope,
-            arguments_hash=hashed_arguments,
-            summary=f"Approved via callback: {tool_name}",
-            reason="User approved interactively.",
+            arguments_hash=arguments_hash_value,
+            summary=summary,
+            reason=reason,
             created_at=utc_now(),
             expires_at=utc_now() + timedelta(seconds=ttl_seconds),
             rememberable=True,
+            replay_scope=replay_scope,
             status=PendingApprovalStatus.APPROVED,
         )
         envelope = ApprovalEnvelope(
@@ -203,6 +255,8 @@ class ApprovalStore:
         scope: dict,
         tool_name: str,
         arguments: dict,
+        agent_id: str | None = None,
+        session_id: str | None = None,
         now: datetime | None = None,
     ) -> PendingApproval | None:
         checked_at = now or utc_now()
@@ -213,14 +267,25 @@ class ApprovalStore:
             tool_name=tool_name,
             arguments_hash_value=hashed_arguments,
         )
+        session_fingerprint = replay_fingerprint(
+            permission_class=permission_class,
+            scope=scope,
+            tool_name=tool_name,
+            arguments_hash_value="tool_session:*",
+        )
         for envelope in self._load().approvals:
             approval = envelope.approval
-            if envelope.replay_fingerprint != fingerprint:
+            if envelope.replay_fingerprint not in {fingerprint, session_fingerprint}:
                 continue
             if approval.status != PendingApprovalStatus.APPROVED:
                 continue
             if approval.expires_at <= checked_at:
                 continue
+            if approval.replay_scope == "tool_session":
+                if agent_id is not None and approval.agent_id != agent_id:
+                    continue
+                if session_id is not None and approval.session_id != session_id:
+                    continue
             return approval
         return None
 

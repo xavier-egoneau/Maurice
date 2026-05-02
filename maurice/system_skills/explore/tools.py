@@ -304,21 +304,27 @@ def _read_truncated(path: Path, max_chars: int = 2000) -> str:
 
 def _resolve(raw: str, perm: Any) -> Path | None:
     """Resolve path relative to workspace/project root."""
+    variables = perm.variables() if hasattr(perm, "variables") else {}
     p = Path(raw).expanduser()
     if not p.is_absolute():
-        variables = perm.variables() if hasattr(perm, "variables") else {}
         base = Path(variables.get("$project") or variables.get("$workspace") or ".")
         p = (base / p).resolve()
     else:
         p = p.resolve()
-    # Permission check
-    variables = perm.variables() if hasattr(perm, "variables") else {}
-    workspace = Path(variables.get("$workspace") or "/").resolve()
+    allowed_roots = [
+        Path(value).expanduser().resolve()
+        for value in (variables.get("$workspace"), variables.get("$project"))
+        if value
+    ]
+    return p if any(_is_relative_to(p, root) for root in allowed_roots) else None
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
     try:
-        p.relative_to(workspace)
-        return p
+        path.relative_to(root)
+        return True
     except ValueError:
-        return None
+        return False
 
 
 def _err(msg: str) -> ToolResult:

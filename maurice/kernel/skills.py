@@ -5,12 +5,13 @@ from __future__ import annotations
 import importlib
 import shutil
 from collections.abc import Callable
+from dataclasses import dataclass, field as dc_field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 import yaml
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from maurice.kernel.config import SkillRootConfig
 from maurice.kernel.contracts import (
@@ -25,9 +26,24 @@ from maurice.kernel.events import EventStore
 ToolExecutor = Callable[[dict[str, Any]], Any]
 
 
+@dataclass
+class SkillHooks:
+    """Host-provided callbacks and paths injected into each skill's executor context."""
+    context_root: str = ""
+    content_root: str = ""
+    state_root: str = ""
+    memory_path: str = ""
+    scope: str = ""
+    lifecycle: str = ""
+    schedule_reminder: Callable[..., Any] | None = dc_field(default=None)
+    cancel_job: Callable[..., Any] | None = dc_field(default=None)
+    vision_backend: Any = dc_field(default=None)
+
+
 class SkillState(StrEnum):
     LOADED = "loaded"
     DISABLED = "disabled"
+    UNAVAILABLE = "unavailable"
     DISABLED_WITH_ERROR = "disabled_with_error"
     MISSING_DEPENDENCY = "missing_dependency"
     MIGRATION_REQUIRED = "migration_required"
@@ -80,7 +96,8 @@ class SkillContext(MauriceModel):
     enabled_skills: list[str] = []
     agent_id: str = "main"
     session_id: str | None = None
-    extra: dict[str, Any] = {}  # host-provided hooks (callbacks, backends, etc.)
+    hooks: SkillHooks = Field(default_factory=SkillHooks)
+    extra: dict[str, Any] = {}  # deprecated — use hooks
 
     model_config = {"arbitrary_types_allowed": True, "extra": "forbid", "populate_by_name": True}
 
@@ -129,6 +146,7 @@ class SkillLoader:
         enabled_skills: Iterable[str] | None = None,
         required_skills: Iterable[str] | None = None,
         available_credentials: Iterable[str] | None = None,
+        scope: Literal["local", "global"] | None = None,
         event_store: EventStore | None = None,
         agent_id: str = "main",
         session_id: str = "startup",
@@ -140,6 +158,7 @@ class SkillLoader:
         self.enabled_skills = set(enabled_skills) if enabled_skills is not None else None
         self.required_skills = set(required_skills or [])
         self.available_credentials = set(available_credentials or [])
+        self.scope = scope
         self.event_store = event_store
         self.agent_id = agent_id
         self.session_id = session_id
@@ -246,6 +265,25 @@ class SkillLoader:
                     state=SkillState.DISABLED,
                     manifest=manifest,
                 )
+            if self.scope is not None and self.scope not in manifest.available_in:
+                loaded = LoadedSkill(
+                    name=manifest.name,
+                    path=str(skill_dir),
+                    root=root.path,
+                    origin=root.origin,
+                    mutable=root.mutable,
+                    state=SkillState.UNAVAILABLE,
+                    manifest=manifest,
+                    errors=[f"Skill unavailable in {self.scope} scope."],
+                    suggested_fixes=[
+                        f"Use this skill in one of: {', '.join(manifest.available_in)}."
+                    ],
+                )
+                if required:
+                    raise RequiredSkillError(
+                        f"Required skill {manifest.name} unavailable in {self.scope} scope"
+                    )
+                return loaded
 
             missing = self._missing_runtime_dependencies(manifest)
             if missing:
@@ -364,6 +402,7 @@ class SkillLoader:
                     handler=exported.handler,
                     renderer=exported.renderer,
                     aliases=exported.aliases,
+                    available_in=exported.available_in,
                 )
             )
         return declarations

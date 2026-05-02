@@ -14,17 +14,18 @@ from maurice.host.model_catalog import chatgpt_model_choices, ollama_model_choic
 from maurice.host.paths import host_config_path
 from maurice.host.secret_capture import request_secret_capture
 from maurice.kernel.config import load_workspace_config, read_yaml_file, write_yaml_file
-from maurice.kernel.contracts import MauriceModel
+from maurice.kernel.contracts import MauriceModel, SkillManifest
 
 
-AVAILABLE_SKILLS: dict[str, str] = {
+DEFAULT_SKILL_DESCRIPTIONS: dict[str, str] = {
     "filesystem": "lire et écrire des fichiers dans son espace",
     "memory": "retenir des informations utiles",
     "web": "chercher et lire des informations web",
+    "explore": "explorer un projet, son arbre et son contenu",
     "reminders": "créer et suivre des rappels",
     "vision": "analyser des images",
-    "dreaming": "faire de la maintenance et des réflexions planifiées",
-    "skills": "créer ou corriger des compétences Maurice",
+    "dreaming": "consolider la mémoire et agir avec proactivité",
+    "skills": "créer de nouvelles compétences",
     "host": "diagnostiquer et configurer Maurice",
     "self_update": "préparer des améliorations du runtime",
     "dev": "piloter un projet de développement",
@@ -64,6 +65,17 @@ CANCEL_WORDS = {"annule", "annuler", "stop", "cancel", "abandonne"}
 YES_WORDS = {"oui", "ok", "go", "vas-y", "vasy", "yes", "y"}
 NO_WORDS = {"non", "no", "n"}
 DEFAULT_WORDS = {"defaut", "défaut", "par defaut", "par défaut", "default", "aucun", "non"}
+KEEP_WORDS = {
+    "garder",
+    "garde",
+    "on garde",
+    "on garde ce qui etait",
+    "on garde ce qui était",
+    "inchangé",
+    "inchange",
+    "pareil",
+}
+SKILL_WORDS = {"skill", "skills", "competence", "competences", "compétence", "compétences", "capacite", "capacites", "capacité", "capacités"}
 
 
 class AgentCreationState(MauriceModel):
@@ -180,6 +192,13 @@ def _advance_agent_edit(
     data = state.data
     if normalized in CANCEL_WORDS:
         return _Response(text="Modification d'agent annulee.", clear=True)
+    if (
+        state.step != "agent_edit_skills_value"
+        and data.get("agent")
+        and _wants_change_skills(normalized)
+    ):
+        state.step = "agent_edit_skills_value"
+        return _Response(text=_edit_skills_question(workspace, list(data.get("skills") or [])))
 
     if state.step == "agent_edit_agent_value":
         target = _sanitize_agent_id(text)
@@ -193,7 +212,7 @@ def _advance_agent_edit(
         if normalized in YES_WORDS:
             state.step = "agent_edit_permission_value"
             return _Response(text=_permission_question())
-        if normalized in NO_WORDS:
+        if normalized in NO_WORDS or _wants_keep_current(normalized):
             state.step = "agent_edit_skills_change"
             return _Response(text=_agent_edit_skills_change_question(data))
         return _Response(text=_agent_edit_permission_question(data))
@@ -209,16 +228,16 @@ def _advance_agent_edit(
     if state.step == "agent_edit_skills_change":
         if normalized in YES_WORDS:
             state.step = "agent_edit_skills_value"
-            return _Response(text=_skills_question(list(data.get("skills") or [])))
-        if normalized in NO_WORDS:
+            return _Response(text=_edit_skills_question(workspace, list(data.get("skills") or [])))
+        if normalized in NO_WORDS or _wants_keep_current(normalized):
             state.step = "agent_edit_model_change"
             return _Response(text=_agent_edit_model_change_question(data, workspace))
         return _Response(text=_agent_edit_skills_change_question(data))
 
     if state.step == "agent_edit_skills_value":
-        parsed = _parse_skills(text, list(data.get("skills") or []))
+        parsed = _parse_skills(text, list(data.get("skills") or []), workspace)
         if parsed is None:
-            return _Response(text=_skills_question(list(data.get("skills") or [])))
+            return _Response(text=_edit_skills_question(workspace, list(data.get("skills") or [])))
         data["skills"] = parsed
         state.step = "agent_edit_model_change"
         return _Response(text=_agent_edit_model_change_question(data, workspace))
@@ -523,12 +542,12 @@ def _advance(
         data["permission"] = permission
         data["suggested_skills"] = _suggest_skills(str(data.get("role", "")))
         state.step = "skills"
-        return _Response(text=_skills_question(data["suggested_skills"]))
+        return _Response(text=_skills_question(workspace, data["suggested_skills"]))
 
     if state.step == "skills":
-        parsed = _parse_skills(text, data.get("suggested_skills") or [])
+        parsed = _parse_skills(text, data.get("suggested_skills") or [], workspace)
         if parsed is None:
-            return _Response(text=_skills_question(data.get("suggested_skills") or []))
+            return _Response(text=_skills_question(workspace, data.get("suggested_skills") or []))
         data["skills"] = parsed
         state.step = "model"
         model_source, model_choices = _model_choices_for_workspace(workspace)
@@ -669,18 +688,40 @@ def _permission_question() -> str:
     )
 
 
-def _skills_question(suggested: list[str]) -> str:
-    options = "\n".join(
-        f"{index}. `{name}` : {description}"
-        for index, (name, description) in enumerate(AVAILABLE_SKILLS.items(), start=1)
-    )
-    suggestion = ", ".join(suggested) if suggested else "aucun"
+def _skills_question(workspace: Path, suggested: list[str]) -> str:
+    available_skills = _available_skills(workspace)
+    options = _skill_options_text(available_skills)
+    suggested_available = [name for name in suggested if name in available_skills]
+    suggestion = ", ".join(suggested_available) if suggested_available else "aucun"
     return (
         "4. Quelles competences veux-tu lui donner ?\n\n"
         f"{options}\n\n"
         f"Pour cette mission, je propose : `{suggestion}`.\n"
         "Reponds par des numeros, une liste de noms, `tous`, ou `ok` pour garder cette proposition."
     )
+
+
+def _edit_skills_question(workspace: Path, current: list[str]) -> str:
+    available_skills = _available_skills(workspace)
+    current_available = [name for name in current if name in available_skills]
+    current_label = ", ".join(current_available) if current_available else "aucune"
+    options = _skill_options_text(available_skills, selected=current_available)
+    return (
+        f"Competences actuelles : `{current_label}`.\n\n"
+        "Choisis les competences a activer :\n\n"
+        f"{options}\n\n"
+        "Reponds par des numeros (`1,2,4`), des noms, `tous`, `aucune`, "
+        "ou `ok` pour garder les competences actuelles."
+    )
+
+
+def _skill_options_text(available_skills: dict[str, str], *, selected: list[str] | None = None) -> str:
+    selected_set = set(selected or [])
+    rows = []
+    for index, (name, description) in enumerate(available_skills.items(), start=1):
+        suffix = " (actuelle)" if name in selected_set else ""
+        rows.append(f"{index}. `{name}`{suffix} : {description}")
+    return "\n".join(rows)
 
 
 def _model_question(model_source: dict[str, Any], choices: list[tuple[str, str]]) -> str:
@@ -764,6 +805,34 @@ def _starts_telegram_edit(normalized: str) -> bool:
     )
 
 
+def _wants_keep_current(normalized: str) -> bool:
+    if normalized in KEEP_WORDS:
+        return True
+    return "garde" in normalized and any(word in normalized for word in ("actuel", "actuelle", "etait", "était", "config"))
+
+
+def _wants_change_skills(normalized: str) -> bool:
+    if not any(word in normalized for word in SKILL_WORDS):
+        return False
+    return any(
+        word in normalized
+        for word in (
+            "change",
+            "changer",
+            "modifie",
+            "modifier",
+            "edite",
+            "editer",
+            "éditer",
+            "activer",
+            "desactiver",
+            "désactiver",
+            "ajouter",
+            "retirer",
+        )
+    )
+
+
 def _command_name(normalized: str) -> str:
     first = normalized.split(maxsplit=1)[0] if normalized.split(maxsplit=1) else ""
     return first.split("@", 1)[0]
@@ -830,7 +899,10 @@ def _agent_edit_permission_question(data: dict[str, Any]) -> str:
 
 def _agent_edit_skills_change_question(data: dict[str, Any]) -> str:
     skills = ", ".join(data.get("skills") or []) or "aucune"
-    return f"Competences actuelles : {skills}.\n\nChanger les competences ? Reponds `oui` ou `non`."
+    return (
+        f"Competences actuelles : {skills}.\n\n"
+        "Changer les competences ? Reponds `oui`, `non`, ou dis directement `changer les skills`."
+    )
 
 
 def _agent_edit_model_change_question(data: dict[str, Any], workspace: Path) -> str:
@@ -1091,12 +1163,60 @@ def _suggest_skills(role: str) -> list[str]:
     return ["filesystem", "memory"]
 
 
-def _parse_skills(value: str, suggested: list[str]) -> list[str] | None:
+def _available_skills(workspace: Path) -> dict[str, str]:
+    discovered: dict[str, str] = dict(DEFAULT_SKILL_DESCRIPTIONS)
+    roots: list[Path] = [_system_skills_root()]
+    try:
+        bundle = load_workspace_config(workspace)
+        roots.extend(Path(root.path).expanduser() for root in bundle.host.skill_roots)
+    except Exception:
+        pass
+
+    for root in roots:
+        if not root.exists():
+            continue
+        for manifest_path in sorted(root.glob("*/skill.yaml")):
+            try:
+                manifest = SkillManifest.model_validate(read_yaml_file(manifest_path))
+            except Exception:
+                continue
+            if "global" not in manifest.available_in:
+                continue
+            discovered.setdefault(
+                manifest.name,
+                DEFAULT_SKILL_DESCRIPTIONS.get(
+                    manifest.name,
+                    _compact_skill_description(manifest.description),
+                ),
+            )
+
+    ordered: dict[str, str] = {}
+    for name in DEFAULT_SKILL_DESCRIPTIONS:
+        if name in discovered:
+            ordered[name] = discovered[name]
+    for name in sorted(set(discovered) - set(ordered)):
+        ordered[name] = discovered[name]
+    return ordered
+
+
+def _system_skills_root() -> Path:
+    return Path(__file__).resolve().parents[1] / "system_skills"
+
+
+def _compact_skill_description(description: str) -> str:
+    compacted = " ".join(str(description or "").split())
+    if len(compacted) <= 90:
+        return compacted or "competence disponible"
+    return compacted[:87].rstrip() + "..."
+
+
+def _parse_skills(value: str, suggested: list[str], workspace: Path) -> list[str] | None:
+    available_skills = _available_skills(workspace)
     normalized = _normalize(value).strip("` ")
     if normalized in YES_WORDS or normalized in {"recommande", "recommandé", "recommandes"}:
-        return list(suggested)
+        return [name for name in suggested if name in available_skills]
     if normalized in {"tous", "tout", "all"}:
-        return list(AVAILABLE_SKILLS)
+        return list(available_skills)
     if normalized in {"aucun", "aucune", "none", "non"}:
         return []
     parts = [
@@ -1106,7 +1226,7 @@ def _parse_skills(value: str, suggested: list[str]) -> list[str] | None:
     ]
     if not parts:
         return None
-    skill_names = list(AVAILABLE_SKILLS)
+    skill_names = list(available_skills)
     selected: list[str] = []
     unknown: list[str] = []
     for part in parts:
@@ -1117,7 +1237,7 @@ def _parse_skills(value: str, suggested: list[str]) -> list[str] | None:
             else:
                 unknown.append(part)
             continue
-        if part in AVAILABLE_SKILLS:
+        if part in available_skills:
             selected.append(part)
         else:
             unknown.append(part)

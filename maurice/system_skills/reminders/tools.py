@@ -131,8 +131,8 @@ def build_executors(ctx: Any) -> dict[str, Any]:
     return reminders_tool_executors(
         ctx.permission_context,
         event_store=ctx.event_store,
-        schedule_reminder=ctx.extra.get("schedule_reminder"),
-        cancel_job=ctx.extra.get("cancel_job"),
+        schedule_reminder=ctx.hooks.schedule_reminder,
+        cancel_job=ctx.hooks.cancel_job,
     )
 
 

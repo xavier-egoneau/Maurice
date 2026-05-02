@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import getpass
 import json
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -14,11 +17,16 @@ from pathlib import Path
 import sys
 import time
 from typing import Any
+from urllib.parse import urlparse
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from maurice import __version__
-from maurice.host.agent_wizard import clear_agent_creation_wizard, handle_agent_creation_wizard
+from maurice.host.agent_wizard import (
+    clear_agent_creation_wizard,
+    handle_agent_creation_wizard,
+    _available_skills,
+)
 from maurice.host.agents import archive_agent, create_agent, delete_agent, disable_agent, list_agents, update_agent
 from maurice.host.auth import (
     CHATGPT_CREDENTIAL_NAME, ChatGPTAuthFlow, clear_chatgpt_auth,
@@ -26,6 +34,9 @@ from maurice.host.auth import (
 )
 from maurice.host.channels import ChannelAdapterRegistry
 from maurice.host.command_registry import CommandRegistry, default_command_registry
+from maurice.host.client import MauriceClient
+from maurice.host.context import MauriceContext, build_command_callbacks, resolve_global_context
+from maurice.host.context_meter import context_summary
 from maurice.host.credentials import (
     CredentialRecord, CredentialsStore, credentials_path,
     ensure_workspace_credentials_migrated, load_workspace_credentials, write_workspace_credentials,
@@ -37,6 +48,7 @@ from maurice.host.delivery import (
     _latest_dream_report, _human_datetime,
 )
 from maurice.host.gateway import GatewayHttpServer, MessageRouter
+from maurice.host.git_status import git_changes, git_diff
 from maurice.host.migration import inspect_jarvis_workspace, migrate_jarvis_workspace
 from maurice.host.model_catalog import chatgpt_model_choices, format_bytes, ollama_model_choices
 from maurice.host.monitoring import build_monitoring_snapshot, read_event_tail
@@ -48,6 +60,7 @@ from maurice.host.paths import (
     agents_config_path, ensure_workspace_config_migrated, host_config_path,
     kernel_config_path, maurice_home, workspace_skills_config_path,
 )
+from maurice.host.project import config_path
 from maurice.host.runtime import (
     run_one_turn, _resolve_agent, _agent_system_prompt, _active_dev_project_path,
     _provider_for_config, _effective_model_config, _model_credential,
@@ -80,9 +93,21 @@ from maurice.kernel.providers import (
 from maurice.kernel.runs import RunApprovalStore, RunCoordinationStore, RunExecutor, RunStore
 from maurice.kernel.scheduler import JobRunner, JobStatus, JobStore, SchedulerService, utc_now
 from maurice.kernel.session import SessionStore
+from maurice.kernel.contracts import ToolError, ToolResult
 from maurice.kernel.skills import SkillContext, SkillLoader
-from maurice.system_skills.dev.planner import PLAN_WIZARD_FILE, clear_plan_wizard, handle_plan_wizard
+from maurice.host.agent_runtime import global_registry as _agent_runtime_registry
+from maurice.kernel.tool_labels import tool_action_label
 from maurice.system_skills.reminders.tools import fire_reminder
+
+
+MAX_WEB_UPLOAD_BYTES = 10_000_000
+MAX_WEB_UPLOADS = 6
+IMAGE_MIME_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
 
 def _gateway_local_message(
     workspace_root: Path,
@@ -150,8 +175,13 @@ def _build_gateway_http_server(
     agent_id: str | None,
     host: str | None,
     port: int | None,
+    active_project: Path | None = None,
 ) -> GatewayHttpServer:
-    router, agent, bundle = _gateway_router_for(workspace_root, agent_id)
+    router, agent, bundle = _gateway_router_for(
+        workspace_root,
+        agent_id,
+        active_project=active_project,
+    )
     channels = ChannelAdapterRegistry.from_config(
         bundle.host.channels,
         default_agent_id=agent.id,
@@ -162,9 +192,10 @@ def _build_gateway_http_server(
         else Path(bundle.host.workspace_root) / "agents" / agent.id / "events.jsonl"
     )
     workspace = Path(bundle.host.workspace_root)
+    work_root = active_project.expanduser().resolve() if active_project is not None else _gateway_git_root(workspace, agent.id)
     return GatewayHttpServer(
         host=host or bundle.host.gateway.host,
-        port=port or bundle.host.gateway.port,
+        port=bundle.host.gateway.port if port is None else port,
         router=router,
         channels=channels,
         event_store=EventStore(event_stream),
@@ -179,6 +210,67 @@ def _build_gateway_http_server(
             agent_id,
             session_id,
         ),
+        web_git_status=lambda: git_changes(work_root),
+        web_git_diff=lambda path: git_diff(work_root, path),
+        web_model_status=lambda agent_id: _gateway_model_status(workspace, agent_id),
+        web_model_update=lambda agent_id, model: _gateway_model_update(workspace, agent_id, model),
+        web_agent_config=lambda agent_id: _gateway_agent_config_status(workspace, agent_id),
+        web_agent_update=lambda agent_id, payload: _gateway_agent_config_update(workspace, agent_id, payload),
+        web_uploads=lambda agent_id, session_id, attachments: _store_web_uploads(
+            _gateway_prov_root(workspace, agent_id) / "uploads",
+            session_id=session_id,
+            attachments=attachments,
+        ),
+        web_attachment=_read_web_attachment,
+    )
+
+
+def _build_gateway_http_server_for_context(
+    ctx: MauriceContext,
+    *,
+    agent_id: str | None,
+    host: str,
+    port: int,
+    web_token: str | None = None,
+) -> GatewayHttpServer:
+    if ctx.scope == "global":
+        return _build_gateway_http_server(
+            ctx.context_root,
+            agent_id=agent_id,
+            host=host,
+            port=port,
+            active_project=ctx.active_project_root,
+        )
+    router = _gateway_router_for_local_context(ctx)
+    return GatewayHttpServer(
+        host=host,
+        port=port,
+        router=router,
+        event_store=EventStore(ctx.events_path),
+        web_agents=lambda: _gateway_web_agents_for_context(ctx),
+        web_session_history=lambda agent_id, session_id: _gateway_web_session_history_for_context(
+            ctx,
+            agent_id,
+            session_id,
+        ),
+        web_session_reset=lambda agent_id, session_id: _gateway_web_session_reset_for_context(
+            ctx,
+            agent_id,
+            session_id,
+        ),
+        web_git_status=lambda: git_changes(ctx.content_root),
+        web_git_diff=lambda path: git_diff(ctx.content_root, path),
+        web_model_status=lambda agent_id: _local_model_status(ctx, agent_id),
+        web_model_update=lambda agent_id, model: _local_model_update(ctx, agent_id, model),
+        web_agent_config=lambda agent_id: _local_agent_config_status(ctx, agent_id),
+        web_agent_update=lambda agent_id, payload: _local_agent_config_update(ctx, agent_id, payload),
+        web_uploads=lambda _agent_id, session_id, attachments: _store_web_uploads(
+            ctx.state_root / "prov" / "uploads",
+            session_id=session_id,
+            attachments=attachments,
+        ),
+        web_attachment=_read_web_attachment,
+        web_token=web_token,
     )
 
 
@@ -249,13 +341,40 @@ def _gateway_web_agents(workspace: Path) -> list[dict[str, Any]]:
     return agents
 
 
+def _gateway_web_agents_for_context(ctx: MauriceContext) -> list[dict[str, Any]]:
+    if ctx.scope == "global":
+        return _gateway_web_agents(ctx.context_root)
+    provider = ctx.config.get("provider", {}) if isinstance(ctx.config, dict) else {}
+    return [
+        {
+            "id": "main",
+            "provider": str(provider.get("type") or "mock"),
+            "model": str(provider.get("model") or "mock"),
+            "default": True,
+            "scope": "local",
+        }
+    ]
+
+
 
 def _gateway_web_session_history(workspace: Path, agent_id: str, session_id: str) -> list[dict[str, Any]]:
-    store = SessionStore(workspace / "sessions")
+    return _session_history(SessionStore(workspace / "sessions"), agent_id, session_id)
+
+
+def _gateway_web_session_history_for_context(
+    ctx: MauriceContext,
+    agent_id: str,
+    session_id: str,
+) -> list[dict[str, Any]]:
+    return _session_history(SessionStore(ctx.sessions_path), agent_id, session_id)
+
+
+def _session_history(store: SessionStore, agent_id: str, session_id: str) -> list[dict[str, Any]]:
     try:
         session = store.load(agent_id, session_id)
     except FileNotFoundError:
         return []
+    tool_activity = _session_tool_activity(session.messages)
     messages = []
     for message in session.messages:
         if (
@@ -274,7 +393,57 @@ def _gateway_web_session_history(workspace: Path, agent_id: str, session_id: str
                 "metadata": message.metadata,
             }
         )
+        if message.role == "assistant" and message.correlation_id in tool_activity:
+            messages[-1]["tools"] = tool_activity[message.correlation_id]
     return messages
+
+
+def _session_tool_activity(session_messages: list[Any]) -> dict[str, list[dict[str, Any]]]:
+    activity_by_correlation: dict[str, list[dict[str, Any]]] = {}
+    activity_by_call: dict[str, dict[str, Any]] = {}
+    for message in session_messages:
+        if message.role not in {"tool_call", "tool"}:
+            continue
+        correlation_id = message.correlation_id
+        if not correlation_id:
+            continue
+        metadata = message.metadata or {}
+        tool_call_id = str(metadata.get("tool_call_id") or "")
+        tool_name = str(metadata.get("tool_name") or "")
+        if message.role == "tool_call":
+            arguments = metadata.get("tool_arguments")
+            if not isinstance(arguments, dict):
+                arguments = {}
+            entry = {
+                "id": tool_call_id,
+                "name": tool_name,
+                "label": tool_action_label(tool_name, arguments),
+                "status": "running",
+                "ok": None,
+                "summary": "",
+                "created_at": message.created_at.isoformat(),
+            }
+            activity_by_correlation.setdefault(correlation_id, []).append(entry)
+            if tool_call_id:
+                activity_by_call[tool_call_id] = entry
+            continue
+        entry = activity_by_call.get(tool_call_id)
+        if entry is None:
+            entry = {
+                "id": tool_call_id,
+                "name": tool_name,
+                "label": tool_action_label(tool_name),
+                "created_at": message.created_at.isoformat(),
+            }
+            activity_by_correlation.setdefault(correlation_id, []).append(entry)
+            if tool_call_id:
+                activity_by_call[tool_call_id] = entry
+        ok = metadata.get("ok")
+        entry["ok"] = ok
+        entry["status"] = "ok" if ok is True else "failed" if ok is False else "done"
+        entry["summary"] = message.content
+        entry["completed_at"] = message.created_at.isoformat()
+    return activity_by_correlation
 
 
 
@@ -285,7 +454,14 @@ def _looks_like_internal_gateway_message(content: str) -> bool:
 
 
 def _gateway_web_session_reset(workspace: Path, agent_id: str, session_id: str) -> bool:
-    store = SessionStore(workspace / "sessions")
+    return _reset_session_store(SessionStore(workspace / "sessions"), agent_id, session_id)
+
+
+def _gateway_web_session_reset_for_context(ctx: MauriceContext, agent_id: str, session_id: str) -> bool:
+    return _reset_session_store(SessionStore(ctx.sessions_path), agent_id, session_id)
+
+
+def _reset_session_store(store: SessionStore, agent_id: str, session_id: str) -> bool:
     try:
         store.reset(agent_id, session_id)
         return True
@@ -405,7 +581,7 @@ def _telegram_poll_once(
             result = router.handle(inbound)
         finally:
             stop_typing()
-        _telegram_send_message(token, chat_id, result.outbound.text)
+        _telegram_send_message(token, chat_id, _telegram_response_text(result.outbound.text, result.outbound.metadata))
         event_store.emit(
             name="channel.delivery.succeeded",
             kind="progress",
@@ -421,11 +597,177 @@ def _telegram_poll_once(
     return handled
 
 
+def _telegram_response_text(text: str, metadata: dict[str, Any]) -> str:
+    summary = context_summary(metadata.get("context") if isinstance(metadata, dict) else None)
+    if not summary:
+        return text
+    return f"{text}\n\n{summary}"
 
-def _gateway_router_for(workspace_root: Path, agent_id: str | None):
+
+def _gateway_prov_root(workspace: Path, agent_id: str) -> Path:
+    try:
+        agent = load_workspace_config(workspace).agents.agents[agent_id]
+        return Path(agent.workspace) / ".maurice" / "prov"
+    except KeyError:
+        return workspace / "agents" / agent_id / ".maurice" / "prov"
+
+
+def _store_web_uploads(
+    root: Path,
+    *,
+    session_id: str,
+    attachments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if len(attachments) > MAX_WEB_UPLOADS:
+        raise ValueError("too_many_uploads")
+    session_slug = _safe_slug(session_id or "web")
+    upload_dir = root / session_slug
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    stored: list[dict[str, Any]] = []
+    for index, attachment in enumerate(attachments, start=1):
+        if not isinstance(attachment, dict):
+            raise ValueError("invalid_upload")
+        mime_type = str(attachment.get("type") or attachment.get("mime_type") or "").lower()
+        if mime_type not in IMAGE_MIME_EXTENSIONS:
+            raise ValueError("unsupported_upload_type")
+        raw = _decode_upload_data(str(attachment.get("data") or ""))
+        if not raw:
+            raise ValueError("empty_upload")
+        if len(raw) > MAX_WEB_UPLOAD_BYTES:
+            raise ValueError("upload_too_large")
+        original_name = str(attachment.get("name") or f"image-{index}{IMAGE_MIME_EXTENSIONS[mime_type]}")
+        stem = _safe_slug(Path(original_name).stem or f"image-{index}")
+        filename = f"{index:02d}-{stem}{IMAGE_MIME_EXTENSIONS[mime_type]}"
+        path = upload_dir / filename
+        path.write_bytes(raw)
+        stored.append(
+            {
+                "name": original_name,
+                "path": str(path.resolve()),
+                "mime_type": mime_type,
+                "bytes": len(raw),
+            }
+        )
+    return stored
+
+
+def _decode_upload_data(value: str) -> bytes:
+    raw = value.strip()
+    if "," in raw and raw[:64].lower().startswith("data:"):
+        raw = raw.split(",", 1)[1]
+    try:
+        return base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("invalid_upload_data") from exc
+
+
+def _read_web_attachment(path_value: str) -> tuple[str, bytes] | None:
+    path = Path(path_value).expanduser().resolve()
+    parts = path.parts
+    if "prov" not in parts or "uploads" not in parts or not path.is_file():
+        return None
+    mime_type = _image_mime_for_path(path)
+    if mime_type is None:
+        return None
+    raw = path.read_bytes()
+    if len(raw) > MAX_WEB_UPLOAD_BYTES:
+        return None
+    return mime_type, raw
+
+
+def _image_mime_for_path(path: Path) -> str | None:
+    suffix = path.suffix.lower()
+    for mime_type, extension in IMAGE_MIME_EXTENSIONS.items():
+        if suffix == extension:
+            return mime_type
+    if suffix == ".jpeg":
+        return "image/jpeg"
+    return None
+
+
+def _safe_slug(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip())
+    normalized = normalized.strip("._-")
+    return normalized[:80] or "upload"
+
+
+
+def _gateway_router_for_local_context(ctx: MauriceContext) -> MessageRouter:
+    event_store = EventStore(ctx.events_path)
+
+    def run_gateway_turn(**kwargs):
+        return _run_turn_via_local_server(
+            ctx,
+            message=kwargs["message"],
+            session_id=kwargs["session_id"],
+            agent_id=kwargs.get("agent_id") or "main",
+            source_channel=kwargs.get("source_channel"),
+            source_peer_id=kwargs.get("source_peer_id"),
+            source_metadata=kwargs.get("source_metadata"),
+            limits=kwargs.get("limits"),
+            message_metadata=kwargs.get("message_metadata"),
+        )
+
+    skill_registry = SkillLoader(
+        ctx.skill_roots,
+        enabled_skills=ctx.enabled_skills,
+        scope=ctx.scope,
+        event_store=event_store,
+        agent_id="main",
+        session_id="gateway",
+    ).load()
+    command_registry = CommandRegistry.from_skill_registry(skill_registry)
+
+    return MessageRouter(
+        run_turn=run_gateway_turn,
+        event_store=event_store,
+        default_agent_id="main",
+        approval_store_for=lambda _target_agent_id: ApprovalStore(
+            ctx.approvals_path,
+            event_store=event_store,
+        ),
+        reset_session=lambda target_agent_id, session_id: _reset_local_gateway_session(
+            ctx,
+            target_agent_id,
+            session_id,
+        ),
+        record_exchange=lambda inbound, outbound, include_user: _record_gateway_exchange_for_context(
+            ctx,
+            inbound,
+            outbound,
+            include_user=include_user,
+        ),
+        command_registry=command_registry,
+        command_callbacks=build_command_callbacks(
+            ctx,
+            command_registry=command_registry,
+            model_summary=lambda _target_agent_id: _local_model_summary(ctx),
+            extra={
+                "compact_session": lambda target_agent_id, session_id: _compact_gateway_session_for_context(
+                    ctx,
+                    target_agent_id,
+                    session_id,
+                ),
+            },
+        ),
+    )
+
+
+def _gateway_router_for(
+    workspace_root: Path,
+    agent_id: str | None,
+    *,
+    active_project: Path | None = None,
+):
     bundle = load_workspace_config(workspace_root)
     agent = _resolve_agent(bundle, agent_id)
     workspace = Path(bundle.host.workspace_root)
+    ctx = resolve_global_context(
+        workspace,
+        agent=agent,
+        bundle=bundle,
+        active_project=active_project,
+    )
     event_stream = (
         Path(agent.event_stream)
         if agent.event_stream
@@ -433,8 +775,8 @@ def _gateway_router_for(workspace_root: Path, agent_id: str | None):
     )
 
     def run_gateway_turn(**kwargs):
-        return run_one_turn(
-            workspace_root=workspace,
+        return _run_turn_via_global_server(
+            ctx,
             message=kwargs["message"],
             session_id=kwargs["session_id"],
             agent_id=kwargs["agent_id"],
@@ -447,27 +789,19 @@ def _gateway_router_for(workspace_root: Path, agent_id: str | None):
 
     credentials = load_workspace_credentials(workspace).visible_to(agent.credentials)
     skill_registry = SkillLoader(
-        bundle.host.skill_roots,
+        ctx.skill_roots,
         enabled_skills=agent.skills or bundle.kernel.skills or None,
         available_credentials=credentials.credentials.keys(),
+        scope=ctx.scope,
         event_store=EventStore(event_stream),
         agent_id=agent.id,
         session_id="gateway",
     ).load()
     command_registry = CommandRegistry.from_skill_registry(skill_registry)
-    host_commands_enabled = "host" in (agent.skills or bundle.kernel.skills)
-    dev_commands_enabled = "dev" in (agent.skills or bundle.kernel.skills)
+    loaded_skill_names = set(skill_registry.loaded())
+    host_commands_enabled = "host" in loaded_skill_names
 
     def intercept_gateway_message(message, target_agent_id, session_id, correlation_id):
-        if dev_commands_enabled:
-            response = handle_plan_wizard(
-                store_path=_dev_plan_wizard_store_path(workspace, target_agent_id),
-                agent_id=target_agent_id,
-                session_id=session_id,
-                text=message.text,
-            )
-            if response is not None:
-                return response
         if host_commands_enabled:
             return handle_agent_creation_wizard(
                 workspace,
@@ -499,27 +833,224 @@ def _gateway_router_for(workspace_root: Path, agent_id: str | None):
                 include_user=include_user,
             ),
             command_registry=command_registry,
-            command_callbacks={
-                "workspace": workspace,
-                "agent_workspace": Path(agent.workspace),
-                "agent_workspace_for": lambda target_agent_id: Path(
+            command_callbacks=build_command_callbacks(
+                ctx,
+                command_registry=command_registry,
+                agent_workspace=Path(agent.workspace),
+                agent_workspace_for=lambda target_agent_id: Path(
                     load_workspace_config(workspace).agents.agents[target_agent_id].workspace
                 ),
-                "compact_session": lambda target_agent_id, session_id: _compact_gateway_session(
-                    workspace,
-                    target_agent_id,
-                    session_id,
-                ),
-                "model_summary": lambda target_agent_id: _gateway_model_summary(
+                model_summary=lambda target_agent_id: _gateway_model_summary(
                     workspace,
                     target_agent_id,
                 ),
-            },
+                extra={
+                    "compact_session": lambda target_agent_id, session_id: _compact_gateway_session(
+                        workspace,
+                        target_agent_id,
+                        session_id,
+                    ),
+                },
+            ),
         ),
         agent,
         bundle,
     )
 
+
+
+def _run_turn_via_global_server(
+    ctx,
+    *,
+    message: str,
+    session_id: str,
+    agent_id: str,
+    source_channel: str | None = None,
+    source_peer_id: str | None = None,
+    source_metadata: dict[str, Any] | None = None,
+    limits: dict[str, Any] | None = None,
+    message_metadata: dict[str, Any] | None = None,
+) -> TurnResult:
+    source_metadata = _source_metadata_with_active_project(ctx, source_metadata)
+    client = MauriceClient(ctx)
+    if not client.is_running():
+        runtime = _agent_runtime_registry().get_or_create(ctx.context_root, agent_id)
+        return runtime.run_turn(
+            message=message,
+            session_id=session_id,
+            agent_id=agent_id,
+            source_channel=source_channel,
+            source_peer_id=source_peer_id,
+            source_metadata=source_metadata,
+            limits=limits,
+            message_metadata=message_metadata,
+        )
+    client.connect()
+    assistant_text = ""
+    status = "failed"
+    turn_correlation_id = ""
+    input_tokens = 0
+    output_tokens = 0
+    error_message: str | None = None
+    tool_results: list[ToolResult] = []
+    try:
+        for event in client.run_turn(
+            message,
+            session_id=session_id,
+            agent_id=agent_id,
+            source_channel=source_channel,
+            source_peer_id=source_peer_id,
+            source_metadata=source_metadata,
+            limits=limits,
+            message_metadata=message_metadata,
+        ):
+            kind = event.get("type")
+            if kind == "text_delta":
+                assistant_text += str(event.get("delta") or "")
+            elif kind == "tool_result":
+                error_code = event.get("error")
+                tool_results.append(
+                    ToolResult(
+                        ok=bool(event.get("ok")),
+                        summary=str(event.get("summary") or ""),
+                        trust="trusted",
+                        error=(
+                            ToolError(
+                                code=str(error_code),
+                                message=str(error_code),
+                                retryable=False,
+                            )
+                            if error_code
+                            else None
+                        ),
+                    )
+                )
+            elif kind == "error":
+                error_message = str(event.get("message") or "")
+            elif kind == "done":
+                status = str(event.get("status") or status)
+                turn_correlation_id = str(event.get("correlation_id") or turn_correlation_id)
+                if not assistant_text and event.get("assistant_text"):
+                    assistant_text = str(event.get("assistant_text") or "")
+                input_tokens = int(event.get("input_tokens") or 0)
+                output_tokens = int(event.get("output_tokens") or 0)
+    finally:
+        client.close()
+    store = SessionStore(ctx.sessions_path)
+    try:
+        session = store.load(agent_id, session_id)
+    except FileNotFoundError:
+        session = store.create(agent_id, session_id=session_id)
+    return TurnResult(
+        session=session,
+        correlation_id=turn_correlation_id,
+        assistant_text=assistant_text,
+        tool_results=tool_results,
+        status=status,
+        error=error_message,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
+def _source_metadata_with_active_project(
+    ctx: MauriceContext,
+    source_metadata: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if ctx.active_project_root is None:
+        return source_metadata
+    metadata = dict(source_metadata or {})
+    metadata.setdefault("active_project_root", str(ctx.active_project_root))
+    return metadata
+
+
+def _run_turn_via_local_server(
+    ctx: MauriceContext,
+    *,
+    message: str,
+    session_id: str,
+    agent_id: str,
+    source_channel: str | None = None,
+    source_peer_id: str | None = None,
+    source_metadata: dict[str, Any] | None = None,
+    limits: dict[str, Any] | None = None,
+    message_metadata: dict[str, Any] | None = None,
+) -> TurnResult:
+    client = MauriceClient(ctx)
+    client.ensure_running()
+    client.connect()
+    assistant_text = ""
+    status = "failed"
+    turn_correlation_id = ""
+    input_tokens = 0
+    output_tokens = 0
+    error_message: str | None = None
+    tool_results: list[ToolResult] = []
+    try:
+        for event in client.run_turn(
+            message,
+            session_id=session_id,
+            agent_id=agent_id,
+            source_channel=source_channel,
+            source_peer_id=source_peer_id,
+            source_metadata=source_metadata,
+            limits=limits,
+            message_metadata=message_metadata,
+        ):
+            kind = event.get("type")
+            if kind == "text_delta":
+                assistant_text += str(event.get("delta") or "")
+            elif kind == "tool_result":
+                error_code = event.get("error")
+                tool_results.append(
+                    ToolResult(
+                        ok=bool(event.get("ok")),
+                        summary=str(event.get("summary") or ""),
+                        trust="trusted",
+                        error=(
+                            ToolError(
+                                code=str(error_code),
+                                message=str(error_code),
+                                retryable=False,
+                            )
+                            if error_code
+                            else None
+                        ),
+                    )
+                )
+            elif kind == "error":
+                error_message = str(event.get("message") or "")
+            elif kind == "done":
+                status = str(event.get("status") or status)
+                turn_correlation_id = str(event.get("correlation_id") or turn_correlation_id)
+                if not assistant_text and event.get("assistant_text"):
+                    assistant_text = str(event.get("assistant_text") or "")
+                input_tokens = int(event.get("input_tokens") or 0)
+                output_tokens = int(event.get("output_tokens") or 0)
+    finally:
+        client.close()
+    store = SessionStore(ctx.sessions_path)
+    try:
+        session = store.load(agent_id, session_id)
+    except FileNotFoundError:
+        session = store.create(agent_id, session_id=session_id)
+    return TurnResult(
+        session=session,
+        correlation_id=turn_correlation_id,
+        assistant_text=assistant_text,
+        tool_results=tool_results,
+        status=status,
+        error=error_message,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
+def _reset_local_gateway_session(ctx: MauriceContext, agent_id: str, session_id: str) -> None:
+    try:
+        SessionStore(ctx.sessions_path).reset(agent_id, session_id)
+    except FileNotFoundError:
+        SessionStore(ctx.sessions_path).create(agent_id, session_id=session_id)
 
 
 def _reset_gateway_session(workspace: Path, agent_id: str, session_id: str) -> None:
@@ -529,11 +1060,6 @@ def _reset_gateway_session(workspace: Path, agent_id: str, session_id: str) -> N
     except FileNotFoundError:
         store.create(agent_id, session_id=session_id)
     clear_agent_creation_wizard(workspace, agent_id=agent_id, session_id=session_id)
-    clear_plan_wizard(
-        store_path=_dev_plan_wizard_store_path(workspace, agent_id),
-        agent_id=agent_id,
-        session_id=session_id,
-    )
 
 
 
@@ -544,34 +1070,80 @@ def _record_gateway_exchange(
     *,
     include_user: bool,
 ) -> None:
-    store = SessionStore(workspace / "sessions")
+    _record_gateway_exchange_in_store(
+        SessionStore(workspace / "sessions"),
+        inbound,
+        outbound,
+        include_user=include_user,
+    )
+
+
+def _record_gateway_exchange_for_context(
+    ctx: MauriceContext,
+    inbound,
+    outbound,
+    *,
+    include_user: bool,
+) -> None:
+    _record_gateway_exchange_in_store(
+        SessionStore(ctx.sessions_path),
+        inbound,
+        outbound,
+        include_user=include_user,
+    )
+
+
+def _record_gateway_exchange_in_store(
+    store: SessionStore,
+    inbound,
+    outbound,
+    *,
+    include_user: bool,
+) -> None:
     try:
         store.load(outbound.agent_id, outbound.session_id)
     except FileNotFoundError:
         store.create(outbound.agent_id, session_id=outbound.session_id)
     if include_user:
+        metadata = {"channel": inbound.channel, "peer_id": inbound.peer_id}
+        attachments = inbound.metadata.get("attachments") if isinstance(inbound.metadata, dict) else None
+        if attachments:
+            metadata["attachments"] = attachments
+        visible_user_message = inbound.metadata.get("visible_user_message") if isinstance(inbound.metadata, dict) else None
+        if visible_user_message is not None:
+            metadata["visible_user_message"] = visible_user_message
         store.append_message(
             outbound.agent_id,
             outbound.session_id,
             role="user",
             content=inbound.text,
             correlation_id=outbound.correlation_id,
-            metadata={"channel": inbound.channel, "peer_id": inbound.peer_id},
+            metadata=metadata,
         )
     if outbound.text:
+        assistant_correlation_id = outbound.metadata.get("kernel_correlation_id") or outbound.correlation_id
         store.append_message(
             outbound.agent_id,
             outbound.session_id,
             role="assistant",
             content=outbound.text,
-            correlation_id=outbound.correlation_id,
+            correlation_id=assistant_correlation_id,
             metadata=outbound.metadata,
         )
 
 
+def _compact_gateway_session_for_context(ctx: MauriceContext, agent_id: str, session_id: str) -> str:
+    return _compact_gateway_session_in_store(SessionStore(ctx.sessions_path), agent_id, session_id)
+
+
 
 def _compact_gateway_session(workspace: Path, agent_id: str, session_id: str) -> str:
-    store = SessionStore(workspace / "sessions")
+    summary = _compact_gateway_session_in_store(SessionStore(workspace / "sessions"), agent_id, session_id)
+    clear_agent_creation_wizard(workspace, agent_id=agent_id, session_id=session_id)
+    return summary
+
+
+def _compact_gateway_session_in_store(store: SessionStore, agent_id: str, session_id: str) -> str:
     try:
         session = store.load(agent_id, session_id)
     except FileNotFoundError:
@@ -602,22 +1174,14 @@ def _compact_gateway_session(workspace: Path, agent_id: str, session_id: str) ->
         content=summary,
         metadata={"compacted": True, "original_message_count": message_count},
     )
-    clear_agent_creation_wizard(workspace, agent_id=agent_id, session_id=session_id)
-    clear_plan_wizard(
-        store_path=_dev_plan_wizard_store_path(workspace, agent_id),
-        agent_id=agent_id,
-        session_id=session_id,
-    )
     return "Session compactee. J'ai garde un resume court dans le contexte."
 
 
-
-def _dev_plan_wizard_store_path(workspace: Path, agent_id: str) -> Path:
-    try:
-        agent = load_workspace_config(workspace).agents.agents[agent_id]
-        return Path(agent.workspace) / PLAN_WIZARD_FILE
-    except KeyError:
-        return workspace / "agents" / agent_id / PLAN_WIZARD_FILE
+def _local_model_summary(ctx: MauriceContext) -> str:
+    provider = ctx.config.get("provider", {}) if isinstance(ctx.config, dict) else {}
+    kind = provider.get("type", "mock")
+    model = provider.get("model", "")
+    return f"Modele courant : `{kind}:{model or 'mock'}`.\n\nChange-le depuis le bouton `Modele` du chat web."
 
 
 
@@ -631,6 +1195,550 @@ def _gateway_model_summary(workspace: Path, agent_id: str) -> str:
     return (
         f"Modele de `{agent.id}` : `{provider}:{name}`.\n\n"
         f"Protocole : `{protocol}`.\n"
-        f"Pour le changer : `maurice onboard --agent {agent.id} --model`."
+        "Change-le depuis le bouton `Modele` du chat web."
     )
 
+
+def _gateway_model_status(workspace: Path, agent_id: str) -> dict[str, Any]:
+    bundle = load_workspace_config(workspace)
+    agent = _resolve_agent(bundle, agent_id)
+    model = _effective_model_config(bundle, agent)
+    credentials = load_workspace_credentials(workspace).visible_to(agent.credentials)
+    choices = _model_choices(model, credentials)
+    current = str(model.get("name") or "mock")
+    return {
+        "ok": True,
+        "available": True,
+        "agent_id": agent.id,
+        "provider": model.get("provider") or "mock",
+        "protocol": model.get("protocol"),
+        "model": current,
+        "choices": _choice_rows(choices, current),
+    }
+
+
+def _gateway_model_update(workspace: Path, agent_id: str, model_name: str) -> dict[str, Any]:
+    bundle = load_workspace_config(workspace)
+    agent = _resolve_agent(bundle, agent_id)
+    model = _effective_model_config(bundle, agent)
+    credentials = load_workspace_credentials(workspace).visible_to(agent.credentials)
+    choices = _model_choices(model, credentials)
+    valid_ids = {model_id for model_id, _label in choices}
+    if valid_ids and model_name not in valid_ids:
+        return {"ok": False, "error": "unknown_model", "model": model_name}
+
+    updated_model = {**model, "name": model_name}
+    if agent.default and agent.model is None:
+        kernel_data = read_yaml_file(kernel_config_path(workspace))
+        kernel_data.setdefault("kernel", {})["model"] = updated_model
+        write_yaml_file(kernel_config_path(workspace), kernel_data)
+    else:
+        update_agent(workspace, agent_id=agent.id, model=updated_model)
+    return _gateway_model_status(workspace, agent.id)
+
+
+def _gateway_agent_config_status(workspace: Path, agent_id: str) -> dict[str, Any]:
+    bundle = load_workspace_config(workspace)
+    agent = _resolve_agent(bundle, agent_id)
+    available_skills = _available_skills(workspace)
+    enabled_skills = _effective_agent_skills(bundle, agent, available_skills)
+    model_status = _gateway_model_status(workspace, agent.id)
+    model = _effective_model_config(bundle, agent)
+    provider_key = _provider_key_for_model(model)
+    credential_name = str(model.get("credential") or "")
+    credential_present = bool(
+        credential_name and credential_name in load_workspace_credentials(workspace).credentials
+    )
+    web_search = _web_search_config_status(workspace, "web" in enabled_skills)
+    telegram = _telegram_channel_for_agent(bundle, agent.id)
+    telegram_payload: dict[str, Any] = {"enabled": False}
+    if telegram is not None:
+        channel_name, channel_config = telegram
+        telegram_payload = {
+            "enabled": channel_config.get("enabled", True) is not False,
+            "channel": channel_name,
+            "credential": channel_config.get("credential"),
+            "allowed_users": _int_list(channel_config.get("allowed_users")),
+            "allowed_chats": _int_list(channel_config.get("allowed_chats")),
+        }
+    return {
+        "ok": True,
+        "available": True,
+        "agent": {
+            "id": agent.id,
+            "permission_profile": agent.permission_profile,
+            "skills": enabled_skills,
+            "default": agent.default,
+            "status": agent.status,
+        },
+        "permissions": [
+            {"id": "safe", "label": "safe", "description": "lecture seule et tres prudent"},
+            {"id": "limited", "label": "limited", "description": "lecture/ecriture dans son espace"},
+            {"id": "power", "label": "power", "description": "acces etendu"},
+        ],
+        "skills": [
+            {
+                "id": name,
+                "description": description,
+                "enabled": name in enabled_skills,
+            }
+            for name, description in available_skills.items()
+        ],
+        "model": model_status,
+        "provider": {
+            "current": provider_key,
+            "base_url": model.get("base_url"),
+            "credential": credential_name or None,
+            "credential_present": credential_present,
+            "choices": _provider_choices_for_web(workspace, model),
+        },
+        "web_search": web_search,
+        "telegram": telegram_payload,
+    }
+
+
+def _gateway_agent_config_update(workspace: Path, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    bundle = load_workspace_config(workspace)
+    agent = _resolve_agent(bundle, agent_id)
+    available_skills = _available_skills(workspace)
+
+    permission_profile = str(payload.get("permission_profile") or agent.permission_profile)
+    if permission_profile not in {"safe", "limited", "power"}:
+        return {"ok": False, "error": "invalid_permission"}
+
+    raw_skills = payload.get("skills")
+    if raw_skills is None:
+        skills = _effective_agent_skills(bundle, agent, available_skills)
+    elif isinstance(raw_skills, list):
+        skills = [str(item) for item in raw_skills]
+    else:
+        return {"ok": False, "error": "invalid_skills"}
+    unknown_skills = [name for name in skills if name not in available_skills]
+    if unknown_skills:
+        return {"ok": False, "error": "unknown_skills", "skills": unknown_skills}
+
+    try:
+        model, credential_to_allow = _web_model_from_agent_payload(
+            workspace,
+            _effective_model_config(bundle, agent),
+            payload,
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    credentials = list(agent.credentials)
+    if credential_to_allow and credential_to_allow not in credentials:
+        credentials.append(credential_to_allow)
+    try:
+        _apply_web_search_config(workspace, payload)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    updated = update_agent(
+        workspace,
+        agent_id=agent.id,
+        permission_profile=permission_profile,
+        skills=skills,
+        credentials=credentials,
+        model=model,
+        confirmed_permission_elevation=True,
+    )
+    _apply_web_telegram_config(workspace, updated, payload)
+    return {
+        **_gateway_agent_config_status(workspace, updated.id),
+        "updated": True,
+    }
+
+
+def _effective_agent_skills(bundle: ConfigBundle, agent, available_skills: dict[str, str]) -> list[str]:
+    configured = list(agent.skills or bundle.kernel.skills or [])
+    if not configured:
+        return list(available_skills)
+    return [name for name in configured if name in available_skills]
+
+
+def _provider_choices_for_web(workspace: Path, current_model: dict[str, Any]) -> list[dict[str, Any]]:
+    current_provider = _provider_key_for_model(current_model)
+    current_name = str(current_model.get("name") or "")
+
+    def current_for(provider: str) -> str:
+        return current_name if provider == current_provider else ""
+
+    return [
+        {
+            "id": "chatgpt",
+            "label": "ChatGPT",
+            "default_model": "gpt-5",
+            "models": _web_model_rows(
+                chatgpt_model_choices(),
+                current=current_for("chatgpt"),
+                fallback="gpt-5",
+            ),
+            "needs_base_url": False,
+            "needs_api_key": False,
+        },
+        {
+            "id": "openai_api",
+            "label": "OpenAI-compatible API",
+            "default_model": "gpt-4o-mini",
+            "default_base_url": "https://api.openai.com/v1",
+            "models": _web_model_rows(
+                _openai_compatible_model_choices(),
+                current=current_for("openai_api"),
+                fallback="gpt-4o-mini",
+            ),
+            "needs_base_url": True,
+            "needs_api_key": True,
+        },
+        {
+            "id": "ollama_local",
+            "label": "Ollama local",
+            "default_model": "llama3.1",
+            "default_base_url": "http://localhost:11434",
+            "models": _web_model_rows(
+                ollama_model_choices("http://localhost:11434"),
+                current=current_for("ollama_local"),
+                fallback="llama3.1",
+            ),
+            "needs_base_url": True,
+            "needs_api_key": False,
+        },
+        {
+            "id": "ollama_api",
+            "label": "Ollama API",
+            "default_model": "gpt-oss:20b",
+            "default_base_url": "https://ollama.com",
+            "models": _web_model_rows(
+                _ollama_api_model_choices(workspace, current_model),
+                current=current_for("ollama_api"),
+                fallback="gpt-oss:20b",
+            ),
+            "needs_base_url": True,
+            "needs_api_key": True,
+        },
+    ]
+
+
+def _web_model_rows(
+    choices: list[tuple[str, str]],
+    *,
+    current: str,
+    fallback: str,
+) -> list[dict[str, str]]:
+    rows = [{"id": model_id, "label": _web_model_label(model_id, label)} for model_id, label in choices]
+    ids = {row["id"] for row in rows}
+    if current and current not in ids:
+        rows.insert(0, {"id": current, "label": current})
+    if not rows and fallback:
+        rows.append({"id": fallback, "label": fallback})
+    return rows
+
+
+def _web_model_label(model_id: str, label: str) -> str:
+    if not label or label == model_id:
+        return model_id
+    return f"{model_id} - {label}"
+
+
+def _openai_compatible_model_choices() -> list[tuple[str, str]]:
+    return [
+        ("gpt-4o-mini", "rapide et economique"),
+        ("gpt-4o", "generaliste"),
+    ]
+
+
+def _ollama_api_model_choices(workspace: Path, current_model: dict[str, Any]) -> list[tuple[str, str]]:
+    base_url = str(current_model.get("base_url") or "https://ollama.com")
+    credential_name = str(current_model.get("credential") or "")
+    credential = load_workspace_credentials(workspace).credentials.get(credential_name) if credential_name else None
+    return ollama_model_choices(base_url, api_key=credential.value if credential is not None else "")
+
+
+def _provider_key_for_model(model: dict[str, Any]) -> str:
+    provider = str(model.get("provider") or "mock")
+    protocol = str(model.get("protocol") or "")
+    if provider == "auth" and protocol == "chatgpt_codex":
+        return "chatgpt"
+    if provider in {"api", "openai"} and protocol in {"openai_chat_completions", ""}:
+        return "openai_api"
+    if provider == "ollama":
+        return "ollama_api" if model.get("credential") else "ollama_local"
+    return "chatgpt"
+
+
+def _web_model_from_agent_payload(
+    workspace: Path,
+    current_model: dict[str, Any],
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    provider = str(payload.get("provider") or _provider_key_for_model(current_model))
+    provider_choices = _provider_choices_for_web(workspace, current_model)
+    valid_providers = {choice["id"] for choice in provider_choices}
+    if provider not in valid_providers:
+        raise ValueError("invalid_provider")
+    provider_choice = next(choice for choice in provider_choices if choice["id"] == provider)
+    model_name = str(payload.get("model") or current_model.get("name") or "").strip()
+    valid_models = {
+        str(model.get("id"))
+        for model in provider_choice.get("models", [])
+        if isinstance(model, dict) and model.get("id")
+    }
+    if model_name and valid_models and model_name not in valid_models:
+        raise ValueError("unknown_model")
+    if not model_name:
+        model_name = str(provider_choice.get("default_model") or "")
+    base_url = str(payload.get("base_url") or current_model.get("base_url") or "").strip()
+    api_key = str(payload.get("api_key") or "").strip()
+
+    if provider == "chatgpt":
+        return (
+            {
+                "provider": "auth",
+                "protocol": "chatgpt_codex",
+                "name": model_name or "gpt-5",
+                "base_url": None,
+                "credential": CHATGPT_CREDENTIAL_NAME,
+            },
+            CHATGPT_CREDENTIAL_NAME,
+        )
+    if provider == "openai_api":
+        credential = "openai"
+        base_url = base_url or "https://api.openai.com/v1"
+        if api_key:
+            _save_web_api_credential(workspace, credential, api_key, base_url)
+        return (
+            {
+                "provider": "api",
+                "protocol": "openai_chat_completions",
+                "name": model_name or "gpt-4o-mini",
+                "base_url": base_url,
+                "credential": credential,
+            },
+            credential,
+        )
+    if provider == "ollama_local":
+        return (
+            {
+                "provider": "ollama",
+                "protocol": "ollama_chat",
+                "name": model_name or "llama3.1",
+                "base_url": base_url or "http://localhost:11434",
+                "credential": None,
+            },
+            None,
+        )
+    if provider == "ollama_api":
+        credential = "ollama"
+        base_url = base_url or "https://ollama.com"
+        if api_key:
+            _save_web_api_credential(workspace, credential, api_key, base_url)
+        return (
+            {
+                "provider": "ollama",
+                "protocol": "ollama_chat",
+                "name": model_name or "gpt-oss:20b",
+                "base_url": base_url,
+                "credential": credential,
+            },
+            credential,
+        )
+    raise ValueError("invalid_provider")
+
+
+def _save_web_api_credential(workspace: Path, name: str, api_key: str, base_url: str) -> None:
+    store = load_workspace_credentials(workspace)
+    store.credentials[name] = CredentialRecord(type="api_key", value=api_key, base_url=base_url)
+    write_workspace_credentials(workspace, store)
+
+
+def _web_search_config_status(workspace: Path, web_enabled: bool) -> dict[str, Any]:
+    skills_data = read_yaml_file(workspace_skills_config_path(workspace))
+    web_config = skills_data.get("skills", {}).get("web", {})
+    if not isinstance(web_config, dict):
+        web_config = {}
+    base_url = str(web_config.get("base_url") or "").strip()
+    return {
+        "enabled": web_enabled,
+        "configured": bool(base_url),
+        "base_url": base_url,
+        "search_provider": str(web_config.get("search_provider") or "searxng"),
+    }
+
+
+def _apply_web_search_config(workspace: Path, payload: dict[str, Any]) -> None:
+    if "web_search_base_url" not in payload:
+        return
+    base_url = str(payload.get("web_search_base_url") or "").strip()
+    if base_url:
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("invalid_web_search_url")
+    path = workspace_skills_config_path(workspace)
+    skills_data = read_yaml_file(path)
+    web_config = skills_data.setdefault("skills", {}).setdefault("web", {})
+    if not isinstance(web_config, dict):
+        web_config = {}
+        skills_data["skills"]["web"] = web_config
+    if base_url:
+        web_config["search_provider"] = "searxng"
+        web_config["base_url"] = base_url
+    else:
+        web_config.pop("search_provider", None)
+        web_config.pop("base_url", None)
+    write_yaml_file(path, skills_data)
+
+
+def _apply_web_telegram_config(workspace: Path, agent, payload: dict[str, Any]) -> None:
+    if "telegram_enabled" not in payload:
+        return
+    enabled = payload.get("telegram_enabled") is True
+    host_path = host_config_path(workspace)
+    data = read_yaml_file(host_path)
+    host = data.setdefault("host", {})
+    channels = host.setdefault("channels", {})
+    channel_key = "telegram" if agent.id == "main" else f"telegram_{agent.id}"
+    credential = "telegram_bot" if agent.id == "main" else f"telegram_bot_{agent.id}"
+    token = str(payload.get("telegram_token") or "").strip()
+    if token:
+        store = load_workspace_credentials(workspace)
+        store.credentials[credential] = CredentialRecord(
+            type="token",
+            value=token,
+            provider="telegram_bot",
+        )
+        write_workspace_credentials(workspace, store)
+    allowed_users = _int_values_from_web(payload.get("telegram_allowed_users"))
+    previous = channels.get(channel_key) if isinstance(channels.get(channel_key), dict) else {}
+    allowed_chats = previous.get("allowed_chats") if isinstance(previous, dict) else []
+    if enabled:
+        channels[channel_key] = {
+            "adapter": "telegram",
+            "enabled": True,
+            "agent": agent.id,
+            "credential": credential,
+            "allowed_users": allowed_users,
+            "allowed_chats": allowed_chats if isinstance(allowed_chats, list) else [],
+            "status": "configured_pending_restart" if token or credential in load_workspace_credentials(workspace).credentials else "missing_credential",
+        }
+        if "telegram" not in agent.channels:
+            update_agent(workspace, agent_id=agent.id, channels=[*agent.channels, "telegram"])
+    else:
+        if isinstance(previous, dict):
+            previous["enabled"] = False
+            channels[channel_key] = previous
+        if "telegram" in agent.channels:
+            update_agent(
+                workspace,
+                agent_id=agent.id,
+                channels=[channel for channel in agent.channels if channel != "telegram"],
+            )
+    write_yaml_file(host_path, data)
+
+
+def _int_values_from_web(value: Any) -> list[int]:
+    if isinstance(value, str):
+        raw_items = re.split(r"[,;\s]+", value)
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = []
+    result: list[int] = []
+    for item in raw_items:
+        try:
+            text = str(item).strip()
+            if text:
+                result.append(int(text))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _local_model_status(ctx: MauriceContext, agent_id: str) -> dict[str, Any]:
+    provider = ctx.config.get("provider", {}) if isinstance(ctx.config, dict) else {}
+    if not isinstance(provider, dict):
+        provider = {}
+    current = str(provider.get("model") or "mock")
+    model = {
+        "provider": provider.get("type") or "mock",
+        "protocol": provider.get("protocol"),
+        "name": current,
+        "base_url": provider.get("base_url"),
+        "credential": provider.get("credential"),
+    }
+    choices = _model_choices(model, load_workspace_credentials(ctx.context_root))
+    return {
+        "ok": True,
+        "available": True,
+        "agent_id": agent_id or "main",
+        "provider": provider.get("type") or "mock",
+        "protocol": provider.get("protocol"),
+        "model": current,
+        "choices": _choice_rows(choices, current),
+    }
+
+
+def _local_model_update(ctx: MauriceContext, agent_id: str, model_name: str) -> dict[str, Any]:
+    cfg_path = config_path(ctx.context_root)
+    data = read_yaml_file(cfg_path)
+    provider = data.setdefault("provider", {})
+    if not isinstance(provider, dict):
+        provider = {}
+        data["provider"] = provider
+    provider["model"] = model_name
+    write_yaml_file(cfg_path, data)
+    if isinstance(ctx.config, dict):
+        ctx.config.setdefault("provider", {})["model"] = model_name
+    return _local_model_status(ctx, agent_id)
+
+
+def _local_agent_config_status(ctx: MauriceContext, agent_id: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "available": False,
+        "error": "agent_config_global_only",
+    }
+
+
+def _local_agent_config_update(ctx: MauriceContext, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "available": False,
+        "error": "agent_config_global_only",
+    }
+
+
+def _model_choices(model: dict[str, Any], credentials: CredentialsStore) -> list[tuple[str, str]]:
+    provider = str(model.get("provider") or "mock")
+    protocol = str(model.get("protocol") or "")
+    if provider == "auth" and protocol == "chatgpt_codex":
+        return chatgpt_model_choices()
+    if provider == "ollama":
+        credential = _model_credential(model, credentials)
+        return ollama_model_choices(
+            str(model.get("base_url") or (credential.base_url if credential is not None else "") or "http://localhost:11434"),
+            api_key=credential.value if credential is not None else "",
+        )
+    return []
+
+
+def _choice_rows(choices: list[tuple[str, str]], current: str) -> list[dict[str, Any]]:
+    rows = [
+        {
+            "id": model_id,
+            "label": _web_model_label(model_id, label),
+            "current": model_id == current,
+        }
+        for model_id, label in choices
+    ]
+    if current and current not in {row["id"] for row in rows}:
+        rows.insert(0, {"id": current, "label": current, "current": True})
+    return rows
+
+
+def _gateway_git_root(workspace: Path, agent_id: str) -> Path:
+    try:
+        bundle = load_workspace_config(workspace)
+        agent = _resolve_agent(bundle, agent_id)
+        active = _active_dev_project_path(agent)
+    except Exception:
+        active = None
+    return Path(active) if active is not None else workspace

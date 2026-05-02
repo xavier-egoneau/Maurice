@@ -36,6 +36,7 @@ def test_agent_wizard_asks_one_explicit_question_at_a_time(tmp_path) -> None:
     assert "`power`" in permission_question
     skills_question = _send(workspace, "limited")
     assert "`filesystem`" in skills_question
+    assert "`explore`" in skills_question
     assert "`self_update`" in skills_question
     assert "1. `filesystem`" in skills_question
     assert "`tous`" in skills_question
@@ -78,14 +79,44 @@ def test_agent_wizard_accepts_all_and_numbered_skills(tmp_path) -> None:
         "filesystem",
         "memory",
         "web",
+        "explore",
         "reminders",
         "vision",
         "dreaming",
-            "skills",
-            "host",
-            "self_update",
-            "dev",
-        ]
+        "skills",
+        "host",
+        "self_update",
+        "dev",
+    ]
+
+
+def test_agent_wizard_lists_user_skills_from_workspace_roots(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+    write_yaml_file(
+        workspace / "skills" / "translation" / "skill.yaml",
+        {
+            "name": "translation",
+            "version": "0.1.0",
+            "origin": "user",
+            "mutable": True,
+            "description": "Translate and adapt project text.",
+            "config_namespace": "skills.translation",
+            "requires": {"binaries": [], "credentials": []},
+            "dependencies": {"skills": [], "optional_skills": []},
+            "permissions": [],
+            "tools": [],
+        },
+    )
+
+    _send(workspace, "nouvel agent")
+    _send(workspace, "agent trad")
+    _send(workspace, "traduction")
+    skills_question = _send(workspace, "limited")
+
+    assert "`translation`" in skills_question
 
 
 def test_agent_wizard_lists_models_from_current_provider(tmp_path, monkeypatch) -> None:
@@ -357,6 +388,55 @@ def test_agent_wizard_full_agent_edit_can_change_only_telegram_token(tmp_path) -
     assert "mis a jour" in summary
     assert bundle.host.channels["telegram_maurice_polo"]["agent"] == "maurice_polo"
     assert bundle.host.channels["telegram_maurice_polo"]["credential"] == "telegram_bot_maurice_polo"
+
+
+def test_agent_wizard_full_agent_edit_can_jump_directly_to_skills(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+    create_agent(
+        workspace,
+        agent_id="maurice_polo",
+        permission_profile="limited",
+        skills=["filesystem", "memory"],
+    )
+
+    _send(workspace, "/edit_agent maurice_polo")
+    skills_question = _send(workspace, "je veux changer les skills")
+
+    assert "Choisis les competences a activer" in skills_question
+    assert "1. `filesystem` (actuelle)" in skills_question
+    assert "2. `memory` (actuelle)" in skills_question
+    assert "`explore`" in skills_question
+    assert "Reponds par des numeros" in skills_question
+
+    model_question = _send(workspace, "1,4,11")
+    assert "Modele actuel" in model_question
+    _send(workspace, "non")
+    _send(workspace, "non")
+    done = _send(workspace, "oui")
+
+    bundle = load_workspace_config(workspace)
+    assert "Agent `maurice_polo` mis a jour" in done
+    assert bundle.agents.agents["maurice_polo"].skills == ["filesystem", "explore", "dev"]
+
+
+def test_agent_wizard_full_agent_edit_can_jump_back_to_skills_later(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+    create_agent(workspace, agent_id="maurice_polo", permission_profile="limited")
+
+    _send(workspace, "/edit_agent maurice_polo")
+    _send(workspace, "non")
+    model_question = _send(workspace, "non")
+    assert "Modele actuel" in model_question
+    skills_question = _send(workspace, "je veux changer les skills")
+
+    assert "Choisis les competences a activer" in skills_question
+    assert "`explore`" in skills_question
 
 
 def test_clear_secret_capture_can_remove_pending_request(tmp_path) -> None:

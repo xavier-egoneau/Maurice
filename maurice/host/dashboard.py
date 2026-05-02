@@ -242,6 +242,7 @@ def _skill_rows(bundle: ConfigBundle) -> list[SkillDashboardRow]:
         registry = SkillLoader(
             bundle.host.skill_roots,
             enabled_skills=agent.skills or bundle.kernel.skills,
+            scope="global",
             agent_id=agent.id,
             session_id="dashboard",
         ).load()

@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import threading
+import webbrowser
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sys
@@ -26,10 +27,14 @@ from maurice.host.auth import (
 )
 from maurice.host.channels import ChannelAdapterRegistry
 from maurice.host.command_registry import CommandRegistry, default_command_registry
+from maurice.host.client import _desired_server_meta, _server_meta_compatible
+from maurice.host.context import MauriceContext, resolve_global_context
 from maurice.host.credentials import (
     CredentialRecord, CredentialsStore, credentials_path,
     ensure_workspace_credentials_migrated, load_workspace_credentials, write_workspace_credentials,
 )
+from maurice.host.commands.gateway_server import _gateway_serve_until_stopped
+from maurice.host.commands.scheduler import _scheduler_serve_until_stopped
 from maurice.host.dashboard import build_dashboard_snapshot
 from maurice.host.delivery import (
     _schedule_reminder_callback, _deliver_reminder_result, _build_daily_digest,
@@ -57,6 +62,7 @@ from maurice.host.secret_capture import capture_pending_secret
 from maurice.host.self_update import (
     apply_runtime_proposal, list_runtime_proposals, run_proposal_tests, validate_runtime_proposal,
 )
+from maurice.host.server import MauriceServer
 from maurice.host.service import check_install, inspect_service_status, read_service_logs
 from maurice.host.telegram import (
     _credential_value, _telegram_channel_configured, _telegram_channel_configs,
@@ -121,14 +127,18 @@ def _start_services(
     telegram: bool,
     scheduler: bool,
     gateway: bool,
+    open_browser: bool = True,
 ) -> None:
-    bundle = load_workspace_config(workspace_root)
+    bundle = _load_or_initialize_service_bundle(workspace_root)
     workspace = Path(bundle.host.workspace_root)
+    ctx = _global_service_context(workspace, agent_id=agent_id, bundle=bundle)
     pid_path = _pid_path(workspace)
     existing_pid = _read_pid(pid_path)
     if existing_pid and _pid_is_running(existing_pid):
+        _check_running_service_meta(ctx, existing_pid)
         raise SystemExit(f"Maurice already appears to be running with pid {existing_pid}.")
     _write_pid(pid_path, os.getpid())
+    _write_service_meta(ctx, os.getpid())
     stop_event = threading.Event()
     workers: list[threading.Thread] = []
     if scheduler:
@@ -160,9 +170,16 @@ def _start_services(
             )
         )
     if not workers:
-        _remove_pid(pid_path)
+        _remove_service_state(ctx, pid_path)
         print("No Maurice services to start.")
         return
+    server = MauriceServer(ctx)
+    server_thread = threading.Thread(
+        target=server.serve,
+        args=(ctx.server_socket_path,),
+        daemon=True,
+    )
+    workers.insert(0, server_thread)
     previous_handlers = {}
     for sig in (signal.SIGTERM, signal.SIGINT):
         previous_handlers[sig] = signal.getsignal(sig)
@@ -170,16 +187,21 @@ def _start_services(
     print("Maurice started. Press Ctrl+C to stop.")
     for worker in workers:
         worker.start()
+        if worker is server_thread:
+            _wait_for_socket(ctx.server_socket_path)
+    if gateway and open_browser:
+        _open_gateway_ui(bundle)
     try:
         while any(worker.is_alive() for worker in workers):
             time.sleep(0.2)
     finally:
         stop_event.set()
+        server._running = False
         for worker in workers:
             worker.join(timeout=5)
         for sig, handler in previous_handlers.items():
             signal.signal(sig, handler)
-        _remove_pid(pid_path)
+        _remove_service_state(ctx, pid_path)
         print("Maurice stopped")
 
 
@@ -192,12 +214,15 @@ def _start_services_daemon(
     telegram: bool,
     scheduler: bool,
     gateway: bool,
+    open_browser: bool = True,
 ) -> None:
-    bundle = load_workspace_config(workspace_root)
+    bundle = _load_or_initialize_service_bundle(workspace_root)
     workspace = Path(bundle.host.workspace_root)
+    ctx = _global_service_context(workspace, agent_id=agent_id, bundle=bundle)
     pid_path = _pid_path(workspace)
     existing_pid = _read_pid(pid_path)
     if existing_pid and _pid_is_running(existing_pid):
+        _check_running_service_meta(ctx, existing_pid)
         raise SystemExit(f"Maurice already appears to be running with pid {existing_pid}.")
     if not scheduler and not gateway and not (telegram and _telegram_channel_configured(bundle)):
         print("No Maurice services to start.")
@@ -235,15 +260,21 @@ def _start_services_daemon(
     while time.time() < deadline:
         pid = _read_pid(pid_path)
         if pid and _pid_is_running(pid):
+            _write_service_meta(ctx, pid)
             print(f"Maurice started in background with pid {pid}.")
             print(f"Logs: {log_path}")
+            if gateway and open_browser:
+                _open_gateway_ui(bundle)
             return
         if process.poll() is not None:
             break
         time.sleep(0.1)
     if process.poll() is None:
+        _write_service_meta(ctx, process.pid)
         print(f"Maurice start requested in background with pid {process.pid}.")
         print(f"Logs: {log_path}")
+        if gateway and open_browser:
+            _open_gateway_ui(bundle)
         return
     raise SystemExit(f"Maurice failed to start. See logs: {log_path}")
 
@@ -251,13 +282,15 @@ def _start_services_daemon(
 
 def _stop_services(workspace_root: Path) -> None:
     bundle = load_workspace_config(workspace_root)
-    pid_path = _pid_path(Path(bundle.host.workspace_root))
+    workspace = Path(bundle.host.workspace_root)
+    ctx = _global_service_context(workspace, agent_id=None, bundle=bundle)
+    pid_path = _pid_path(workspace)
     pid = _read_pid(pid_path)
     if not pid:
         print("Maurice is not running.")
         return
     if not _pid_is_running(pid):
-        _remove_pid(pid_path)
+        _remove_service_state(ctx, pid_path)
         print("Maurice is not running. Removed stale pid file.")
         return
     os.kill(pid, signal.SIGTERM)
@@ -273,9 +306,11 @@ def _restart_services_daemon(
     telegram: bool,
     scheduler: bool,
     gateway: bool,
+    open_browser: bool = True,
 ) -> None:
-    bundle = load_workspace_config(workspace_root)
+    bundle = _load_or_initialize_service_bundle(workspace_root)
     workspace = Path(bundle.host.workspace_root)
+    ctx = _global_service_context(workspace, agent_id=agent_id, bundle=bundle)
     pid_path = _pid_path(workspace)
     pid = _read_pid(pid_path)
     if pid and _pid_is_running(pid):
@@ -283,7 +318,7 @@ def _restart_services_daemon(
         print(f"Stop requested for Maurice pid {pid}.")
         _wait_for_stop(pid_path, pid)
     elif pid:
-        _remove_pid(pid_path)
+        _remove_service_state(ctx, pid_path)
         print("Removed stale Maurice pid file.")
     else:
         print("Maurice is not running. Starting it now.")
@@ -294,6 +329,7 @@ def _restart_services_daemon(
         telegram=telegram,
         scheduler=scheduler,
         gateway=gateway,
+        open_browser=open_browser,
     )
 
 
@@ -308,6 +344,121 @@ def _wait_for_stop(pid_path: Path, pid: int, *, timeout_seconds: float = 5.0) ->
             return
         time.sleep(0.1)
     _remove_pid(pid_path)
+
+
+def _load_or_initialize_service_bundle(workspace_root: Path) -> ConfigBundle:
+    workspace = Path(workspace_root).expanduser().resolve()
+    if _service_host_config_missing(workspace):
+        runtime_root = Path(__file__).resolve().parents[2]
+        initialize_workspace(workspace, runtime_root, permission_profile="safe")
+        print(f"Maurice workspace initialized: {workspace}")
+    try:
+        return load_workspace_config(workspace)
+    except Exception as exc:
+        raise SystemExit(
+            "Maurice workspace config is invalid. "
+            f"Run `maurice onboard --workspace {workspace}` to repair it.\n"
+            f"Details: {exc}"
+        ) from exc
+
+
+def _service_host_config_missing(workspace: Path) -> bool:
+    host_path = host_config_path(workspace)
+    if not host_path.exists():
+        return True
+    host = read_yaml_file(host_path).get("host")
+    return (
+        not isinstance(host, dict)
+        or not host.get("runtime_root")
+        or not host.get("workspace_root")
+    )
+
+
+def _wait_for_socket(socket_path: Path, *, timeout_seconds: float = 5.0) -> None:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if socket_path.exists():
+            return
+        time.sleep(0.05)
+
+
+def _gateway_ui_url(bundle: ConfigBundle) -> str:
+    host = bundle.host.gateway.host
+    if host in {"", "0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{bundle.host.gateway.port}"
+
+
+def _wait_for_gateway_ui(url: str, *, timeout_seconds: float = 3.0) -> bool:
+    health_url = f"{url.rstrip('/')}/health"
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        try:
+            with urlrequest.urlopen(health_url, timeout=0.25) as response:
+                if response.status < 500:
+                    return True
+        except (OSError, urlerror.URLError):
+            time.sleep(0.1)
+    return False
+
+
+def _open_gateway_ui(bundle: ConfigBundle) -> None:
+    url = _gateway_ui_url(bundle)
+    if not _wait_for_gateway_ui(url):
+        print(f"Maurice chat is not reachable yet: {url}")
+        return
+    print(f"Opening Maurice chat: {url}")
+    try:
+        webbrowser.open(url)
+    except Exception as exc:
+        print(f"Could not open browser automatically: {exc}")
+
+
+def _global_service_context(
+    workspace: Path,
+    *,
+    agent_id: str | None,
+    bundle: ConfigBundle,
+) -> MauriceContext:
+    agent = _resolve_agent(bundle, agent_id)
+    return resolve_global_context(workspace, agent=agent, bundle=bundle)
+
+
+def _write_service_meta(ctx: MauriceContext, pid: int) -> None:
+    meta = {
+        **_desired_server_meta(ctx),
+        "pid": pid,
+        "started_at": time.time(),
+    }
+    ctx.server_pid_path.parent.mkdir(parents=True, exist_ok=True)
+    ctx.server_pid_path.write_text(f"{pid}\n", encoding="utf-8")
+    ctx.server_meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _check_running_service_meta(ctx: MauriceContext, pid: int) -> None:
+    if os.environ.get("MAURICE_DEV"):
+        return
+    try:
+        current = json.loads(ctx.server_meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    desired = _desired_server_meta(ctx)
+    if not _server_meta_compatible(current, desired):
+        raise SystemExit(
+            f"Maurice pid {pid} is running with incompatible service metadata. "
+            "Use `maurice restart` to refresh the daemon."
+        )
+
+
+def _remove_service_state(ctx: MauriceContext, pid_path: Path) -> None:
+    _remove_pid(pid_path)
+    for path in (ctx.server_pid_path, ctx.server_meta_path):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 
@@ -369,4 +520,3 @@ def _doctor_workspace(workspace_root: Path) -> None:
             f"Maurice model note: {default_agent.id} overrides kernel.model; "
             "kernel.model is only the fallback default."
         )
-

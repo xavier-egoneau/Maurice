@@ -25,8 +25,11 @@ def new_correlation_id(prefix: str = "turn") -> str:
     return f"{prefix}_{uuid4().hex}"
 
 
+SessionRole = Literal["system", "user", "assistant", "tool_call", "tool"]
+
+
 class SessionMessage(MauriceModel):
-    role: Literal["system", "user", "assistant", "tool"]
+    role: SessionRole
     content: str
     created_at: datetime = Field(default_factory=utc_now)
     correlation_id: str | None = None
@@ -71,7 +74,22 @@ class SessionStore:
         path = self.session_path(agent_id, session_id)
         if not path.exists():
             raise FileNotFoundError(path)
-        return SessionRecord.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        session = SessionRecord.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        return _normalize_legacy_tool_call_messages(session)
+
+    def list(self, agent_id: str) -> list[SessionRecord]:
+        agent_root = self.root / agent_id
+        if not agent_root.exists():
+            return []
+        sessions: list[SessionRecord] = []
+        for path in sorted(agent_root.glob("*.json")):
+            try:
+                sessions.append(
+                    SessionRecord.model_validate(json.loads(path.read_text(encoding="utf-8")))
+                )
+            except (OSError, json.JSONDecodeError, ValueError):
+                continue
+        return sorted(sessions, key=lambda session: session.updated_at, reverse=True)
 
     def save(self, session: SessionRecord) -> SessionRecord:
         session.updated_at = utc_now()
@@ -85,7 +103,7 @@ class SessionStore:
         agent_id: str,
         session_id: str,
         *,
-        role: Literal["system", "user", "assistant", "tool"],
+        role: SessionRole,
         content: str,
         correlation_id: str | None = None,
         metadata: dict[str, Any] | None = None,
@@ -150,3 +168,30 @@ class SessionStore:
         )
         self.save(reset_session)
         return reset_session
+
+
+def _normalize_legacy_tool_call_messages(session: SessionRecord) -> SessionRecord:
+    normalized: list[SessionMessage] = []
+    changed = False
+    for message in session.messages:
+        metadata = dict(message.metadata or {})
+        if message.role == "assistant" and metadata.get("tool_call"):
+            changed = True
+            normalized.append(
+                SessionMessage(
+                    role="tool_call",
+                    content=message.content,
+                    created_at=message.created_at,
+                    correlation_id=message.correlation_id,
+                    metadata={
+                        "tool_call_id": metadata.get("tool_call_id"),
+                        "tool_name": metadata.get("tool_name"),
+                        "tool_arguments": metadata.get("tool_arguments") or {},
+                    },
+                )
+            )
+            continue
+        normalized.append(message)
+    if changed:
+        session.messages = normalized
+    return session

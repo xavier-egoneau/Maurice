@@ -21,6 +21,7 @@ def build_executors(ctx: Any) -> dict[str, Any]:
         ctx.permission_context,
         ctx.skill_roots,
         enabled_skills=ctx.enabled_skills or None,
+        scope=ctx.hooks.scope or None,
     )
 
 
@@ -29,14 +30,15 @@ def skill_authoring_tool_executors(
     roots: list[SkillRoot | SkillRootConfig],
     *,
     enabled_skills: list[str] | None = None,
+    scope: str | None = None,
 ) -> dict[str, Any]:
     return {
         "skills.create": lambda arguments: create(arguments, context, roots),
-        "skills.list": lambda arguments: list_skills(arguments, roots, enabled_skills=enabled_skills),
-        "skills.reload": lambda arguments: reload(arguments, roots, enabled_skills=enabled_skills),
+        "skills.list": lambda arguments: list_skills(arguments, roots, enabled_skills=enabled_skills, scope=scope),
+        "skills.reload": lambda arguments: reload(arguments, roots, enabled_skills=enabled_skills, scope=scope),
         "maurice.system_skills.skills.tools.create": lambda arguments: create(arguments, context, roots),
-        "maurice.system_skills.skills.tools.list_skills": lambda arguments: list_skills(arguments, roots, enabled_skills=enabled_skills),
-        "maurice.system_skills.skills.tools.reload": lambda arguments: reload(arguments, roots, enabled_skills=enabled_skills),
+        "maurice.system_skills.skills.tools.list_skills": lambda arguments: list_skills(arguments, roots, enabled_skills=enabled_skills, scope=scope),
+        "maurice.system_skills.skills.tools.reload": lambda arguments: reload(arguments, roots, enabled_skills=enabled_skills, scope=scope),
     }
 
 
@@ -56,7 +58,8 @@ def create(
     if not isinstance(description, str):
         return _error("invalid_arguments", "skills.create description must be a string.")
 
-    user_root = _user_skill_root(roots)
+    workspace_skills = (Path(context.variables()["$workspace"]) / "skills").resolve()
+    user_root = _user_skill_root(roots, workspace_skills=workspace_skills)
     if user_root is None:
         return _error("missing_user_root", "No mutable user skill root configured.")
 
@@ -65,8 +68,7 @@ def create(
         return _error("skill_collision", f"Skill already exists: {name}")
 
     skill_dir = (Path(user_root.path).expanduser().resolve() / name).resolve()
-    workspace_skills = Path(context.variables()["$workspace"]) / "skills"
-    if not _is_relative_to(skill_dir, workspace_skills.resolve()):
+    if not _is_relative_to(skill_dir, workspace_skills):
         return _error("permission_denied", "User skills must be created under workspace/skills.")
 
     skill_dir.mkdir(parents=True, exist_ok=False)
@@ -93,9 +95,10 @@ def list_skills(
     roots: list[SkillRoot | SkillRootConfig],
     *,
     enabled_skills: list[str] | None = None,
+    scope: str | None = None,
 ) -> ToolResult:
     try:
-        registry = SkillLoader(roots, enabled_skills=enabled_skills).load()
+        registry = SkillLoader(roots, enabled_skills=enabled_skills, scope=_normalized_scope(scope)).load()
     except SkillLoadError as exc:
         return _error("skill_load_failed", str(exc))
     return ToolResult(
@@ -114,9 +117,10 @@ def reload(
     roots: list[SkillRoot | SkillRootConfig],
     *,
     enabled_skills: list[str] | None = None,
+    scope: str | None = None,
 ) -> ToolResult:
     try:
-        registry = SkillLoader(roots, enabled_skills=enabled_skills).load()
+        registry = SkillLoader(roots, enabled_skills=enabled_skills, scope=_normalized_scope(scope)).load()
     except SkillLoadError as exc:
         return _error("skill_reload_failed", str(exc))
     return ToolResult(
@@ -139,6 +143,7 @@ def _write_skill_skeleton(skill_dir: Path, name: str, description: str) -> None:
         "required": False,
         "description": description,
         "config_namespace": f"skills.{name}",
+        "available_in": ["local", "global"],
         "requires": {"binaries": [], "credentials": []},
         "dependencies": {"skills": [], "optional_skills": []},
         "permissions": [],
@@ -178,17 +183,34 @@ def _registry_snapshot(registry) -> list[dict[str, Any]]:
             "errors": skill.errors,
             "suggested_fixes": skill.suggested_fixes,
             "missing_dependencies": skill.missing_dependencies,
+            "available_in": skill.manifest.available_in if skill.manifest else [],
         }
         for name, skill in sorted(registry.skills.items())
     ]
 
 
-def _user_skill_root(roots: list[SkillRoot | SkillRootConfig]) -> SkillRoot | None:
+def _normalized_scope(scope: str | None):
+    return scope if scope in {"local", "global"} else None
+
+
+def _user_skill_root(
+    roots: list[SkillRoot | SkillRootConfig],
+    *,
+    workspace_skills: Path | None = None,
+) -> SkillRoot | None:
+    fallback: SkillRoot | None = None
     for root in roots:
         skill_root = root if isinstance(root, SkillRoot) else SkillRoot.from_config(root)
-        if skill_root.origin == "user" and skill_root.mutable:
+        if skill_root.origin != "user" or not skill_root.mutable:
+            continue
+        if fallback is None:
+            fallback = skill_root
+        if workspace_skills is None:
             return skill_root
-    return None
+        root_path = Path(skill_root.path).expanduser().resolve()
+        if root_path == workspace_skills or _is_relative_to(root_path, workspace_skills):
+            return skill_root
+    return fallback
 
 
 def _find_existing_skill(name: str, roots: list[SkillRoot | SkillRootConfig]) -> Path | None:

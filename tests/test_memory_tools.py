@@ -32,6 +32,22 @@ def test_memory_remember_search_and_get(tmp_path) -> None:
     assert (tmp_path / "workspace" / "skills" / "memory" / "memory.sqlite").is_file()
 
 
+def test_memory_can_use_context_memory_path(tmp_path) -> None:
+    permission_context = context(tmp_path)
+    memory_path = tmp_path / "project" / ".maurice" / "memory.sqlite"
+
+    remembered = remember(
+        {"content": "Local project memory.", "tags": ["local"]},
+        permission_context,
+        memory_path=memory_path,
+    )
+
+    assert remembered.ok
+    assert remembered.artifacts[0].path == str(memory_path.resolve())
+    assert memory_path.is_file()
+    assert not (tmp_path / "workspace" / "skills" / "memory" / "memory.sqlite").exists()
+
+
 def test_memory_search_missing_query_returns_tool_error(tmp_path) -> None:
     result = search({}, context(tmp_path))
 

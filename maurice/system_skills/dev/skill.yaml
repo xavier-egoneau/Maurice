@@ -20,10 +20,12 @@ commands:
     description: lister les projets de l'agent courant
     handler: maurice.system_skills.dev.commands.projects
     renderer: markdown
+    available_in: [global]
   - name: /project
     description: ouvrir ou afficher le projet actif
     handler: maurice.system_skills.dev.commands.project
     renderer: markdown
+    available_in: [global]
   - name: /plan
     description: cadrer puis creer PLAN.md pour le projet actif
     handler: maurice.system_skills.dev.commands.plan

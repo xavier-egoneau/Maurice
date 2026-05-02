@@ -1,14 +1,19 @@
 # Maurice
 
-A modular, persistent AI agent runtime with a small inspectable kernel.
+Maurice is one AI assistant with two context levels:
 
-- typed runtime contracts
-- kernel/host/skills separation
-- scoped permissions and approval records
-- automatic context compaction
-- append-only event log
-- persisted sessions
-- strict skill loading with dynamic executor wiring
+- **Folder context**: run `maurice` or `maurice chat` from a folder. Maurice is
+  focused on that folder, stores state in `./.maurice`, and keeps memory scoped
+  to that folder.
+- **Desktop context**: choose global assistant usage during setup, then run
+  `maurice start`. Maurice stays available in the background, uses a central
+  workspace and memory, and can serve the browser chat, scheduler, dashboard,
+  channels, and durable agents. When launched from a folder, the central
+  workspace stays the assistant's state root while that folder is treated as the
+  active project.
+
+These are not two products. They share the same agent runtime, permissions,
+memory, sessions, approvals, and skills; only the context boundary changes.
 
 ## Requirements
 
@@ -17,71 +22,107 @@ A modular, persistent AI agent runtime with a small inspectable kernel.
 ## Install
 
 ```bash
+cd /path/to/Maurice
 ./install.sh
+maurice setup
 ```
 
-Checks Python, installs the package, links the `maurice` CLI, and runs onboarding.
+`maurice setup` asks whether Maurice should start from a folder by default or as
+a desktop assistant. The choice only selects the default context level; it does
+not create a separate product. You can run `maurice setup` again later to switch
+between both levels.
 
-## Quick start
+Start Maurice automatically when your Linux desktop session opens:
 
 ```bash
-maurice start          # start daemon
-maurice logs          # tail logs
-maurice dashboard     # open dashboard
-make stop             # stop daemon
+./install_autostart.sh
+./install_autostart.sh --workspace /path/to/workspace
+./install_autostart.sh --remove
 ```
 
-Run one turn directly:
+## Folder Use
 
 ```bash
-maurice run --message "salut Maurice"
+cd /path/to/project
+maurice chat          # terminal chat
+maurice web           # browser chat for this folder
 ```
 
-Override workspace:
-
-```bash
-WORKSPACE=/path/to/ws ./install.sh
-maurice run --workspace /path/to/ws --message "salut"
-```
-
-## Dev install
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-```
-
-## Tests
-
-```bash
-pytest -q
-```
-
-## Docs
-
-- [docs/architecture.md](docs/architecture.md) — layer model, module map, physical layout
-- [docs/turn-lifecycle.md](docs/turn-lifecycle.md) — what happens during a turn
-- [docs/skills.md](docs/skills.md) — how to write a skill
-- [docs/security.md](docs/security.md) — permission profiles, approval modes, shell parser
-- [docs/config.md](docs/config.md) — all config keys and defaults
-
-## Gateway
-
-```bash
-make gateway          # local HTTP + Telegram polling
-make telegram         # Telegram polling only
-```
-
-Local gateway listens on `http://127.0.0.1:18791` by default.
-
-## Dev skill
-
-When `dev` is enabled, project commands work in agent context:
+State is kept under:
 
 ```text
-/projects             list projects
-/project open <name>  open or create a project
+./.maurice/
+  config.yaml
+  sessions/
+  events.jsonl
+  approvals.json
+  memory.sqlite
+  run/
+```
+
+## Desktop Assistant Use
+
+To keep Maurice available like a desktop assistant, run the setup wizard and
+choose the global context level:
+
+```bash
+maurice setup
+```
+
+During setup:
+
+- choose **global** when asked for the starting context level
+- choose the workspace folder Maurice will use for central memory, sessions,
+  agents, and assistant-owned content
+- choose a permission profile for what Maurice can do inside the workspace and
+  the active project folder
+- connect a provider: OpenAI-compatible API, OpenAI/ChatGPT browser auth,
+  Ollama local, Ollama Cloud/remote API, or Anthropic API
+
+Then start the assistant:
+
+```bash
+maurice start
+```
+
+`maurice start` does not silently expand a folder-focused setup into the desktop
+assistant. It starts the daemon for the workspace chosen during setup. If Maurice
+was configured to start from folders, run `maurice setup` and choose **global**,
+or pass `--workspace` explicitly for a one-off global daemon.
+
+`maurice web` follows the configured context level. Folder-first setups open a
+browser chat for the current folder. Desktop-assistant setups use the configured
+workspace for central state, but keep the folder where `maurice web` was launched
+as the active project. Use `--dir` to force a folder context or `--workspace` to
+force a workspace context while still keeping the launch folder as the active
+project.
+
+```bash
+maurice start          # start daemon services and open the browser chat
+maurice restart        # restart daemon services after config or code changes
+maurice web            # foreground browser chat for configured context
+maurice logs           # show recent events
+maurice dashboard      # open dashboard
+maurice stop           # stop daemon services
+```
+
+Use `maurice start --no-browser` on headless machines or when you only want the
+daemon.
+
+Use an explicit workspace only when you want to bypass the workspace configured
+during setup:
+
+```bash
+maurice start --workspace /path/to/workspace
+maurice restart --workspace /path/to/workspace
+maurice web --workspace /path/to/workspace
+```
+
+## Project Commands
+
+When `dev` is enabled, project commands work against the active context:
+
+```text
 /plan                 frame and write PLAN.md
 /tasks                list open tasks
 /dev                  execute the plan autonomously
@@ -90,4 +131,22 @@ When `dev` is enabled, project commands work in agent context:
 /commit               prepare a commit
 ```
 
-Project files live in `agents/<agent>/content/<project>/.maurice/`.
+In folder context, the project is the current folder. In desktop context,
+`maurice web` also treats the launch folder as the active project, even when it
+is outside the assistant workspace. Maurice still offers `/projects` and
+`/project open <name>` for workspace-owned projects and older workflows.
+
+## Uninstall
+
+```bash
+./uninstall.sh
+./uninstall.sh --delete-workspace
+./uninstall.sh --workspace /path/to/workspace --delete-workspace
+```
+
+`--delete-workspace` is intentionally separate because the global workspace can
+be a broad folder such as `~/Documents`.
+
+## More
+
+Development and runtime internals are documented in [README_DEVS.md](README_DEVS.md).

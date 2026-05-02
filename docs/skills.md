@@ -26,6 +26,7 @@ mutable: true
 required: false
 description: What this skill does.
 config_namespace: skills.my_skill
+available_in: [local, global]  # optional; declares where the skill can load
 
 requires:
   binaries: []        # system binaries that must be present (e.g. git)
@@ -47,7 +48,7 @@ storage: null
 
 dreams:
   attachment: dreams.md
-  input_builder: null  # optional: dotted path to a function(ctx) -> str
+  input_builder: null  # optional: dotted path to a function(PermissionContext) -> DreamInput
 
 events:
   state_publisher: null
@@ -69,7 +70,7 @@ tools:
       required: ["path"]
     permission_class: fs.read     # one of the PermissionClass values
     permission_scope:
-      paths: ["$workspace/**"]
+      paths: ["$workspace/**", "$project/**"]
     trust:
       input: local_mutable        # trusted | local_mutable | external_untrusted | skill_generated
       output: local_mutable
@@ -117,9 +118,31 @@ def _do_something(args, ctx):
 | `session_id` | `str \| None` | Current session id |
 | `extra` | `dict` | Host-provided callbacks (e.g. `schedule_reminder`, `cancel_job`) |
 
+Common `extra` keys:
+
+| Key | Description |
+|---|---|
+| `context_root` | Current context root |
+| `content_root` | User-facing content root for the current context |
+| `state_root` | State root for sessions/events/memory metadata |
+| `memory_path` | SQLite memory path for the current context |
+| `scope` | `local` or `global` |
+| `lifecycle` | `transient` or `daemon` |
+
+`$workspace` is the context content root. In local mode this is the project
+folder; in global mode this is the assistant workspace. `$project` is the active
+project root and may point outside the workspace, for example when `maurice web`
+is launched from a working folder while global mode is configured. File-oriented
+skills should usually include both `$workspace/**` and `$project/**` in their
+permission scopes unless they intentionally operate only on assistant-owned
+workspace data.
+
 ## Command declarations
 
 Commands are slash commands dispatched by the host (not by the model).
+`available_in` uses the same `local`/`global` scope vocabulary as skills: on a
+skill it controls whether the skill is loaded, and on a command it controls
+whether the command appears in `/help` and UI autocomplete for that scope.
 
 ```yaml
 commands:
@@ -127,6 +150,7 @@ commands:
     description: What the command does.
     handler: my_package.my_skill.commands.my_command
     renderer: markdown    # "markdown" | "plain"
+    available_in: [local, global]  # optional; hide from /help outside these scopes
 ```
 
 Handler signature:
@@ -136,11 +160,19 @@ from maurice.host.command_registry import CommandContext, CommandResult
 
 def my_command(ctx: CommandContext) -> CommandResult:
     text = ctx.message_text            # full message e.g. "/my_command arg1 arg2"
-    workspace = ctx.workspace_root     # Path
+    content_root = ctx.callbacks["content_root"]
+    scope = ctx.callbacks["scope"]     # "local" | "global"
     agent_id = ctx.agent_id
     session_id = ctx.session_id
     return CommandResult(text="Response text", format="markdown")
 ```
+
+Command handlers receive context paths through `ctx.callbacks`, not as direct
+attributes. Prefer `content_root`, `state_root`, `context_root`, and `memory_path`
+over reconstructing paths from config names.
+For project-scoped commands, prefer `active_project_path` or `project_root` when
+present; in global web these point at the launch folder, not necessarily inside
+the workspace.
 
 To delegate to the LLM, return an `agent_prompt` in metadata:
 
@@ -154,9 +186,11 @@ return CommandResult(
 )
 ```
 
-## Skill roots
+## Skill Roots
 
-Skill roots are configured in `host.yaml`:
+Global skill roots are configured in `host.yaml`; local contexts merge global
+defaults, local `.maurice/config.yaml`, `~/.maurice/skills`, and optional
+`./skills`:
 
 ```yaml
 skill_roots:
@@ -169,12 +203,14 @@ skill_roots:
 ```
 
 `SkillLoader` discovers skills from all roots in order. User skills override system skills with the same name.
+`skills.create` writes to the mutable user root of the current context, so a
+local project writes under its own `./skills` when that root exists.
 
 ## System skills
 
 | Name | Key capability |
 |---|---|
-| `filesystem` | read/write/list/move files in the workspace |
+| `filesystem` | read/write/list/move files in the current context |
 | `memory` | semantic notes persisted across sessions |
 | `web` | HTTP fetch + search |
 | `vision` | image description |

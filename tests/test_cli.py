@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import errno
 from pathlib import Path
 
 import pytest
@@ -11,14 +13,36 @@ from maurice.host.cli import (
     _deliver_daily_digest,
     _ensure_configured_scheduler_jobs,
     _ollama_model_choices,
+    _scheduler_handlers,
     run_one_turn,
 )
 from maurice.host.credentials import load_workspace_credentials
 from maurice.host.paths import host_config_path
+from maurice.host.project import global_config_path
 from maurice.host.secret_capture import request_secret_capture
 from maurice.kernel.config import load_workspace_config, read_yaml_file, write_yaml_file
 from maurice.kernel.scheduler import JobStatus, JobStore
 from maurice.kernel.session import SessionStore
+
+
+def test_cli_setup_runs_unified_setup(monkeypatch) -> None:
+    called = []
+    monkeypatch.setattr("maurice.host.cli.run_setup", lambda: called.append(True) or True)
+
+    assert main(["setup"]) == 0
+
+    assert called == [True]
+
+
+def test_cli_help_exposes_setup_not_onboard(capsys) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--help"])
+
+    output = capsys.readouterr().out
+    assert "setup" in output
+    assert "Dossier : cd /chemin/du/projet && maurice" in output
+    assert "Bureau : maurice setup" in output
+    assert "onboard" not in output
 
 
 def test_cli_onboard_doctor_and_run(tmp_path, capsys) -> None:
@@ -260,6 +284,9 @@ def test_run_one_turn_uses_agent_model_name(tmp_path, capsys, monkeypatch) -> No
     class FakeAgentLoop:
         def __init__(self, **kwargs) -> None:
             captured["model"] = kwargs["model"]
+            captured["session_root"] = kwargs["session_store"].root
+            captured["event_path"] = kwargs["event_store"].path
+            captured["approvals_path"] = kwargs["approval_store"].path
 
         def run_turn(self, **_kwargs):
             return None
@@ -274,6 +301,9 @@ def test_run_one_turn_uses_agent_model_name(tmp_path, capsys, monkeypatch) -> No
     )
 
     assert captured["model"] == "llama3.2"
+    assert captured["session_root"] == workspace / "sessions"
+    assert captured["event_path"] == workspace / "agents" / "coding" / "events.jsonl"
+    assert captured["approvals_path"] == workspace / "agents" / "coding" / "approvals.json"
 
 
 def test_cli_interactive_onboard_configures_telegram_bot(tmp_path, capsys, monkeypatch) -> None:
@@ -397,7 +427,9 @@ credentials:
     assert "Telegram poll complete: 1 message(s) routed." in output
     # chat action fires in a background thread — verify message was sent
     assert any(c[0] == "message" for c in calls)
-    assert calls[-1] == ("message", "test-token", 222, "Mock response: salut")
+    assert calls[-1][:3] == ("message", "test-token", 222)
+    assert calls[-1][3].startswith("Mock response: salut")
+    assert "context" in calls[-1][3]
     assert (workspace / "agents" / "main" / "telegram.offset").read_text(encoding="utf-8") == "8\n"
 
 
@@ -500,13 +532,271 @@ def test_cli_start_daemon_spawns_foreground_command(tmp_path, capsys, monkeypatc
     monkeypatch.setattr("maurice.host.commands.service.subprocess.Popen", fake_popen)
     monkeypatch.setattr("maurice.host.commands.service._pid_is_running", lambda pid: pid == 12345)
 
-    assert main(["start", "--workspace", str(workspace), "--no-telegram"]) == 0
+    assert main(["start", "--workspace", str(workspace), "--no-telegram", "--no-browser"]) == 0
     output = capsys.readouterr().out
 
     assert "Maurice started in background with pid 12345." in output
     assert "--foreground" in started["command"]
     assert "--no-telegram" in started["command"]
     assert started["kwargs"]["start_new_session"] is True
+    meta = json.loads((workspace / "run" / "server.meta").read_text(encoding="utf-8"))
+    assert meta["scope"] == "global"
+    assert meta["lifecycle"] == "daemon"
+    assert meta["context_root"] == str(workspace.resolve())
+    assert meta["pid"] == 12345
+
+
+def test_cli_start_opens_gateway_ui_by_default(tmp_path, capsys, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace)])
+    capsys.readouterr()
+    started = {}
+    opened = []
+
+    class FakeProcess:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+    def fake_popen(command, **kwargs):
+        started["command"] = command
+        (workspace / "maurice.pid").write_text("12345\n", encoding="utf-8")
+        return FakeProcess()
+
+    monkeypatch.setattr("maurice.host.commands.service.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("maurice.host.commands.service._pid_is_running", lambda pid: pid == 12345)
+    def fake_wait_for_gateway_ui(url):
+        opened.append(("wait", url))
+        return True
+
+    monkeypatch.setattr("maurice.host.commands.service._wait_for_gateway_ui", fake_wait_for_gateway_ui)
+    monkeypatch.setattr("maurice.host.commands.service.webbrowser.open", lambda url: opened.append(("open", url)))
+
+    assert main(["start", "--workspace", str(workspace), "--no-telegram"]) == 0
+    output = capsys.readouterr().out
+
+    assert "--foreground" in started["command"]
+    assert "Opening Maurice chat: http://127.0.0.1:18791" in output
+    assert opened == [
+        ("wait", "http://127.0.0.1:18791"),
+        ("open", "http://127.0.0.1:18791"),
+    ]
+
+
+def test_cli_start_does_not_open_dead_gateway_ui(tmp_path, capsys, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace)])
+    capsys.readouterr()
+    opened = []
+
+    class FakeProcess:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+    def fake_popen(_command, **_kwargs):
+        (workspace / "maurice.pid").write_text("12345\n", encoding="utf-8")
+        return FakeProcess()
+
+    monkeypatch.setattr("maurice.host.commands.service.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("maurice.host.commands.service._pid_is_running", lambda pid: pid == 12345)
+    monkeypatch.setattr("maurice.host.commands.service._wait_for_gateway_ui", lambda _url: False)
+    monkeypatch.setattr("maurice.host.commands.service.webbrowser.open", lambda url: opened.append(url))
+
+    assert main(["start", "--workspace", str(workspace), "--no-telegram"]) == 0
+    output = capsys.readouterr().out
+
+    assert "Maurice chat is not reachable yet: http://127.0.0.1:18791" in output
+    assert opened == []
+
+
+def test_cli_start_refuses_implicit_global_mode_when_configured_local(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MAURICE_HOME", str(tmp_path / ".maurice"))
+    write_yaml_file(global_config_path(), {"usage": {"mode": "local"}})
+
+    with pytest.raises(SystemExit) as exc:
+        main(["start", "--no-telegram", "--no-browser"])
+
+    assert "démarrer dans un dossier" in str(exc.value)
+    assert "maurice setup" in str(exc.value)
+    assert "choisis `global`" in str(exc.value)
+    assert "`--workspace /chemin/du/workspace-global`" in str(exc.value)
+
+
+def test_cli_start_uses_configured_global_workspace(tmp_path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("MAURICE_HOME", str(tmp_path / ".maurice"))
+    workspace = tmp_path / "configured-global"
+    write_yaml_file(global_config_path(), {"usage": {"mode": "global", "workspace": str(workspace)}})
+    started = {}
+
+    class FakeProcess:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+    def fake_popen(command, **kwargs):
+        started["command"] = command
+        (workspace / "maurice.pid").write_text("12345\n", encoding="utf-8")
+        return FakeProcess()
+
+    monkeypatch.setattr("maurice.host.commands.service.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("maurice.host.commands.service._pid_is_running", lambda pid: pid == 12345)
+
+    assert main(["start", "--no-telegram", "--no-browser"]) == 0
+    capsys.readouterr()
+
+    assert str(workspace.resolve()) in started["command"]
+
+
+def test_cli_web_uses_explicit_local_dir(tmp_path, capsys, monkeypatch) -> None:
+    opened = []
+    captured = {}
+
+    class FakeServer:
+        address = ("127.0.0.1", 43210)
+
+        def serve_forever(self):
+            captured["served"] = True
+
+        def shutdown(self):
+            captured["shutdown"] = True
+
+    def fake_build(ctx, **kwargs):
+        captured["ctx"] = ctx
+        captured["kwargs"] = kwargs
+        return FakeServer()
+
+    monkeypatch.setattr("maurice.host.cli._build_gateway_http_server_for_context", fake_build)
+    monkeypatch.setattr("maurice.host.cli.webbrowser.open", lambda url: opened.append(url))
+
+    assert main(["web", "--dir", str(tmp_path)]) == 0
+    output = capsys.readouterr().out
+
+    assert captured["ctx"].scope == "local"
+    assert captured["ctx"].content_root == tmp_path.resolve()
+    assert captured["kwargs"]["port"] == 0
+    assert captured["kwargs"]["web_token"]
+    assert captured["served"] is True
+    assert captured["shutdown"] is True
+    assert opened == [f"http://127.0.0.1:43210?token={captured['kwargs']['web_token']}"]
+    assert f"Maurice web chat (local) listening on {opened[0]}" in output
+    assert f"Working directory: {tmp_path.resolve()}" in output
+
+
+def test_cli_web_uses_configured_global_workspace(tmp_path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("MAURICE_HOME", str(tmp_path / ".maurice"))
+    workspace = tmp_path / "configured-global"
+    project = tmp_path / "outside-project"
+    project.mkdir()
+    main(["onboard", "--workspace", str(workspace)])
+    capsys.readouterr()
+    write_yaml_file(global_config_path(), {"usage": {"mode": "global", "workspace": str(workspace)}})
+    captured = {}
+
+    class FakeServer:
+        address = ("127.0.0.1", 43211)
+
+        def serve_forever(self):
+            captured["served"] = True
+
+        def shutdown(self):
+            captured["shutdown"] = True
+
+    def fake_build(ctx, **kwargs):
+        captured["ctx"] = ctx
+        captured["kwargs"] = kwargs
+        return FakeServer()
+
+    monkeypatch.setattr("maurice.host.cli._build_gateway_http_server_for_context", fake_build)
+    monkeypatch.setattr("maurice.host.cli.webbrowser.open", lambda _url: None)
+    monkeypatch.chdir(project)
+
+    assert main(["web", "--no-browser"]) == 0
+    output = capsys.readouterr().out
+
+    assert captured["ctx"].scope == "global"
+    assert captured["ctx"].context_root == workspace.resolve()
+    assert captured["ctx"].active_project_root == project.resolve()
+    assert captured["kwargs"]["web_token"]
+    assert captured["served"] is True
+    assert captured["shutdown"] is True
+    assert (
+        "Maurice web chat (global) listening on "
+        f"http://127.0.0.1:43211?token={captured['kwargs']['web_token']}"
+    ) in output
+    assert f"Working directory: {project.resolve()}" in output
+
+
+def test_cli_web_reports_occupied_port_without_traceback(tmp_path, monkeypatch) -> None:
+    def fake_build(_ctx, **_kwargs):
+        raise OSError(errno.EADDRINUSE, "Address already in use")
+
+    monkeypatch.setattr("maurice.host.cli._build_gateway_http_server_for_context", fake_build)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["web", "--dir", str(tmp_path), "--port", "18791", "--no-browser"])
+
+    assert "Le port 18791 est déjà utilisé" in str(exc.value)
+    assert "maurice web --port 0" in str(exc.value)
+
+
+def test_cli_start_initializes_missing_workspace(tmp_path, capsys, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    started = {}
+
+    class FakeProcess:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+    def fake_popen(command, **kwargs):
+        started["command"] = command
+        started["kwargs"] = kwargs
+        (workspace / "maurice.pid").write_text("12345\n", encoding="utf-8")
+        return FakeProcess()
+
+    monkeypatch.setattr("maurice.host.commands.service.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("maurice.host.commands.service._pid_is_running", lambda pid: pid == 12345)
+
+    assert main(["start", "--workspace", str(workspace), "--no-telegram", "--no-browser"]) == 0
+    output = capsys.readouterr().out
+
+    assert "Maurice workspace initialized:" in output
+    assert "Maurice started in background with pid 12345." in output
+    assert "--foreground" in started["command"]
+    assert load_workspace_config(workspace).host.workspace_root == str(workspace.resolve())
+
+
+def test_cli_start_initializes_empty_host_config(tmp_path, capsys, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    host_config_path(workspace).parent.mkdir(parents=True, exist_ok=True)
+    host_config_path(workspace).write_text("{}\n", encoding="utf-8")
+    started = {}
+
+    class FakeProcess:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+    def fake_popen(command, **kwargs):
+        started["command"] = command
+        (workspace / "maurice.pid").write_text("12345\n", encoding="utf-8")
+        return FakeProcess()
+
+    monkeypatch.setattr("maurice.host.commands.service.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("maurice.host.commands.service._pid_is_running", lambda pid: pid == 12345)
+
+    assert main(["start", "--workspace", str(workspace), "--no-telegram", "--no-browser"]) == 0
+    output = capsys.readouterr().out
+
+    assert "Maurice workspace initialized:" in output
+    assert "--foreground" in started["command"]
+    assert load_workspace_config(workspace).host.workspace_root == str(workspace.resolve())
 
 
 def test_cli_stop_reports_not_running(tmp_path, capsys) -> None:
@@ -547,7 +837,7 @@ def test_cli_restart_stops_then_starts_daemon(tmp_path, capsys, monkeypatch) -> 
     monkeypatch.setattr("maurice.host.commands.service._pid_is_running", lambda pid: pid in {111, 222})
     monkeypatch.setattr("maurice.host.commands.service._wait_for_stop", lambda _path, _pid: (workspace / "maurice.pid").unlink())
 
-    assert main(["restart", "--workspace", str(workspace), "--no-telegram"]) == 0
+    assert main(["restart", "--workspace", str(workspace), "--no-telegram", "--no-browser"]) == 0
     output = capsys.readouterr().out
 
     assert killed and killed[0][0] == 111
@@ -555,6 +845,7 @@ def test_cli_restart_stops_then_starts_daemon(tmp_path, capsys, monkeypatch) -> 
     assert "Maurice started in background with pid 222." in output
     assert "--no-telegram" in started["command"]
     assert started["kwargs"]["start_new_session"] is True
+    assert json.loads((workspace / "run" / "server.meta").read_text(encoding="utf-8"))["pid"] == 222
 
 
 def test_cli_logs_alias_reads_service_logs(tmp_path, capsys) -> None:
@@ -596,7 +887,7 @@ def test_dashboard_parser_supports_watch_mode() -> None:
 def test_common_commands_have_default_workspace() -> None:
     parser = build_parser()
 
-    assert parser.parse_args(["start"]).workspace
+    assert parser.parse_args(["start"]).workspace is None
     assert parser.parse_args(["stop"]).workspace
     assert parser.parse_args(["logs"]).workspace
     assert parser.parse_args(["run", "--message", "bonjour"]).workspace
@@ -623,6 +914,7 @@ def test_cli_install_and_service_status_logs(tmp_path, capsys) -> None:
     assert "default_agent: ok - main" in status_output
     assert "scheduler: ok - enabled" in status_output
     assert "gateway: ok - 127.0.0.1:18791" in status_output
+    assert "daemon_context: warn - not running" in status_output
 
     assert main(["service", "logs", "--workspace", str(workspace)]) == 0
     assert "No service logs." in capsys.readouterr().out
@@ -1361,6 +1653,42 @@ def test_cli_scheduler_runs_due_dream_job(tmp_path, capsys) -> None:
     assert "dreaming.run" in run_output
     assert "completed" in run_output
     assert list((workspace / "content" / "dreams").glob("dream_*.json"))
+
+
+def test_scheduler_handlers_use_global_context(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
+    captured = {}
+
+    class FakeRegistry:
+        def build_executor_map(self, skill_ctx):
+            captured["skill_ctx"] = skill_ctx
+            return {
+                "dreaming.run": lambda _arguments: None,
+            }
+
+    class FakeSkillLoader:
+        def __init__(self, roots, **kwargs):
+            captured["roots"] = roots
+            captured["kwargs"] = kwargs
+
+        def load(self):
+            return FakeRegistry()
+
+    monkeypatch.setattr("maurice.host.commands.scheduler.SkillLoader", FakeSkillLoader)
+
+    handlers = _scheduler_handlers(workspace, "main")
+
+    assert "dreaming.run" in handlers
+    assert captured["kwargs"]["agent_id"] == "main"
+    assert captured["skill_ctx"].hooks.scope == "global"
+    assert captured["skill_ctx"].hooks.lifecycle == "daemon"
+    assert captured["skill_ctx"].hooks.memory_path == str(
+        workspace / "skills" / "memory" / "memory.sqlite"
+    )
+    assert {Path(root.path) for root in captured["roots"]} == {
+        Path(root.path) for root in captured["skill_ctx"].skill_roots
+    }
 
 
 def test_cli_scheduler_configure_updates_automation_times(tmp_path, capsys) -> None:

@@ -84,7 +84,52 @@ commands:
     assert registry.skills["dev"].state == SkillState.LOADED
     assert registry.commands["/plan"].owner_skill == "dev"
     assert registry.commands["/plan"].description == "Prepare project plan."
+    assert registry.commands["/plan"].available_in == ["local", "global"]
     assert registry.commands["/dev"].name == "/plan"
+
+
+def test_loader_marks_skill_unavailable_outside_scope(tmp_path) -> None:
+    root = tmp_path / "skills"
+    write_skill(
+        root,
+        "host_only",
+        minimal_manifest(
+            "host_only",
+            extra="""
+available_in: [global]
+""",
+        ),
+    )
+
+    registry = SkillLoader(
+        [SkillRoot(path=str(root), origin="user", mutable=True)],
+        scope="local",
+    ).load()
+
+    assert registry.skills["host_only"].state == SkillState.UNAVAILABLE
+    assert registry.tools == {}
+
+
+def test_loader_accepts_available_skill_for_scope(tmp_path) -> None:
+    root = tmp_path / "skills"
+    write_skill(
+        root,
+        "host_only",
+        minimal_manifest(
+            "host_only",
+            extra="""
+available_in: [global]
+""",
+        ),
+    )
+
+    registry = SkillLoader(
+        [SkillRoot(path=str(root), origin="user", mutable=True)],
+        scope="global",
+    ).load()
+
+    assert registry.skills["host_only"].state == SkillState.LOADED
+    assert "host_only.echo" in registry.tools
 
 
 def test_loader_loads_system_filesystem_skill() -> None:

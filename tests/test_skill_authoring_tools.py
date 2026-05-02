@@ -43,6 +43,25 @@ def test_skills_create_writes_user_skill_under_workspace(tmp_path) -> None:
     assert registry.skills["notes_helper"].state == SkillState.LOADED
 
 
+def test_skills_create_prefers_context_user_root(tmp_path) -> None:
+    permission_context = context(tmp_path)
+    global_skills = tmp_path / "home" / ".maurice" / "skills"
+    project_skills = tmp_path / "workspace" / "skills"
+    global_skills.mkdir(parents=True)
+    project_skills.mkdir(parents=True, exist_ok=True)
+    mixed_roots = [
+        SkillRoot(path=str(global_skills), origin="user", mutable=True),
+        SkillRoot(path=str(project_skills), origin="user", mutable=True),
+    ]
+
+    result = create({"name": "local_notes"}, permission_context, mixed_roots)
+
+    assert result.ok
+    assert result.data["path"] == str(project_skills / "local_notes")
+    assert not (global_skills / "local_notes").exists()
+    assert (project_skills / "local_notes" / "skill.yaml").is_file()
+
+
 def test_skills_create_rejects_collision_with_system_skill(tmp_path) -> None:
     permission_context = context(tmp_path)
 

@@ -16,18 +16,20 @@ For assisted agent creation:
 - Keep a small internal draft and fill it progressively as the user answers.
 - Start with the agent id only. After the user answers, ask for the role or mission only.
 - Then ask for the permission level only, using simple wording: `safe`, `limited`, or `power`. Recommend `limited` unless the user clearly needs more.
-- Then ask for skills only. Always show the available skill options in user-friendly wording before asking the user to choose:
-  - `filesystem` : lire/ecrire des fichiers dans son espace
-  - `memory` : retenir des infos utiles entre les conversations
-  - `web` : chercher ou consulter le web quand c'est configure
-  - `reminders` : creer des rappels
-  - `vision` : analyser des images
-  - `dreaming` : reflexion/maintenance autonome planifiee
-  - `skills` : aider a creer ou corriger des skills utilisateur
-  - `host` : diagnostiquer Maurice et demander des changements de config valides
-  - `self_update` : proposer des ameliorations du runtime, sans les appliquer directement
-  - `dev` : piloter un projet de developpement
-- At the skills step, ask exactly one question like: "Quelles competences veux-tu lui donner ? Pour ton cas je recommande `filesystem, memory, web, reminders`. Tu peux repondre par une liste ou `recommande`."
+- Then ask for skills only. Always show the available skill options as a numbered list before asking the user to choose:
+  1. `filesystem` : lire/ecrire des fichiers dans son espace
+  2. `memory` : retenir des infos utiles entre les conversations
+  3. `web` : chercher ou consulter le web quand c'est configure
+  4. `explore` : explorer un projet, son arbre et son contenu
+  5. `reminders` : creer des rappels
+  6. `vision` : analyser des images
+  7. `dreaming` : consolider la memoire et agir avec proactivite
+  8. `skills` : creer de nouvelles competences
+  9. `host` : diagnostiquer Maurice et demander des changements de config valides
+  10. `self_update` : proposer des ameliorations du runtime, sans les appliquer directement
+  11. `dev` : piloter un projet de developpement
+- At the skills step, ask exactly one question like: "Quelles competences veux-tu lui donner ? Reponds par des numeros (`1,2,4`), des noms, `tous`, ou `recommande`."
+- For `/edit_agent`, if the user says "je veux changer les skills" at any point in the edit flow, skip directly to the numbered skills choice and mark the current skills as current/active.
 - Then ask for model preference only. Use user wording: "Tu veux un modele specifique, ou je garde le modele par defaut ?"
 - Then ask for communication access only. Use user wording: "Tu veux connecter Telegram a cet agent, ou aucun acces externe ? Reponds `telegram` ou `aucun`."
 - If the user chooses Telegram for a new durable agent, use a dedicated credential name derived from the agent id: `telegram_bot_<agent_id>`. Use `telegram_bot` only for the main/default bot.

@@ -5,6 +5,7 @@ mutable: false
 required: false
 description: Inspect local Maurice host service state.
 config_namespace: skills.host
+available_in: [global]
 requires:
   binaries: []
   credentials: []
@@ -232,9 +233,11 @@ commands:
   - name: /add_agent
     description: creer un nouvel agent
     renderer: markdown
+    available_in: [global]
   - name: /edit_agent
     description: modifier un agent (`/edit_agent <agent>`)
     renderer: markdown
+    available_in: [global]
 backend: null
 storage: null
 dreams:

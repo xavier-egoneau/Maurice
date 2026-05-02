@@ -117,6 +117,21 @@ def test_ollama_provider_reports_invalid_json_tool_arguments() -> None:
     assert chunks[0].error.code == "invalid_tool_arguments"
 
 
+def test_ollama_provider_reports_incomplete_stream() -> None:
+    def transport(_url, _payload, _headers):
+        yield json.dumps({"message": {"content": "J'ai seulement"}})
+
+    provider = OllamaCompatibleProvider(transport=transport)
+
+    chunks = list(
+        provider.stream(messages=[], model="llama3.2", tools=[], system="")
+    )
+
+    assert chunks[0].delta == "J'ai seulement"
+    assert chunks[-1].status == ProviderStatus.FAILED
+    assert chunks[-1].error.code == "incomplete_stream"
+
+
 def test_ollama_message_and_tool_conversion() -> None:
     declaration = ToolDeclaration.model_validate(
         {
@@ -138,6 +153,15 @@ def test_ollama_message_and_tool_conversion() -> None:
         [
             {"role": "user", "content": "Bonjour", "metadata": {}},
             {
+                "role": "tool_call",
+                "content": "",
+                "metadata": {
+                    "tool_call_id": "call_1",
+                    "tool_name": "filesystem.read",
+                    "tool_arguments": {"path": "notes.md"},
+                },
+            },
+            {
                 "role": "tool",
                 "content": "File read.",
                 "metadata": {"tool_call_id": "call_1"},
@@ -147,6 +171,20 @@ def test_ollama_message_and_tool_conversion() -> None:
     ) == [
         {"role": "system", "content": "System"},
         {"role": "user", "content": "Bonjour"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "filesystem.read",
+                        "arguments": "{\"path\": \"notes.md\"}",
+                    },
+                }
+            ],
+        },
         {"role": "tool", "content": "File read.", "tool_call_id": "call_1"},
     ]
     assert _to_ollama_tools([declaration]) == [

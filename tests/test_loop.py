@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.contracts import ToolResult
 from maurice.kernel.events import EventStore
-from maurice.kernel.loop import AgentLoop
+from maurice.kernel.loop import AgentLoop, _sanitize_messages
 from maurice.kernel.permissions import PermissionContext
 from maurice.kernel.providers import MockProvider
 from maurice.kernel.session import SessionStore
@@ -20,7 +20,7 @@ from maurice.system_skills.vision.tools import vision_tool_executors
 from maurice.system_skills.web.tools import web_tool_executors
 
 
-def make_loop(tmp_path, provider, *, profile="safe", approval_store=None, executors=None):
+def make_loop(tmp_path, provider, *, profile="safe", approval_store=None, executors=None, approval_callback=None):
     workspace = tmp_path / "workspace"
     runtime = tmp_path / "runtime"
     workspace.mkdir(exist_ok=True)
@@ -41,6 +41,7 @@ def make_loop(tmp_path, provider, *, profile="safe", approval_store=None, execut
         permission_profile=profile,
         tool_executors=executors or {},
         approval_store=approval_store,
+        approval_callback=approval_callback,
         model="mock",
         system_prompt="Kernel prompt",
     )
@@ -102,6 +103,23 @@ def test_loop_preserves_provider_failure_error(tmp_path) -> None:
     assert failed_event.payload["error"] == "provider_error: Bad model."
 
 
+def test_loop_marks_missing_terminal_provider_status_as_failed(tmp_path) -> None:
+    provider = MockProvider(
+        [
+            {"type": "text_delta", "delta": "Phrase incomplete"},
+        ]
+    )
+    loop = make_loop(tmp_path, provider)
+
+    result = loop.run_turn(agent_id="main", session_id="sess_1", message="Bonjour")
+
+    assert result.status == "failed"
+    assert result.assistant_text == "Phrase incomplete"
+    assert result.error == "provider_error: Provider stream ended without terminal status."
+    failed_event = loop.event_store.read_all()[-1]
+    assert failed_event.name == "turn.failed"
+
+
 def test_mock_provider_can_call_declared_filesystem_tool(tmp_path) -> None:
     workspace_file = tmp_path / "workspace" / "notes.md"
     workspace_file.parent.mkdir()
@@ -151,10 +169,39 @@ def test_mock_provider_can_call_declared_filesystem_tool(tmp_path) -> None:
     ]
     assert [message.role for message in result.session.messages] == [
         "user",
-        "assistant",  # tool call record
+        "tool_call",
         "tool",       # tool result
         "assistant",  # final text
     ]
+
+
+def test_sanitize_messages_drops_orphan_tool_results() -> None:
+    messages = _sanitize_messages(
+        [
+            {"role": "user", "content": "read", "metadata": {}},
+            {
+                "role": "tool_call",
+                "content": "",
+                "metadata": {
+                    "tool_call_id": "call_1",
+                    "tool_name": "filesystem.read",
+                    "tool_arguments": {"path": "notes.md"},
+                },
+            },
+            {
+                "role": "tool",
+                "content": "File read.",
+                "metadata": {"tool_call_id": "call_1"},
+            },
+            {
+                "role": "tool",
+                "content": "orphan",
+                "metadata": {"tool_call_id": "missing"},
+            },
+        ]
+    )
+
+    assert [message["role"] for message in messages] == ["user", "tool_call", "tool"]
 
 
 def test_loop_can_continue_after_tool_result_when_limit_allows(tmp_path) -> None:
@@ -198,7 +245,10 @@ def test_loop_can_continue_after_tool_result_when_limit_allows(tmp_path) -> None
     )
 
     assert len(provider.calls) == 2
-    assert any(message["role"] == "tool" for message in provider.calls[1])
+    assert any(message["role"] == "tool_call" for message in provider.calls[1])
+    tool_messages = [message for message in provider.calls[1] if message["role"] == "tool"]
+    assert tool_messages
+    assert "notes" in tool_messages[0]["content"]
     assert result.assistant_text == "J'ai lu le fichier et je continue."
     assert result.tool_results[0].ok
 
@@ -298,9 +348,13 @@ def test_loop_can_execute_text_tool_protocol_when_enabled(tmp_path) -> None:
     )
 
     assert len(provider.calls) == 2
+    assert any(message["role"] == "tool_call" for message in provider.calls[1])
+    tool_messages = [message for message in provider.calls[1] if message["role"] == "tool"]
+    assert tool_messages
+    assert '"entries"' in tool_messages[0]["content"]
     assert result.tool_results[0].summary == "J'ai trouve le dossier `app`."
     assert result.assistant_text == "J'ai trouve le dossier."
-    assert [message.role for message in result.session.messages] == ["user", "tool", "assistant"]
+    assert [message.role for message in result.session.messages] == ["user", "tool_call", "tool", "assistant"]
 
 
 def test_loop_does_not_execute_text_tool_protocol_by_default(tmp_path) -> None:
@@ -378,7 +432,10 @@ def test_tool_execution_goes_through_permission_and_requests_approval(tmp_path) 
 
     assert not executed
     assert result.tool_results[0].error.code == "approval_required"
+    assert "Autorisation requise pour modifier un fichier `notes.md`" in result.tool_results[0].summary
+    assert "filesystem.write" not in result.tool_results[0].summary
     assert approvals.list(status="pending")[0].tool_name == "filesystem.write"
+    assert approvals.list(status="pending")[0].summary == "Autoriser : modifier un fichier `notes.md`"
 
 
 def test_network_tool_approval_scope_uses_url_host(tmp_path) -> None:
@@ -538,6 +595,59 @@ def test_approved_replay_allows_asked_tool_execution(tmp_path) -> None:
 
     assert result.tool_results[0].ok
     assert result.tool_results[0].summary == "File written."
+
+
+def test_callback_can_approve_tool_for_whole_session(tmp_path) -> None:
+    provider = MockProvider(
+        [
+            {
+                "type": "tool_call",
+                "tool_call": {
+                    "id": "call_1",
+                    "name": "filesystem.write",
+                    "arguments": {"path": "notes.md", "content": "first"},
+                },
+            },
+            {"type": "status", "status": "completed"},
+        ]
+    )
+    approvals = ApprovalStore(tmp_path / "approvals.json")
+    calls = []
+    loop = make_loop(
+        tmp_path,
+        provider,
+        profile="safe",
+        approval_store=approvals,
+        approval_callback=lambda *_args: "session",
+        executors={
+            "filesystem.write": lambda arguments: calls.append(arguments) or {
+                "ok": True,
+                "summary": "written",
+                "data": None,
+                "trust": "local_mutable",
+            }
+        },
+    )
+
+    result = loop.run_turn(
+        agent_id="main",
+        session_id="sess_1",
+        message="Search",
+        limits={"max_tool_iterations": 1},
+    )
+
+    assert result.tool_results[0].ok
+    assert calls == [{"path": "notes.md", "content": "first"}]
+    grant = approvals.list(status="approved")[0]
+    assert grant.replay_scope == "tool_session"
+    assert approvals.approved_for_replay(
+        permission_class="fs.write",
+        scope={"paths": ["notes.md"]},
+        tool_name="filesystem.write",
+        arguments={"path": "notes.md", "content": "second"},
+        agent_id="main",
+        session_id="sess_1",
+    )
 
 
 def test_loop_uses_real_filesystem_executors(tmp_path) -> None:

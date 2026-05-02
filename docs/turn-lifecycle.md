@@ -55,8 +55,8 @@ Three built-in profiles, set per agent in `agents.yaml`:
 
 | Class | safe | limited | power |
 |---|---|---|---|
-| `fs.read` | allow ($workspace) | allow ($workspace) | allow ($workspace) |
-| `fs.write` | ask | allow ($workspace) | allow ($workspace + $runtime) |
+| `fs.read` | allow ($workspace + $project) | allow ($workspace + $project) | allow ($workspace + $project + $home, protected paths excluded) |
+| `fs.write` | ask ($workspace + $project) | allow ($workspace + $project) | allow ($workspace + $project) |
 | `network.outbound` | ask | ask | allow |
 | `shell.exec` | deny | ask | ask |
 | `secret.read` | ask | ask | ask |

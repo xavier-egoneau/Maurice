@@ -49,6 +49,11 @@ def test_chatgpt_provider_streams_text_usage_and_completed_status() -> None:
     assert captured["url"] == "https://chatgpt.com/backend-api/codex/responses"
     assert captured["headers"]["chatgpt-account-id"] == "acct_1"
     assert captured["payload"]["instructions"] == "Kernel prompt"
+    assert captured["payload"]["input"][0] == {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Bonjour"}],
+    }
     assert [chunk.delta for chunk in chunks if chunk.type == ProviderChunkType.TEXT_DELTA] == [
         "Salut ",
         "humain",
@@ -56,6 +61,28 @@ def test_chatgpt_provider_streams_text_usage_and_completed_status() -> None:
     assert chunks[-2].usage.input_tokens == 3
     assert chunks[-2].usage.output_tokens == 5
     assert chunks[-1].status == ProviderStatus.COMPLETED
+
+
+def test_chatgpt_provider_does_not_send_unsupported_token_limit() -> None:
+    captured = {}
+
+    def transport(_url, payload, _headers):
+        captured["payload"] = payload
+        yield _sse({"type": "response.completed", "response": {"output": []}})
+
+    provider = ChatGPTCodexProvider(token="token", transport=transport)
+
+    list(
+        provider.stream(
+            messages=[{"role": "user", "content": "Bonjour"}],
+            model="gpt-test",
+            tools=[],
+            system="Kernel prompt",
+            limits={"max_tokens": 1},
+        )
+    )
+
+    assert "max_output_tokens" not in captured["payload"]
 
 
 def test_chatgpt_provider_ignores_sse_event_lines() -> None:
@@ -78,6 +105,46 @@ def test_chatgpt_provider_ignores_sse_event_lines() -> None:
 
     assert chunks[0].delta == "Salut"
     assert chunks[-1].status == ProviderStatus.COMPLETED
+
+
+def test_chatgpt_provider_reports_incomplete_stream() -> None:
+    def transport(_url, _payload, _headers):
+        yield _sse({"type": "response.output_text.delta", "delta": "J'ai seulement"})
+
+    provider = ChatGPTCodexProvider(token="token", transport=transport)
+
+    chunks = list(
+        provider.stream(
+            messages=[{"role": "user", "content": "Tu as corrige ?"}],
+            model="gpt-test",
+            tools=[],
+            system="",
+        )
+    )
+
+    assert chunks[0].delta == "J'ai seulement"
+    assert chunks[-1].status == ProviderStatus.FAILED
+    assert chunks[-1].error.code == "incomplete_stream"
+
+
+def test_chatgpt_provider_reports_response_incomplete_event() -> None:
+    def transport(_url, _payload, _headers):
+        yield _sse(
+            {
+                "type": "response.incomplete",
+                "response": {"incomplete_details": {"reason": "max_output_tokens"}},
+            }
+        )
+
+    provider = ChatGPTCodexProvider(token="token", transport=transport)
+
+    chunks = list(
+        provider.stream(messages=[], model="gpt-test", tools=[], system="")
+    )
+
+    assert chunks[-1].status == ProviderStatus.FAILED
+    assert chunks[-1].error.code == "incomplete_response"
+    assert "max_output_tokens" in chunks[-1].error.message
 
 
 def test_chatgpt_provider_normalizes_tool_calls() -> None:
@@ -139,8 +206,18 @@ def test_chatgpt_input_and_tool_conversion() -> None:
 
     assert _to_chatgpt_input(
         [
+            {"role": "system", "content": "Session summary", "metadata": {"compacted": True}},
             {"role": "user", "content": "Bonjour", "metadata": {}},
             {"role": "assistant", "content": "Salut", "metadata": {}},
+            {
+                "role": "tool_call",
+                "content": "",
+                "metadata": {
+                    "tool_call_id": "call_1",
+                    "tool_name": "filesystem.read",
+                    "tool_arguments": {"path": "notes.md"},
+                },
+            },
             {
                 "role": "tool",
                 "content": "File read.",
@@ -151,12 +228,23 @@ def test_chatgpt_input_and_tool_conversion() -> None:
         {
             "type": "message",
             "role": "user",
+            "content": [{"type": "input_text", "text": "[System context]\nSession summary"}],
+        },
+        {
+            "type": "message",
+            "role": "user",
             "content": [{"type": "input_text", "text": "Bonjour"}],
         },
         {
             "type": "message",
             "role": "assistant",
             "content": [{"type": "output_text", "text": "Salut"}],
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "filesystem_read",
+            "arguments": "{\"path\": \"notes.md\"}",
         },
         {
             "type": "function_call_output",

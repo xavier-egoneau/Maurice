@@ -59,10 +59,12 @@ cat <<'EOF'
 
   Maurice est installé.
 
-  Lance-le dans n'importe quel dossier :
+  Configure-le une première fois :
+
+    maurice setup
+
+  Puis lance-le dans n'importe quel dossier :
 
     cd mon-projet/
     maurice
-
-  La configuration se fera au premier lancement.
 EOF

@@ -22,7 +22,10 @@ from maurice.host.project import (
     GITIGNORE_CONTENT,
 )
 from maurice.host.server import MauriceServer, _send, _recv_line
-from maurice.host.client import MauriceClient
+from maurice.host.client import MauriceClient, _desired_server_meta, _runtime_hash_files
+from maurice.host.context import resolve_global_context
+from maurice.host.workspace import initialize_workspace
+from maurice.kernel.config import load_workspace_config
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +214,37 @@ class TestMauriceServer:
         done = next(e for e in events if e["type"] == "done")
         assert done["status"] == "completed"
 
+    def test_global_context_turn_returns_done(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        runtime = tmp_path / "runtime"
+        (runtime / "maurice").mkdir(parents=True)
+        initialize_workspace(workspace, runtime)
+        bundle = load_workspace_config(workspace)
+        ctx = resolve_global_context(workspace, agent=bundle.agents.agents["main"], bundle=bundle)
+        server = MauriceServer(ctx)
+        srv_sock, cli_sock = self._make_pair()
+
+        t = threading.Thread(target=_run_connection, args=(server, srv_sock), daemon=True)
+        t.start()
+
+        buf = bytearray()
+        _send(cli_sock, {"type": "turn", "message": "hello", "session_id": "global"})
+
+        events = []
+        while True:
+            msg = _recv_line(cli_sock, buf)
+            events.append(msg)
+            if msg["type"] == "done":
+                break
+
+        cli_sock.close()
+        t.join(timeout=5.0)
+
+        done = next(e for e in events if e["type"] == "done")
+        assert done["status"] == "completed"
+        assert done["assistant_text"] == "Mock response: hello"
+        assert (workspace / "sessions" / "main" / "global.json").is_file()
+
     def test_shutdown(self, tmp_path):
         _write_mock_config(tmp_path)
         server = MauriceServer(tmp_path)
@@ -294,6 +328,85 @@ class TestMauriceClient:
         types = [e["type"] for e in events]
         assert "done" in types
         assert any(e["type"] == "text_delta" for e in events)
+
+    def test_ensure_running_reuses_compatible_server(self, tmp_path, monkeypatch):
+        _write_mock_config(tmp_path)
+        client = MauriceClient(tmp_path)
+        client._write_meta(pid=123)
+        calls = {"start": 0, "kill": 0}
+
+        monkeypatch.setattr(client, "is_running", lambda: True)
+        monkeypatch.setattr(client, "start_server", lambda: calls.__setitem__("start", calls["start"] + 1))
+        monkeypatch.setattr(client, "_kill_existing", lambda: calls.__setitem__("kill", calls["kill"] + 1))
+
+        client.ensure_running()
+
+        assert calls == {"start": 0, "kill": 0}
+
+    def test_ensure_running_restarts_incompatible_server(self, tmp_path, monkeypatch):
+        _write_mock_config(tmp_path)
+        client = MauriceClient(tmp_path)
+        meta = _desired_server_meta(client.ctx)
+        meta["config_hash"] = "stale"
+        client.ctx.server_meta_path.parent.mkdir(parents=True, exist_ok=True)
+        client.ctx.server_meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        calls = {"start": 0, "kill": 0}
+
+        monkeypatch.setattr(client, "is_running", lambda: True)
+        monkeypatch.setattr(client, "start_server", lambda: calls.__setitem__("start", calls["start"] + 1))
+        monkeypatch.setattr(client, "_kill_existing", lambda: calls.__setitem__("kill", calls["kill"] + 1))
+
+        client.ensure_running()
+
+        assert calls == {"start": 1, "kill": 1}
+
+    def test_ensure_running_restarts_in_dev_mode(self, tmp_path, monkeypatch):
+        _write_mock_config(tmp_path)
+        client = MauriceClient(tmp_path)
+        client._write_meta(pid=123)
+        calls = {"start": 0, "kill": 0}
+
+        monkeypatch.setenv("MAURICE_DEV", "1")
+        monkeypatch.setattr(client, "is_running", lambda: True)
+        monkeypatch.setattr(client, "start_server", lambda: calls.__setitem__("start", calls["start"] + 1))
+        monkeypatch.setattr(client, "_kill_existing", lambda: calls.__setitem__("kill", calls["kill"] + 1))
+
+        client.ensure_running()
+
+        assert calls == {"start": 1, "kill": 1}
+
+    def test_runtime_hash_tracks_provider_and_dev_skill_files(self):
+        paths = {str(path) for path in _runtime_hash_files()}
+
+        assert any(path.endswith("kernel/providers.py") for path in paths)
+        assert any(path.endswith("kernel/loop.py") for path in paths)
+        assert any(path.endswith("kernel/permissions.py") for path in paths)
+        assert any(path.endswith("host/vision_backend.py") for path in paths)
+        assert any(path.endswith("host/web_ui.html") for path in paths)
+        assert any(path.endswith("system_skills/dev/commands.py") for path in paths)
+        assert any(path.endswith("system_skills/dev/prompt.md") for path in paths)
+        assert any(path.endswith("system_skills/explore/tools.py") for path in paths)
+        assert any(path.endswith("system_skills/explore/skill.yaml") for path in paths)
+        assert any(path.endswith("system_skills/filesystem/skill.yaml") for path in paths)
+        assert any(path.endswith("system_skills/vision/tools.py") for path in paths)
+
+    def test_idle_watchdog_keeps_server_with_active_connection(self, tmp_path):
+        _write_mock_config(tmp_path)
+        server = MauriceServer(tmp_path)
+        server._last_activity = time.monotonic() - server.IDLE_TIMEOUT - 1
+
+        server._connection_opened()
+
+        assert server._should_stop_for_idle(time.monotonic() + server.IDLE_TIMEOUT + 30) is False
+
+    def test_idle_watchdog_allows_shutdown_after_connection_closes(self, tmp_path):
+        _write_mock_config(tmp_path)
+        server = MauriceServer(tmp_path)
+        server._connection_opened()
+        server._connection_closed()
+
+        assert server._should_stop_for_idle(time.monotonic()) is False
+        assert server._should_stop_for_idle(time.monotonic() + server.IDLE_TIMEOUT + 1) is True
 
     def _make_pair(self):
         return socket.socketpair()

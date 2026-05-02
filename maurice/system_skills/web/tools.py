@@ -105,9 +105,20 @@ def search(
     query = arguments.get("query")
     if not isinstance(query, str) or not query.strip():
         return _error("invalid_arguments", "web.search requires a non-empty query.")
+    if arguments.get("base_url"):
+        return _error(
+            "invalid_arguments",
+            "web.search uses the configured search endpoint. Configure skills.web.base_url instead of passing base_url.",
+        )
 
     try:
-        base_url = _require_url(arguments.get("base_url") or config.get("base_url"))
+        base_url = _require_url(config.get("base_url"))
+    except ValueError:
+        return _error(
+            "not_configured",
+            "web.search is not configured. Set skills.web.base_url to a SearxNG-compatible endpoint.",
+        )
+    try:
         max_results = _positive_int(arguments.get("max_results"), int(config.get("max_results", 5)), "max_results")
         timeout = _positive_int(
             arguments.get("timeout_seconds"),

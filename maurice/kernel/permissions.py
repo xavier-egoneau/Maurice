@@ -82,8 +82,8 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "class": "fs.read",
                 "decision": "allow",
                 "scope": {
-                    "paths": ["$workspace/**"],
-                    "exclude": ["$workspace/secrets/**"],
+                    "paths": ["$workspace/**", "$project/**"],
+                    "exclude": ["$workspace/secrets/**", "$project/secrets/**"],
                 },
                 "rememberable": False,
                 "reason": "Safe profile allows workspace reads.",
@@ -94,8 +94,8 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "class": "fs.write",
                 "decision": "ask",
                 "scope": {
-                    "paths": ["$workspace/**"],
-                    "exclude": ["$workspace/secrets/**"],
+                    "paths": ["$workspace/**", "$project/**"],
+                    "exclude": ["$workspace/secrets/**", "$project/secrets/**"],
                 },
                 "rememberable": True,
                 "reason": "Safe profile asks before workspace writes.",
@@ -162,8 +162,8 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "class": "fs.read",
                 "decision": "allow",
                 "scope": {
-                    "paths": ["$workspace/**"],
-                    "exclude": ["$workspace/secrets/**", "$runtime/**"],
+                    "paths": ["$workspace/**", "$project/**"],
+                    "exclude": ["$workspace/secrets/**", "$project/secrets/**", "$runtime/**"],
                 },
                 "rememberable": False,
                 "reason": "Limited profile allows workspace reads.",
@@ -174,8 +174,8 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "class": "fs.write",
                 "decision": "allow",
                 "scope": {
-                    "paths": ["$workspace/**"],
-                    "exclude": ["$workspace/secrets/**", "$runtime/**"],
+                    "paths": ["$workspace/**", "$project/**"],
+                    "exclude": ["$workspace/secrets/**", "$project/secrets/**", "$runtime/**"],
                 },
                 "rememberable": False,
                 "reason": "Limited profile allows workspace writes.",
@@ -196,7 +196,7 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "decision": "ask",
                 "scope": {
                     "commands": ["git", "pytest", "ruff"],
-                    "cwd": ["$workspace/**"],
+                    "cwd": ["$workspace/**", "$project/**"],
                     "timeout_seconds_max": 300,
                 },
                 "rememberable": True,
@@ -261,10 +261,11 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "class": "fs.read",
                 "decision": "allow",
                 "scope": {
-                    "paths": ["$workspace/**", "$home/**"],
+                    "paths": ["$workspace/**", "$project/**", "$home/**"],
                     "exclude": [
                         "$runtime/**",
                         "$maurice_home/**",
+                        "$project/secrets/**",
                         "$home/.ssh/**",
                         "$home/.gnupg/**",
                     ],
@@ -278,8 +279,8 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "class": "fs.write",
                 "decision": "allow",
                 "scope": {
-                    "paths": ["$workspace/**"],
-                    "exclude": ["$runtime/**", "$workspace/secrets/**"],
+                    "paths": ["$workspace/**", "$project/**"],
+                    "exclude": ["$runtime/**", "$workspace/secrets/**", "$project/secrets/**"],
                 },
                 "rememberable": False,
                 "reason": "Power profile allows workspace writes.",
@@ -300,7 +301,7 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "decision": "ask",
                 "scope": {
                     "commands": ["*"],
-                    "cwd": ["$workspace/**"],
+                    "cwd": ["$workspace/**", "$project/**"],
                     "timeout_seconds_max": 900,
                 },
                 "rememberable": True,
@@ -507,7 +508,18 @@ def _resolve_requested_path(path: str, context: PermissionContext) -> str:
     expanded = _expand_value(path, context)
     candidate = Path(expanded).expanduser()
     if not candidate.is_absolute():
-        candidate = Path(context.variables()["$workspace"]) / candidate
+        variables = context.variables()
+        first_part = candidate.parts[0] if candidate.parts else ""
+        if first_part == "$project":
+            candidate = Path(variables["$project"]).joinpath(*candidate.parts[1:])
+        elif first_part == "$agent_content":
+            candidate = Path(variables["$agent_content"]).joinpath(*candidate.parts[1:])
+        elif first_part == "$agent_workspace":
+            candidate = Path(variables["$agent_workspace"]).joinpath(*candidate.parts[1:])
+        elif first_part in {"agents", "config", "content", "sessions", "skills"}:
+            candidate = Path(variables["$workspace"]) / candidate
+        else:
+            candidate = Path(variables["$project"]) / candidate
     return str(candidate.resolve())
 
 

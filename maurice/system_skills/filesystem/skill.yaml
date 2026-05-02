@@ -16,14 +16,18 @@ permissions:
     scope:
       paths:
         - "$workspace/**"
+        - "$project/**"
       exclude:
         - "$workspace/secrets/**"
+        - "$project/secrets/**"
   - class: fs.write
     scope:
       paths:
         - "$workspace/**"
+        - "$project/**"
       exclude:
         - "$workspace/secrets/**"
+        - "$project/secrets/**"
 tools:
   - name: filesystem.list
     description: List entries inside an allowed directory. Relative user folders default to the active project or agent content.
@@ -37,6 +41,7 @@ tools:
     permission_scope:
       paths:
         - "$workspace/**"
+        - "$project/**"
     trust:
       input: local_mutable
       output: local_mutable
@@ -53,6 +58,7 @@ tools:
     permission_scope:
       paths:
         - "$workspace/**"
+        - "$project/**"
     trust:
       input: local_mutable
       output: local_mutable
@@ -71,6 +77,7 @@ tools:
     permission_scope:
       paths:
         - "$workspace/**"
+        - "$project/**"
     trust:
       input: local_mutable
       output: local_mutable
@@ -87,6 +94,7 @@ tools:
     permission_scope:
       paths:
         - "$workspace/**"
+        - "$project/**"
     trust:
       input: local_mutable
       output: local_mutable
@@ -107,6 +115,7 @@ tools:
     permission_scope:
       paths:
         - "$workspace/**"
+        - "$project/**"
     trust:
       input: local_mutable
       output: local_mutable

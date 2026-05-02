@@ -16,6 +16,7 @@ permissions:
     scope:
       paths:
         - "$workspace/**"
+        - "$project/**"
 tools:
   - name: vision.inspect
     description: Inspect a local image file and return metadata.
@@ -32,6 +33,7 @@ tools:
     permission_scope:
       paths:
         - "$workspace/**"
+        - "$project/**"
     trust:
       input: local_mutable
       output: local_mutable
@@ -53,6 +55,7 @@ tools:
     permission_scope:
       paths:
         - "$workspace/**"
+        - "$project/**"
     trust:
       input: local_mutable
       output: external_untrusted

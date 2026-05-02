@@ -11,7 +11,6 @@ from pathlib import Path
 from maurice.host.command_registry import CommandContext, CommandResult
 from maurice.kernel.contracts import DreamInput
 from maurice.kernel.permissions import PermissionContext
-from maurice.system_skills.dev.planner import PLAN_WIZARD_FILE
 
 
 STATE_FILE = ".dev_state.json"
@@ -20,10 +19,9 @@ GUIDANCE_FILES = ("AGENTS.md", "PLAN.md", "DECISIONS.md")
 
 
 def projects(context: CommandContext) -> CommandResult:
-    # CLI mode: the current directory IS the project
-    if context.callbacks.get("project_root"):
-        project_root = Path(context.callbacks["project_root"]).resolve()
-        return _result(f"Projet actif : `{project_root.name}`\n\n`{project_root}`")
+    active_path = _explicit_active_project_path(context)
+    if active_path is not None:
+        return _result(f"Projet actif : `{active_path.name}`\n\n`{active_path}`")
     content = _content_root(context)
     project_dirs = sorted(path.name for path in content.iterdir() if path.is_dir() and not path.name.startswith("."))
     if not project_dirs:
@@ -39,11 +37,19 @@ def projects(context: CommandContext) -> CommandResult:
 
 def project(context: CommandContext) -> CommandResult:
     args = _args(context)
+    active_path = _explicit_active_project_path(context)
     if not args:
+        if active_path is not None:
+            return _result(f"Projet actif : `{active_path.name}`.\n\n`{active_path}`")
         active = _active_project(context)
         if not active:
             return _result("Aucun projet actif. Utilise `/projects` puis `/project open <nom>`.")
         return _result(f"Projet actif : `{active}`.")
+    if active_path is not None:
+        return _result(
+            f"Le contexte courant est deja centre sur `{active_path.name}`.\n\n"
+            f"Dossier : `{active_path}`"
+        )
     if args.startswith("open "):
         name = _project_name(args.removeprefix("open ").strip())
         if not name:
@@ -70,16 +76,15 @@ def plan(context: CommandContext) -> CommandResult:
         content = _read_excerpt(plan_path)
         return _result(f"Plan du projet `{path.name}` :\n\n```markdown\n{content}\n```")
     _ensure_project_files(path)
-    meta = _meta_root(path)
-    plan_path = meta / "PLAN.md"
-    decisions_path = meta / "DECISIONS.md"
     pitch = args.strip()
+    plan_path = _guidance_path(path, "PLAN.md")
+    decisions_path = _guidance_path(path, "DECISIONS.md")
     return _result(
-        f"Je cadre le projet `{path.name}`...",
+        f"Je lance le cadrage du plan du projet `{path.name}` avec le modele.",
         metadata={
             "command": "/plan",
             "agent_prompt": _plan_agent_prompt(path, pitch, plan_path, decisions_path),
-            "agent_limits": {"max_tool_iterations": 8},
+            "agent_limits": {"max_tool_iterations": 20, "allow_text_tool_calls": True},
         },
     )
 
@@ -122,6 +127,9 @@ def dev(context: CommandContext) -> CommandResult:
     plan_path = _guidance_path(path, "PLAN.md")
     if not plan_path.exists():
         _ensure_project_files(path)
+    focus = _args(context).strip()
+    if focus:
+        _ensure_focus_task(plan_path, focus)
     open_tasks = _open_tasks(plan_path)
     if not open_tasks:
         return _result("Je ne vois pas de prochaine tache claire dans `PLAN.md`.")
@@ -129,7 +137,7 @@ def dev(context: CommandContext) -> CommandResult:
         "Je lance le mode dev autonome sur le plan actif.",
         metadata={
             "command": "/dev",
-            "agent_prompt": _dev_execution_prompt(path, open_tasks),
+            "agent_prompt": _dev_execution_prompt(path, open_tasks, focus=focus),
             "agent_limits": {"max_tool_iterations": 80, "allow_text_tool_calls": True},
             "autonomy": {
                 "requires_activity": True,
@@ -139,7 +147,9 @@ def dev(context: CommandContext) -> CommandResult:
                 "continue_prompt": (
                     "Continue le mode dev. Tu ne dois pas seulement annoncer la prochaine action : "
                     "avance concretement dans le projet actif, utilise les capacites disponibles, "
-                    "puis resume ce qui a vraiment change. Si tu es bloque, donne le blocage precis."
+                    "traite les taches ouvertes comme des demandes utilisateur prioritaires, "
+                    "puis resume en 3-5 lignes maximum ce qui a vraiment change. "
+                    "Si tu es bloque, donne seulement le blocage precis et la prochaine decision attendue."
                 ),
                 "no_activity_text": (
                     "Je n'arrive pas a coder avec le modele actuel : il annonce des actions mais "
@@ -258,6 +268,11 @@ def commit(context: CommandContext) -> CommandResult:
 
 
 def _content_root(context: CommandContext) -> Path:
+    content_root = context.callbacks.get("content_root")
+    if content_root and context.callbacks.get("scope") == "local":
+        content = Path(content_root).expanduser().resolve()
+        content.mkdir(parents=True, exist_ok=True)
+        return content
     agent_workspace_for = context.callbacks.get("agent_workspace_for")
     if callable(agent_workspace_for):
         agent_workspace = agent_workspace_for(context.agent_id)
@@ -294,12 +309,20 @@ def _write_state(context: CommandContext, data: dict[str, str]) -> None:
 
 
 def _active_project(context: CommandContext) -> str:
+    active_path = _explicit_active_project_path(context)
+    if active_path is not None:
+        return active_path.name
     value = _read_state(context).get("active_project")
     return value if isinstance(value, str) else ""
 
 
 def _active_project_path(context: CommandContext) -> Path | None:
-    # CLI mode: project_root callback points directly to the working directory
+    active_project_path = _explicit_active_project_path(context)
+    if active_project_path is not None:
+        active_project_path.mkdir(parents=True, exist_ok=True)
+        return active_project_path
+
+    # Backward compatibility for older host surfaces.
     project_root = context.callbacks.get("project_root")
     if project_root:
         path = Path(project_root).expanduser().resolve()
@@ -311,6 +334,13 @@ def _active_project_path(context: CommandContext) -> Path | None:
     path = _content_root(context) / active
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _explicit_active_project_path(context: CommandContext) -> Path | None:
+    value = context.callbacks.get("active_project_path")
+    if not value:
+        return None
+    return Path(value).expanduser().resolve()
 
 
 def _ensure_project_files(path: Path) -> None:
@@ -377,6 +407,35 @@ def _done_tasks(plan_path: Path) -> list[str]:
         if stripped.startswith("- [x]") or stripped.startswith("- [X]"):
             tasks.append(stripped[5:].strip())
     return tasks
+
+
+def _ensure_focus_task(plan_path: Path, focus: str) -> None:
+    focus = " ".join(focus.strip().split())
+    if not focus or not plan_path.exists():
+        return
+    content = plan_path.read_text(encoding="utf-8")
+    if _normalize_for_match(focus) in _normalize_for_match(content):
+        return
+    task = f"- [ ] {focus.rstrip('.')}. [ non parallellisable ]"
+    lines = content.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip().startswith("- [ ]"):
+            lines.insert(index, task)
+            plan_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+            return
+    for index, line in enumerate(lines):
+        if line.strip().lower() == "## taches":
+            insert_at = index + 1
+            while insert_at < len(lines) and not lines[insert_at].strip():
+                insert_at += 1
+            lines.insert(insert_at, task)
+            plan_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+            return
+    plan_path.write_text(content.rstrip() + "\n\n## Taches\n\n" + task + "\n", encoding="utf-8")
+
+
+def _normalize_for_match(text: str) -> str:
+    return " ".join(text.lower().replace("’", "'").split())
 
 
 
@@ -497,7 +556,7 @@ def _plan_agent_prompt(
 ) -> str:
     existing_plan = _read_excerpt(plan_path, limit=1200) if plan_path.exists() else ""
     existing_decisions = _read_excerpt(decisions_path, limit=600) if decisions_path.exists() else ""
-    pitch_block = f'Pitch utilisateur : "{pitch}"' if pitch else "Aucun pitch fourni — demande a l'utilisateur ce qu'il veut faire."
+    pitch_block = f'Demande utilisateur : "{pitch}"' if pitch else "Aucune demande fournie."
     existing_block = ""
     if existing_plan:
         existing_block = f"\nPlan existant :\n```markdown\n{existing_plan}\n```\n"
@@ -505,42 +564,55 @@ def _plan_agent_prompt(
         existing_block += f"\nDecisions existantes :\n```markdown\n{existing_decisions}\n```\n"
 
     return (
-        "Commande interne `/plan` : cadre le projet et ecris le plan de developpement.\n\n"
+        "Commande interne `/plan` : aide le modele a structurer sa pensee et a produire le contenu attendu "
+        "dans `.maurice/PLAN.md` apres validation utilisateur.\n\n"
         f"Projet : {project_path.name}\n"
         f"Dossier : {project_path}\n"
         f"Fichier plan : {plan_path}\n"
         f"Fichier decisions : {decisions_path}\n"
         f"{pitch_block}\n"
         f"{existing_block}\n"
-        "Ta mission en 4 etapes :\n\n"
-        "1. **Critique** : identifie les risques, les zones floues, les choix techniques implicites.\n"
-        "   Sois precis — pas de critique generique. Adapte-toi au pitch et au contexte du projet.\n\n"
-        "2. **Approche** : propose une approche concrete et une stack technique adaptee.\n"
-        "   Si le projet a deja une stack, lis les fichiers existants avant de proposer.\n"
-        "   Justifie brievement les choix techniques importants.\n\n"
-        "3. **Plan** : propose des taches ordonnees logiquement.\n"
-        "   Chaque tache doit :\n"
-        "   - etre concrete et produire un resultat verifiable\n"
-        "   - etre marquee `[ parallellisable ]` si elle peut se faire en parallele d'une autre\n"
-        "   - etre marquee `[ non parallellisable ]` si elle bloque les suivantes\n"
-        "   Format : `- [ ] Description de la tache. [ parallellisable ]`\n\n"
-        "4. **Validation** : presente ta critique, ton approche et tes taches a l'utilisateur.\n"
-        "   Demande : 'Tu valides ? Reponds `oui` pour ecrire les fichiers ou indique ce qu'il faut ajuster.'\n"
-        "   Si l'utilisateur valide :\n"
-        f"   - Ecris `{plan_path}` avec la structure : # Plan > ## Objectif > ## Approche > ## Taches\n"
-        f"   - Ecris `{decisions_path}` avec la structure : # Decisions > une ligne par decision cle\n"
-        "   Si l'utilisateur demande des ajustements, integre-les et represente.\n\n"
-        "Ne cree pas les fichiers avant la validation explicite de l'utilisateur."
+        "Comportement attendu :\n"
+        "- Si aucune demande n'est fournie, pose une seule question courte pour obtenir la demande ou la feature.\n"
+        "- Si la demande est fournie mais floue, pose 1 a 3 questions de cadrage utiles avant de proposer un plan.\n"
+        "- Si la demande est assez claire, lis le contexte necessaire puis propose directement le plan.\n"
+        "- Si un plan contient deja des taches, dis clairement que la validation remplacera les taches existantes.\n"
+        "- Ne cree ou ne modifie aucun fichier avant une validation explicite de l'utilisateur.\n\n"
+        "Structure de pensee a presenter avant validation :\n"
+        "## Critique\n"
+        "- risques, zones floues, choix techniques implicites, sans critique generique.\n\n"
+        "## Approche\n"
+        "- approche concrete adaptee au projet existant ; conserve la stack existante si elle convient.\n\n"
+        "## Taches\n"
+        "- taches ordonnees, concretes, verifiables, centrees sur la demande utilisateur.\n"
+        "- chaque tache utilise le format `- [ ] Description. [ parallellisable ]` ou "
+        "`- [ ] Description. [ non parallellisable ]`.\n\n"
+        "Structure exacte attendue dans `PLAN.md` apres validation :\n"
+        "# Plan\n\n"
+        "## Objectif\n\n"
+        "## Usage vise\n\n"
+        "## Contraintes\n\n"
+        "## Definition de fini\n\n"
+        "## Critique\n\n"
+        "## Approche\n\n"
+        "## Taches\n\n"
+        "- [ ] Description. [ non parallellisable ]\n\n"
+        "Structure attendue dans `DECISIONS.md` apres validation :\n"
+        "# Decisions\n\n"
+        f"- {datetime.now().strftime('%Y-%m-%d')} - Decision cle.\n\n"
+        "Quand l'utilisateur valide, ecris `PLAN.md` et `DECISIONS.md` avec les outils disponibles. "
+        "S'il demande un ajustement, integre l'ajustement puis repropose avant d'ecrire."
     )
 
 
-def _dev_execution_prompt(project_path: Path, open_tasks: list[str]) -> str:
+def _dev_execution_prompt(project_path: Path, open_tasks: list[str], *, focus: str = "") -> str:
     meta = _meta_root(project_path)
     plan_path = meta / "PLAN.md"
     decisions_path = meta / "DECISIONS.md"
     agents_path = meta / "AGENTS.md"
     dreams_path = meta / "dreams.md"
     task_lines = "\n".join(f"- [ ] {task}" for task in open_tasks)
+    focus_block = f"Demande utilisateur prioritaire pour ce passage : {focus}\n\n" if focus else ""
     return (
         "Commande interne `/dev` : execute le plan de developpement en autonomie maximale.\n\n"
         f"Projet actif : {project_path}\n"
@@ -551,11 +623,17 @@ def _dev_execution_prompt(project_path: Path, open_tasks: list[str]) -> str:
         f"Dream signals : {dreams_path}\n\n"
         "Objectif : avancer dans l'ordre de `.maurice/PLAN.md` jusqu'a finir le plan, rencontrer un blocage, "
         "ou avoir besoin d'un test/choix utilisateur.\n\n"
+        f"{focus_block}"
         "Taches ouvertes actuelles :\n"
         f"{task_lines}\n\n"
         "Regles d'execution :\n"
         "- Tu es en mode developpement : avance concretement, pas seulement en commentaire.\n"
+        "- Les taches ouvertes representent la demande utilisateur. Ne les ecarte pas comme `deja fait` ou `plan depasse` sans preuve verifiee et sans rendre le plan coherent.\n"
+        "- Si une tache parait deja partiellement presente, verifie l'acceptance reelle dans le code, termine l'integration manquante, puis coche seulement ce qui est effectivement fait.\n"
+        "- Si le plan est ancien mais l'intention reste claire, corrige `.maurice/PLAN.md`/`.maurice/DECISIONS.md` toi-meme et continue. Ne demande une decision que si plusieurs choix produit/techniques incompatibles restent possibles.\n"
         "- Utilise les outils disponibles quand ils sont utiles pour lire, ecrire, verifier ou inspecter le projet.\n"
+        "- Sois concis dans tes messages : pendant l'execution, evite les plans narratifs et les details de routine.\n"
+        "- En fin de boucle, reponds en 3-5 lignes : changements faits, verification, blocage/prochaine decision si besoin.\n"
         "- Commence par les taches `[ non parallellisable ]`, dans l'ordre.\n"
         "- Pour les taches `[ parallellisable ]`, si un outil de spawn/worker est disponible, delegue avec un contexte autonome et continue; sinon execute sequentiellement.\n"
         "- Chaque worker doit recevoir le contexte minimal complet : projet, fichiers pertinents, objectifs, contraintes, sortie attendue.\n"

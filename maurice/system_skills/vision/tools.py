@@ -20,7 +20,7 @@ VisionBackend = Callable[[dict[str, Any]], dict[str, Any]]
 def build_executors(ctx: Any) -> dict[str, Any]:
     return vision_tool_executors(
         ctx.permission_context,
-        backend=ctx.extra.get("vision_backend"),
+        backend=ctx.hooks.vision_backend,
         config=ctx.skill_config or None,
     )
 
@@ -134,7 +134,9 @@ def _resolve_path(value: Any, context: PermissionContext) -> Path:
         raise ValueError("vision tools require a non-empty path.")
     path = Path(value).expanduser()
     if not path.is_absolute():
-        path = Path(context.variables()["$workspace"]) / path
+        variables = context.variables()
+        root = Path(variables.get("$project") or variables["$workspace"])
+        path = root / path
     return path.resolve()
 
 

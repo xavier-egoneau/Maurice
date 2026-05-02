@@ -70,6 +70,7 @@ def build_monitoring_snapshot(
     registry = SkillLoader(
         bundle.host.skill_roots,
         enabled_skills=agent.skills or bundle.kernel.skills,
+        scope="global",
         agent_id=agent.id,
         session_id="monitoring",
     ).load()
