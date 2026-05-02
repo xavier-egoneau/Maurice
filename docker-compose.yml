@@ -3,7 +3,7 @@ services:
     image: searxng/searxng:latest
     container_name: maurice-searxng
     ports:
-      - "18080:8080"
+      - "127.0.0.1:18080:8080"
     volumes:
       - ./docker/searxng:/etc/searxng:rw
     cap_drop:

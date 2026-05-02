@@ -41,14 +41,34 @@ venv_backup/
 credentials.yaml
 *.secret
 *.secrets
+*.pem
+*.key
+*.p12
+*.pfx
 
 # Maurice local runtime/workspace artifacts
 .maurice/
 maurice-workspace/
 workspace/
 agents/
+content/
 sessions/
+skills/
 artifacts/
+run/
+runs/
+events.jsonl
+approvals.json
+skills.yaml
+memory.sqlite
+*.sqlite
+*.sqlite3
+*.db
+
+# Local assistant/tool state
+.claude/
+.codex/
+.aider*
 
 # Logs and temporary files
 *.log
