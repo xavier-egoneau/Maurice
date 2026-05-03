@@ -29,6 +29,12 @@ from maurice.host.commands.agents import (
     _agents_list, _agents_create, _agents_update,
     _agents_disable, _agents_archive, _agents_delete,
 )
+from maurice.host.commands.models import (
+    _models_add,
+    _models_assign,
+    _models_default,
+    _models_list,
+)
 from maurice.host.commands.runs import (
     _runs_list, _runs_create, _base_agent_profile, _resolve_run_profile,
     _runs_start, _runs_resume, _runs_execute, _runs_checkpoint,
@@ -37,6 +43,7 @@ from maurice.host.commands.runs import (
     _runs_coordination_list, _runs_coordination_ack, _runs_coordination_resolve,
     _runs_request_approval, _runs_approvals_list,
     _runs_approvals_approve, _runs_approvals_deny,
+    _runs_templates_list, _runs_templates_add,
     _scope_items, _run_store_for, _coordination_store_for, _run_approval_store_for,
 )
 from maurice.host.commands.auth import _auth_login, _auth_status, _auth_logout
@@ -463,6 +470,36 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Confirm an agent profile more permissive than the global profile.",
     )
+
+    models_parser = subparsers.add_parser("models", help="Manage central model profiles.")
+    models_subparsers = models_parser.add_subparsers(dest="models_command")
+    models_list = models_subparsers.add_parser("list", help="List model profiles.")
+    models_list.add_argument("--workspace", default=str(DEFAULT_WORKSPACE), help="Workspace root to use.")
+    models_add = models_subparsers.add_parser("add", help="Add or update a model profile.")
+    models_add.add_argument("--workspace", default=str(DEFAULT_WORKSPACE), help="Workspace root to use.")
+    models_add.add_argument("--id", dest="profile_id", help="Profile id. Defaults to provider + model name.")
+    models_add.add_argument("--provider", required=True, help="Provider id: mock, api, auth, openai, ollama.")
+    models_add.add_argument("--protocol", help="Provider protocol, for example openai_chat_completions.")
+    models_add.add_argument("--name", required=True, help="Model name.")
+    models_add.add_argument("--base-url", help="Provider base URL.")
+    models_add.add_argument("--credential", help="Credential name used by this profile.")
+    models_add.add_argument("--tier", choices=["high", "middle", "low"], help="Optional quality/cost tier.")
+    models_add.add_argument(
+        "--capability",
+        action="append",
+        dest="capabilities",
+        help="Capability tag, for example text, tools, vision. May be provided more than once.",
+    )
+    models_add.add_argument("--privacy", choices=["local", "cloud", "unknown"], help="Data locality hint.")
+    models_add.add_argument("--default", action="store_true", help="Make this the default model profile.")
+    models_default = models_subparsers.add_parser("default", help="Set the default model profile.")
+    models_default.add_argument("profile_id", help="Existing model profile id.")
+    models_default.add_argument("--workspace", default=str(DEFAULT_WORKSPACE), help="Workspace root to use.")
+    models_assign = models_subparsers.add_parser("assign", help="Assign an ordered model fallback chain to an agent.")
+    models_assign.add_argument("agent_id", help="Agent id to update.")
+    models_assign.add_argument("model_chain", nargs="+", help="Ordered model profile ids.")
+    models_assign.add_argument("--workspace", default=str(DEFAULT_WORKSPACE), help="Workspace root to use.")
+
     agents_disable = agents_subparsers.add_parser("disable", help="Disable a permanent agent.")
     agents_disable.add_argument("agent_id", help="Agent id to disable.")
     agents_disable.add_argument("--workspace", default=str(DEFAULT_WORKSPACE), help="Workspace root to use.")
@@ -489,6 +526,7 @@ def build_parser() -> argparse.ArgumentParser:
     runs_create.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
     runs_create.add_argument("--task", required=True, help="Task assigned to the run.")
     runs_create.add_argument("--base-agent", help="Base permanent agent/profile for the run.")
+    runs_create.add_argument("--template", help="Reusable subagent template id for the run.")
     runs_create.add_argument("--inline-profile", help="Inline JSON profile for this temporary run.")
     runs_create.add_argument("--context-summary", default="", help="Short standalone context summary.")
     runs_create.add_argument("--relevant-file", action="append", dest="relevant_files", help="Relevant file path. May repeat.")
@@ -508,6 +546,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     runs_create.add_argument("--write-path", action="append", dest="write_paths", help="Allowed write path. May repeat.")
     runs_create.add_argument("--permission-class", action="append", dest="permission_classes", help="Allowed permission class. May repeat.")
+    runs_template_list = runs_subparsers.add_parser("template-list", help="List reusable subagent templates.")
+    runs_template_list.add_argument("--workspace", required=True)
+    runs_template_add = runs_subparsers.add_parser("template-add", help="Create a reusable subagent template.")
+    runs_template_add.add_argument("template_id")
+    runs_template_add.add_argument("--workspace", required=True)
+    runs_template_add.add_argument("--description", default="")
+    runs_template_add.add_argument("--permission-profile", choices=["safe", "limited", "power"], default="safe")
+    runs_template_add.add_argument("--skill", action="append", dest="skills", help="Template skill. May repeat.")
+    runs_template_add.add_argument("--credential", action="append", dest="credentials", help="Credential allowed for this template. May repeat.")
+    runs_template_add.add_argument("--model", action="append", dest="model_chain", help="Model profile id. May repeat; order is fallback order.")
     runs_start = runs_subparsers.add_parser("start", help="Mark a run as running.")
     runs_start.add_argument("run_id")
     runs_start.add_argument("--workspace", required=True)
@@ -952,6 +1000,32 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
 
+    if args.command == "models":
+        if args.models_command == "list":
+            _models_list(Path(args.workspace))
+            return 0
+        if args.models_command == "add":
+            _models_add(
+                Path(args.workspace),
+                profile_id=args.profile_id,
+                provider=args.provider,
+                protocol=args.protocol,
+                name=args.name,
+                base_url=args.base_url,
+                credential=args.credential,
+                tier=args.tier,
+                capabilities=args.capabilities,
+                privacy=args.privacy,
+                make_default=args.default,
+            )
+            return 0
+        if args.models_command == "default":
+            _models_default(Path(args.workspace), profile_id=args.profile_id)
+            return 0
+        if args.models_command == "assign":
+            _models_assign(Path(args.workspace), agent_id=args.agent_id, model_chain=args.model_chain)
+            return 0
+
     if args.command == "runs":
         if args.runs_command == "list":
             _runs_list(Path(args.workspace), agent_id=args.agent, state=args.state)
@@ -962,6 +1036,7 @@ def main(argv: list[str] | None = None) -> int:
                 agent_id=args.agent,
                 task=args.task,
                 base_agent=args.base_agent,
+                template=args.template,
                 inline_profile=args.inline_profile,
                 context_summary=args.context_summary,
                 context_inheritance=args.context_inheritance,
@@ -977,6 +1052,20 @@ def main(argv: list[str] | None = None) -> int:
                 max_steps=args.max_steps,
                 checkpoint_every_steps=args.checkpoint_every_steps,
                 stop_conditions=args.stop_conditions,
+            )
+            return 0
+        if args.runs_command == "template-list":
+            _runs_templates_list(Path(args.workspace))
+            return 0
+        if args.runs_command == "template-add":
+            _runs_templates_add(
+                Path(args.workspace),
+                template_id=args.template_id,
+                description=args.description,
+                permission_profile=args.permission_profile,
+                skills=args.skills,
+                credentials=args.credentials,
+                model_chain=args.model_chain,
             )
             return 0
         if args.runs_command == "start":

@@ -69,6 +69,8 @@ host:
   gateway:
     host: 127.0.0.1
     port: 18791
+  development:
+    web_agent_switching: false
   skill_roots:
     - path: /path/to/maurice/maurice/system_skills
       origin: system
@@ -90,16 +92,36 @@ necessarily the folder currently being edited: global web and gateway turns can
 carry an `active_project_root` resolved from the launch folder. Host runtime
 wiring resolves both values into `MauriceContext`.
 
+By default, the web chat is bound to the surface agent: one web conversation
+surface maps to one user/agent, and the browser does not expose an agent
+switcher. Set `host.development.web_agent_switching: true` only for development
+workflows that need to test several agents from the same browser UI.
+
 ### kernel.yaml
 
 ```yaml
 kernel:
-  model:
-    provider: api           # mock | api | auth | openai | ollama
-    protocol: anthropic     # depends on provider
-    name: claude-opus-4-5
-    base_url: null
-    credential: anthropic   # key in credentials store
+  models:
+    default: anthropic_claude_opus_4_5
+    entries:
+      anthropic_claude_opus_4_5:
+        provider: api
+        protocol: anthropic
+        name: claude-opus-4-5
+        base_url: null
+        credential: anthropic
+        tier: high          # optional: high | middle | low, editable by the user
+        capabilities: [text, tools]
+        privacy: cloud      # local | cloud | unknown
+      ollama_gemma4:
+        provider: ollama
+        protocol: ollama_chat
+        name: gemma4
+        base_url: http://localhost:11434
+        credential: null
+        tier: middle
+        capabilities: [text, tools, vision]
+        privacy: local
 
   permissions:
     profile: limited        # safe | limited | power
@@ -119,6 +141,17 @@ kernel:
     dreaming_time: "09:00"
     daily_enabled: true
     daily_time: "09:30"
+
+  subagents:
+    templates:
+      coder:
+        id: coder
+        description: Coding worker
+        permission_profile: safe
+        skills: [filesystem, dev]
+        credentials: [ollama]
+        model_chain:
+          - ollama_gemma4
 
   events:
     retention_days: 30
@@ -146,12 +179,35 @@ agents:
     permission_profile: limited
     credentials: ["*"]
     skills: []              # override kernel.skills for this agent
-    model:                  # override kernel.model for this agent (optional)
-      provider: api
-      protocol: anthropic
-      name: claude-opus-4-5
-      credential: anthropic
+    model_chain:            # ordered model profile ids; first usable profile wins
+      - anthropic_claude_opus_4_5
+      - ollama_gemma4
     event_stream: /path/to/workspace/agents/main/events.jsonl
+```
+
+Model profiles live in `kernel.models.entries`, not inside each agent. An agent
+chooses an ordered `model_chain`; Maurice uses the first available profile and
+falls back to the next one when a profile is immediately unusable, for example
+because its credential is not allowed or an auth token is missing. Older
+`kernel.model` and `agent.model` blocks are migrated into this structure and
+removed from the YAML; credentials themselves are not moved or rewritten.
+
+The CLI exposes the same structure:
+
+```bash
+maurice models list --workspace /path/to/workspace
+maurice models add --workspace /path/to/workspace --provider ollama --protocol ollama_chat --name gemma4 --base-url http://localhost:11434 --tier middle --capability text --capability vision
+maurice models assign coding ollama_gemma4 api_gpt_4o_mini --workspace /path/to/workspace
+maurice models default ollama_gemma4 --workspace /path/to/workspace
+```
+
+Reusable subagent templates also reference central model profile ids through
+`model_chain`; they do not embed provider credentials or duplicate model config.
+Agents can create disposable runs from these templates:
+
+```bash
+maurice runs template-add coder --workspace /path/to/workspace --skill filesystem --model ollama_gemma4
+maurice runs create --workspace /path/to/workspace --task "Run tests" --template coder
 ```
 
 ### skills.yaml

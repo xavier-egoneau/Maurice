@@ -50,6 +50,7 @@ def initialize_workspace(
             "runtime_root": str(runtime),
             "workspace_root": str(workspace),
             "gateway": {"host": "127.0.0.1", "port": 18791},
+            "development": {"web_agent_switching": False},
             "skill_roots": [
                 {
                     "path": str(runtime / "maurice" / "system_skills"),
@@ -186,4 +187,3 @@ def _move_tree_contents(source: Path, destination: Path) -> None:
         source.rmdir()
     except OSError:
         pass
-

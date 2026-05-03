@@ -154,7 +154,9 @@ def test_agent_wizard_lists_models_from_current_provider(tmp_path, monkeypatch) 
     _send(workspace, "oui")
 
     bundle = load_workspace_config(workspace)
-    assert bundle.agents.agents["agent_modele"].model["name"] == "gpt-5.4-mini"
+    agent = bundle.agents.agents["agent_modele"]
+    assert agent.model_chain == ["auth_gpt_5_4_mini"]
+    assert bundle.kernel.models.entries["auth_gpt_5_4_mini"].name == "gpt-5.4-mini"
     assert bundle.agents.agents["agent_modele"].skills == ["filesystem", "memory"]
     assert bundle.agents.agents["agent_modele"].credentials == ["chatgpt_codex"]
 

@@ -83,7 +83,14 @@ from maurice.host.telegram import (
 from maurice.host.workspace import ensure_workspace_content_migrated, initialize_workspace
 from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.compaction import CompactionConfig
-from maurice.kernel.config import ConfigBundle, load_workspace_config, read_yaml_file, write_yaml_file
+from maurice.kernel.config import (
+    ConfigBundle,
+    load_workspace_config,
+    model_profile_id,
+    model_profile_payload,
+    read_yaml_file,
+    write_yaml_file,
+)
 from maurice.kernel.events import EventStore
 from maurice.kernel.loop import AgentLoop, TurnResult
 from maurice.kernel.permissions import PermissionContext
@@ -156,8 +163,16 @@ def _gateway_serve_until_stopped(
     agent_id: str | None,
     poll_seconds: float,
     stop_event: threading.Event,
+    *,
+    telegram_pollers: "_WebTelegramPollers | None" = None,
 ) -> None:
-    server = _build_gateway_http_server(workspace_root, agent_id=agent_id, host=None, port=None)
+    server = _build_gateway_http_server(
+        workspace_root,
+        agent_id=agent_id,
+        host=None,
+        port=None,
+        telegram_pollers=telegram_pollers,
+    )
     server.server.timeout = max(poll_seconds, 0.1)
     bound_host, bound_port = server.address
     print(f"Maurice gateway listening on http://{bound_host}:{bound_port}")
@@ -223,6 +238,7 @@ def _build_gateway_http_server(
             payload,
             telegram_pollers=telegram_pollers,
         ),
+        web_agent_switching=bundle.host.development.web_agent_switching,
         web_uploads=lambda agent_id, session_id, attachments: _store_web_uploads(
             _gateway_prov_root(workspace, agent_id) / "uploads",
             session_id=session_id,
@@ -283,6 +299,7 @@ def _build_gateway_http_server_for_context(
         web_model_update=lambda agent_id, model: _local_model_update(ctx, agent_id, model),
         web_agent_config=lambda agent_id: _local_agent_config_status(ctx, agent_id),
         web_agent_update=lambda agent_id, payload: _local_agent_config_update(ctx, agent_id, payload),
+        web_agent_switching=False,
         web_uploads=lambda _agent_id, session_id, attachments: _store_web_uploads(
             ctx.state_root / "prov" / "uploads",
             session_id=session_id,
@@ -1375,13 +1392,40 @@ def _gateway_model_update(workspace: Path, agent_id: str, model_name: str) -> di
         return {"ok": False, "error": "unknown_model", "model": model_name}
 
     updated_model = {**model, "name": model_name}
-    if agent.default and agent.model is None:
-        kernel_data = read_yaml_file(kernel_config_path(workspace))
-        kernel_data.setdefault("kernel", {})["model"] = updated_model
-        write_yaml_file(kernel_config_path(workspace), kernel_data)
+    if agent.default and not agent.model_chain:
+        _write_gateway_kernel_model(workspace, updated_model)
     else:
-        update_agent(workspace, agent_id=agent.id, model=updated_model)
+        profile_id = _upsert_gateway_model_profile(workspace, updated_model)
+        update_agent(workspace, agent_id=agent.id, model_chain=[profile_id])
     return _gateway_model_status(workspace, agent.id)
+
+
+def _write_gateway_kernel_model(workspace: Path, model: dict[str, Any]) -> None:
+    kernel_path = kernel_config_path(workspace)
+    kernel_data = read_yaml_file(kernel_path)
+    kernel = kernel_data.setdefault("kernel", {})
+    _register_gateway_model_profile(kernel, model, make_default=True)
+    write_yaml_file(kernel_path, kernel_data)
+
+
+def _upsert_gateway_model_profile(workspace: Path, model: dict[str, Any]) -> str:
+    kernel_path = kernel_config_path(workspace)
+    kernel_data = read_yaml_file(kernel_path)
+    kernel = kernel_data.setdefault("kernel", {})
+    profile_id = _register_gateway_model_profile(kernel, model, make_default=False)
+    write_yaml_file(kernel_path, kernel_data)
+    return profile_id
+
+
+def _register_gateway_model_profile(kernel: dict[str, Any], model: dict[str, Any], *, make_default: bool) -> str:
+    payload = model_profile_payload(model)
+    profile_id = model_profile_id(payload)
+    models = kernel.setdefault("models", {})
+    entries = models.setdefault("entries", {})
+    entries[profile_id] = payload
+    if make_default:
+        models["default"] = profile_id
+    return profile_id
 
 
 def _gateway_agent_config_status(workspace: Path, agent_id: str) -> dict[str, Any]:
@@ -1391,6 +1435,7 @@ def _gateway_agent_config_status(workspace: Path, agent_id: str) -> dict[str, An
     enabled_skills = _effective_agent_skills(bundle, agent, available_skills)
     model_status = _gateway_model_status(workspace, agent.id)
     model = _effective_model_config(bundle, agent)
+    model_chain = _gateway_agent_model_chain(bundle, agent)
     provider_key = _provider_key_for_model(model)
     credential_name = str(model.get("credential") or "")
     credential_present = bool(
@@ -1436,6 +1481,17 @@ def _gateway_agent_config_status(workspace: Path, agent_id: str) -> dict[str, An
             for name, description in available_skills.items()
         ],
         "model": model_status,
+        "model_chain": [
+            {
+                "id": item["id"],
+                "provider": item["model"].get("provider") or "mock",
+                "provider_key": _provider_key_for_model(item["model"]),
+                "protocol": item["model"].get("protocol"),
+                "model": item["model"].get("name") or "mock",
+            }
+            for item in model_chain
+        ],
+        "fallback": _gateway_fallback_status(model_chain),
         "provider": {
             "current": provider_key,
             "base_url": model.get("base_url"),
@@ -1445,6 +1501,33 @@ def _gateway_agent_config_status(workspace: Path, agent_id: str) -> dict[str, An
         },
         "web_search": web_search,
         "telegram": telegram_payload,
+    }
+
+
+def _gateway_agent_model_chain(bundle: ConfigBundle, agent) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    if agent.model_chain:
+        for model_id in agent.model_chain:
+            profile = bundle.kernel.models.entries.get(model_id)
+            if profile is not None:
+                result.append({"id": model_id, "model": profile.model_dump(mode="json")})
+        if result:
+            return result
+    profile = bundle.kernel.models.entries.get(bundle.kernel.models.default)
+    if profile is None:
+        return []
+    return [{"id": bundle.kernel.models.default, "model": profile.model_dump(mode="json")}]
+
+
+def _gateway_fallback_status(model_chain: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(model_chain) < 2:
+        return {"enabled": False}
+    fallback = model_chain[1]["model"]
+    return {
+        "enabled": True,
+        "profile_id": model_chain[1]["id"],
+        "provider": _provider_key_for_model(fallback),
+        "model": fallback.get("name") or "mock",
     }
 
 
@@ -1481,23 +1564,41 @@ def _gateway_agent_config_update(workspace: Path, agent_id: str, payload: dict[s
             _effective_model_config(bundle, agent),
             payload,
         )
+        fallback_model, fallback_credential_to_allow = _web_fallback_model_from_agent_payload(
+            workspace,
+            model,
+            payload,
+        )
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     credentials = list(agent.credentials)
     if credential_to_allow and credential_to_allow not in credentials:
         credentials.append(credential_to_allow)
+    if fallback_credential_to_allow and fallback_credential_to_allow not in credentials:
+        credentials.append(fallback_credential_to_allow)
     try:
         _apply_web_search_config(workspace, payload)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
 
+    profile_id = _upsert_gateway_model_profile(workspace, model)
+    fallback_profile_id = _upsert_gateway_model_profile(workspace, fallback_model) if fallback_model else None
+    if agent.default and fallback_profile_id is None:
+        _write_gateway_kernel_model(workspace, model)
+        model_chain: list[str] = []
+    else:
+        if agent.default:
+            _write_gateway_kernel_model(workspace, model)
+        model_chain = [profile_id]
+        if fallback_profile_id and fallback_profile_id != profile_id:
+            model_chain.append(fallback_profile_id)
     updated = update_agent(
         workspace,
         agent_id=agent.id,
         permission_profile=permission_profile,
         skills=skills,
         credentials=credentials,
-        model=model,
+        model_chain=model_chain,
         confirmed_permission_elevation=True,
     )
     _apply_web_telegram_config(workspace, updated, payload)
@@ -1645,13 +1746,61 @@ def _web_model_from_agent_payload(
     current_model: dict[str, Any],
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], str | None]:
-    provider = str(payload.get("provider") or _provider_key_for_model(current_model))
+    return _web_model_from_payload(
+        workspace,
+        current_model,
+        payload,
+        provider_key="provider",
+        model_key="model",
+        base_url_key="base_url",
+        api_key_key="api_key",
+    )
+
+
+def _web_fallback_model_from_agent_payload(
+    workspace: Path,
+    current_model: dict[str, Any],
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    if payload.get("fallback_enabled") is not True:
+        return None, None
+    fallback_provider = str(payload.get("fallback_provider") or "").strip()
+    fallback_model = str(payload.get("fallback_model") or "").strip()
+    if not fallback_provider:
+        raise ValueError("invalid_fallback_provider")
+    model, credential = _web_model_from_payload(
+        workspace,
+        current_model,
+        payload,
+        provider_key="fallback_provider",
+        model_key="fallback_model",
+        base_url_key="fallback_base_url",
+        api_key_key="fallback_api_key",
+    )
+    if fallback_model and str(model.get("name") or "") != fallback_model:
+        raise ValueError("unknown_fallback_model")
+    return model, credential
+
+
+def _web_model_from_payload(
+    workspace: Path,
+    current_model: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    provider_key: str,
+    model_key: str,
+    base_url_key: str,
+    api_key_key: str,
+) -> tuple[dict[str, Any], str | None]:
+    provider = str(payload.get(provider_key) or _provider_key_for_model(current_model))
     provider_choices = _provider_choices_for_web(workspace, current_model)
     valid_providers = {choice["id"] for choice in provider_choices}
     if provider not in valid_providers:
         raise ValueError("invalid_provider")
     provider_choice = next(choice for choice in provider_choices if choice["id"] == provider)
-    model_name = str(payload.get("model") or current_model.get("name") or "").strip()
+    model_name = str(payload.get(model_key) or "").strip()
+    if not model_name and provider_key == "provider":
+        model_name = str(current_model.get("name") or "").strip()
     valid_models = {
         str(model.get("id"))
         for model in provider_choice.get("models", [])
@@ -1661,8 +1810,13 @@ def _web_model_from_agent_payload(
         raise ValueError("unknown_model")
     if not model_name:
         model_name = str(provider_choice.get("default_model") or "")
-    base_url = str(payload.get("base_url") or current_model.get("base_url") or "").strip()
-    api_key = str(payload.get("api_key") or "").strip()
+    base_url = str(
+        payload.get(base_url_key)
+        or (current_model.get("base_url") if provider == _provider_key_for_model(current_model) else "")
+        or provider_choice.get("default_base_url")
+        or ""
+    ).strip()
+    api_key = str(payload.get(api_key_key) or "").strip()
 
     if provider == "chatgpt":
         return (

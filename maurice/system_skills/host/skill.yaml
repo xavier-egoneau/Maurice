@@ -24,6 +24,9 @@ permissions:
         - agents.create
         - agents.update
         - agents.delete
+        - subagent_templates.list
+        - subagent_templates.create
+        - subagent_runs.create
         - telegram.configure
 tools:
   - name: host.status
@@ -134,8 +137,10 @@ tools:
           type: array
           items:
             type: string
-        model:
-          type: object
+        model_chain:
+          type: array
+          items:
+            type: string
         make_default:
           type: boolean
           default: false
@@ -170,11 +175,10 @@ tools:
           type: array
           items:
             type: string
-        model:
-          type: object
-        clear_model:
-          type: boolean
-          default: false
+        model_chain:
+          type: array
+          items:
+            type: string
         make_default:
           type: boolean
       required: [agent_id]
@@ -202,6 +206,95 @@ tools:
       input: local_mutable
       output: local_mutable
     executor: maurice.system_skills.host.tools.agent_delete
+  - name: host.subagent_template_list
+    description: List reusable subagent templates and available central model profiles.
+    input_schema:
+      type: object
+      properties: {}
+      required: []
+    permission_class: host.control
+    permission_scope:
+      actions:
+        - subagent_templates.list
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.host.tools.subagent_template_list
+  - name: host.subagent_template_create
+    description: Create a reusable subagent template that references central model profile ids.
+    input_schema:
+      type: object
+      properties:
+        template_id:
+          type: string
+        description:
+          type: string
+        permission_profile:
+          type: string
+          enum: [safe, limited, power]
+          default: safe
+        skills:
+          type: array
+          items:
+            type: string
+        credentials:
+          type: array
+          items:
+            type: string
+        model_chain:
+          type: array
+          items:
+            type: string
+      required: [template_id]
+    permission_class: host.control
+    permission_scope:
+      actions:
+        - subagent_templates.create
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.host.tools.subagent_template_create
+  - name: host.subagent_run_create
+    description: Create a disposable subagent run from a reusable template.
+    input_schema:
+      type: object
+      properties:
+        task:
+          type: string
+        template_id:
+          type: string
+        parent_agent_id:
+          type: string
+        context_summary:
+          type: string
+        write_paths:
+          type: array
+          items:
+            type: string
+        permission_classes:
+          type: array
+          items:
+            type: string
+        constraints:
+          type: array
+          items:
+            type: string
+        plan:
+          type: array
+          items:
+            type: string
+        requires_self_check:
+          type: boolean
+          default: false
+      required: [task, template_id]
+    permission_class: host.control
+    permission_scope:
+      actions:
+        - subagent_runs.create
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.host.tools.subagent_run_create
   - name: host.telegram_bind
     description: Connect the configured Telegram bot to a durable agent. Secret values must be captured separately through host.request_secret if the bot token is missing.
     input_schema:

@@ -22,7 +22,7 @@ from maurice.host.paths import host_config_path, kernel_config_path
 from maurice.host.project import global_config_path
 from maurice.host.project_registry import list_known_projects
 from maurice.host.secret_capture import request_secret_capture
-from maurice.kernel.config import load_workspace_config, read_yaml_file, write_yaml_file
+from maurice.kernel.config import default_model_config, load_workspace_config, read_yaml_file, write_yaml_file
 from maurice.kernel.scheduler import JobStatus, JobStore
 from maurice.kernel.session import SessionStore
 
@@ -97,9 +97,10 @@ def test_cli_interactive_onboard_configures_basics(tmp_path, capsys, monkeypatch
     bundle = load_workspace_config(workspace)
     assert "Maurice onboarding complete." in output
     assert bundle.host.gateway.port == 18792
-    assert bundle.kernel.model.provider == "ollama"
-    assert bundle.kernel.model.protocol == "ollama_chat"
-    assert bundle.kernel.model.name == "gemma4"
+    model = default_model_config(bundle)
+    assert model["provider"] == "ollama"
+    assert model["protocol"] == "ollama_chat"
+    assert model["name"] == "gemma4"
     assert bundle.skills.skills["web"]["search_provider"] == "searxng"
     assert bundle.skills.skills["web"]["base_url"] == "http://localhost:8080"
 
@@ -132,10 +133,11 @@ def test_cli_interactive_onboard_keeps_existing_values_on_enter(tmp_path, capsys
     assert "Maurice onboarding complete." in output
     assert bundle.kernel.permissions.profile == "limited"
     assert bundle.host.gateway.port == 18792
-    assert bundle.kernel.model.provider == "ollama"
-    assert bundle.kernel.model.protocol == "ollama_chat"
-    assert bundle.kernel.model.name == "gemma4"
-    assert bundle.kernel.model.base_url == "http://localhost:11434"
+    model = default_model_config(bundle)
+    assert model["provider"] == "ollama"
+    assert model["protocol"] == "ollama_chat"
+    assert model["name"] == "gemma4"
+    assert model["base_url"] == "http://localhost:11434"
     assert bundle.skills.skills["web"]["search_provider"] == "searxng"
     assert bundle.skills.skills["web"]["base_url"] == "http://localhost:8080"
 
@@ -153,13 +155,18 @@ def test_cli_onboard_agent_model_updates_only_agent_model(tmp_path, capsys, monk
 
     bundle = load_workspace_config(workspace)
     assert "Agent model updated: coding" in output
-    assert bundle.kernel.model.provider == "mock"
-    assert bundle.agents.agents["coding"].model == {
+    assert default_model_config(bundle)["provider"] == "mock"
+    agent = bundle.agents.agents["coding"]
+    assert agent.model_chain == ["ollama_gemma4"]
+    assert bundle.kernel.models.entries["ollama_gemma4"].model_dump(mode="json") == {
         "provider": "ollama",
         "protocol": "ollama_chat",
         "name": "gemma4",
         "base_url": "http://localhost:11434",
         "credential": None,
+        "tier": None,
+        "capabilities": ["text", "tools", "vision"],
+        "privacy": "local",
     }
 
 
@@ -173,10 +180,73 @@ def test_cli_onboard_default_agent_model_updates_kernel_default(tmp_path, capsys
     assert main(["onboard", "--workspace", str(workspace), "--agent", "main", "--model"]) == 0
 
     bundle = load_workspace_config(workspace)
-    assert bundle.kernel.model.provider == "ollama"
-    assert bundle.kernel.model.protocol == "ollama_chat"
-    assert bundle.kernel.model.name == "gemma4"
-    assert bundle.agents.agents["main"].model is None
+    model = default_model_config(bundle)
+    assert model["provider"] == "ollama"
+    assert model["protocol"] == "ollama_chat"
+    assert model["name"] == "gemma4"
+    assert bundle.kernel.models.default == "ollama_gemma4"
+    assert bundle.kernel.models.entries["ollama_gemma4"].name == "gemma4"
+
+
+def test_cli_models_add_and_assign_fallback_chain(tmp_path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
+    main(["agents", "create", "coding", "--workspace", str(workspace)])
+    capsys.readouterr()
+
+    assert main([
+        "models",
+        "add",
+        "--workspace",
+        str(workspace),
+        "--provider",
+        "ollama",
+        "--protocol",
+        "ollama_chat",
+        "--name",
+        "gemma4",
+        "--base-url",
+        "http://localhost:11434",
+        "--tier",
+        "middle",
+        "--capability",
+        "text",
+        "--capability",
+        "vision",
+    ]) == 0
+    assert main([
+        "models",
+        "add",
+        "--workspace",
+        str(workspace),
+        "--id",
+        "cloud_backup",
+        "--provider",
+        "api",
+        "--protocol",
+        "openai_chat_completions",
+        "--name",
+        "gpt-4o-mini",
+        "--credential",
+        "openai",
+        "--privacy",
+        "cloud",
+    ]) == 0
+    assert main([
+        "models",
+        "assign",
+        "coding",
+        "ollama_gemma4",
+        "cloud_backup",
+        "--workspace",
+        str(workspace),
+    ]) == 0
+
+    bundle = load_workspace_config(workspace)
+    agent = bundle.agents.agents["coding"]
+    assert agent.model_chain == ["ollama_gemma4", "cloud_backup"]
+    assert bundle.kernel.models.entries["ollama_gemma4"].tier == "middle"
+    assert bundle.kernel.models.entries["cloud_backup"].name == "gpt-4o-mini"
 
 
 def test_cli_onboard_agent_model_can_pick_chatgpt_model_from_cache(tmp_path, capsys, monkeypatch) -> None:
@@ -206,9 +276,9 @@ def test_cli_onboard_agent_model_can_pick_chatgpt_model_from_cache(tmp_path, cap
 
     bundle = load_workspace_config(workspace)
     assert "Modele ChatGPT" in output
-    assert bundle.kernel.model.provider == "auth"
-    assert bundle.kernel.model.name == "gpt-5.4-mini"
-    assert bundle.agents.agents["main"].model is None
+    model = default_model_config(bundle)
+    assert model["provider"] == "auth"
+    assert model["name"] == "gpt-5.4-mini"
 
 
 def test_ollama_model_choices_use_api_tags(monkeypatch) -> None:
@@ -257,14 +327,14 @@ def test_cli_onboard_agent_model_configures_ollama_cloud_credential(tmp_path, ca
 
     bundle = load_workspace_config(workspace)
     credentials = load_workspace_credentials(workspace)
-    assert bundle.kernel.model.model_dump(mode="json") == {
+    model = default_model_config(bundle)
+    assert {key: model[key] for key in ("provider", "protocol", "name", "base_url", "credential")} == {
         "provider": "ollama",
         "protocol": "ollama_chat",
         "name": "minimax-m2.7:cloud",
         "base_url": "https://ollama.com",
         "credential": "ollama_cloud",
     }
-    assert bundle.agents.agents["main"].model is None
     assert bundle.agents.agents["main"].credentials == ["ollama_cloud"]
     assert credentials.credentials["ollama_cloud"].value == "cloud-secret"
 
@@ -273,17 +343,21 @@ def test_run_one_turn_uses_agent_model_name(tmp_path, capsys, monkeypatch) -> No
     workspace = tmp_path / "workspace"
     main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
     main(["agents", "create", "coding", "--workspace", str(workspace)])
-    update_agent(
-        workspace,
-        agent_id="coding",
-        model={
-            "provider": "ollama",
-            "protocol": "ollama_chat",
-            "name": "gemma4",
-            "base_url": "http://localhost:11434",
-            "credential": None,
-        },
-    )
+    main([
+        "models",
+        "add",
+        "--workspace",
+        str(workspace),
+        "--provider",
+        "ollama",
+        "--protocol",
+        "ollama_chat",
+        "--name",
+        "gemma4",
+        "--base-url",
+        "http://localhost:11434",
+    ])
+    update_agent(workspace, agent_id="coding", model_chain=["ollama_gemma4"])
     capsys.readouterr()
     captured = {}
 
@@ -651,13 +725,28 @@ def test_start_services_foreground_can_start_telegram_worker(tmp_path, capsys, m
         def serve(self, socket_path):
             calls.append(("server", socket_path.name))
 
-    def fake_telegram_poll(workspace_root, agent_id, poll_seconds, stop_event, *, channel_name):
-        calls.append(("telegram", channel_name))
+    class FakePollers:
+        poll_seconds = 0.1
+
+        def __init__(self, workspace_root, *, agent_id, poll_seconds):
+            calls.append(("pollers_init", Path(workspace_root).name, agent_id, poll_seconds))
+            self.poll_seconds = poll_seconds
+
+        def sync(self):
+            calls.append(("telegram_sync",))
+
+        def stop(self):
+            calls.append(("telegram_stop",))
+
+    def fake_pollers_until_stopped(pollers, stop_event):
+        pollers.sync()
         stop_event.set()
+        pollers.stop()
 
     monkeypatch.setattr(service, "MauriceServer", FakeServer)
     monkeypatch.setattr(service, "_wait_for_socket", lambda _socket_path: None)
-    monkeypatch.setattr(service, "_telegram_poll_until_stopped", fake_telegram_poll)
+    monkeypatch.setattr(service, "_WebTelegramPollers", FakePollers)
+    monkeypatch.setattr(service, "_telegram_pollers_until_stopped", fake_pollers_until_stopped)
 
     service._start_services(
         workspace,
@@ -670,8 +759,65 @@ def test_start_services_foreground_can_start_telegram_worker(tmp_path, capsys, m
     )
     output = capsys.readouterr().out
 
-    assert ("telegram", "telegram") in calls
+    assert ("telegram_sync",) in calls
+    assert ("telegram_stop",) in calls
     assert "Services: telegram." in output
+
+
+def test_start_services_gateway_can_sync_telegram_after_web_update(tmp_path, capsys, monkeypatch) -> None:
+    from maurice.host.commands import service
+    from maurice.host.workspace import initialize_workspace
+
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    initialize_workspace(workspace, runtime)
+    calls = []
+
+    class FakeServer:
+        def __init__(self, ctx):
+            self.ctx = ctx
+            self._running = True
+
+        def serve(self, socket_path):
+            calls.append(("server", socket_path.name))
+
+    class FakePollers:
+        poll_seconds = 0.1
+
+        def __init__(self, workspace_root, *, agent_id, poll_seconds):
+            calls.append(("pollers_init", Path(workspace_root).name, agent_id, poll_seconds))
+            self.poll_seconds = poll_seconds
+
+        def sync(self):
+            calls.append(("telegram_sync",))
+
+        def stop(self):
+            calls.append(("telegram_stop",))
+
+    def fake_gateway(workspace_root, agent_id, poll_seconds, stop_event, *, telegram_pollers=None):
+        calls.append(("gateway", Path(workspace_root).name, agent_id, poll_seconds, telegram_pollers is not None))
+        telegram_pollers.sync()
+        stop_event.set()
+
+    monkeypatch.setattr(service, "MauriceServer", FakeServer)
+    monkeypatch.setattr(service, "_wait_for_socket", lambda _socket_path: None)
+    monkeypatch.setattr(service, "_WebTelegramPollers", FakePollers)
+    monkeypatch.setattr(service, "_gateway_serve_until_stopped", fake_gateway)
+
+    service._start_services(
+        workspace,
+        agent_id=None,
+        poll_seconds=0.1,
+        telegram=True,
+        scheduler=False,
+        gateway=True,
+        open_browser=False,
+    )
+
+    assert any(call[0] == "gateway" and call[-1] is True for call in calls)
+    assert ("telegram_sync",) in calls
+    assert ("telegram_stop",) in calls
 
 
 def test_cli_start_opens_gateway_ui_by_default(tmp_path, capsys, monkeypatch) -> None:
@@ -1586,6 +1732,80 @@ def test_cli_runs_create_accepts_inline_profile(tmp_path, capsys) -> None:
     assert '"base_agent": "inline_coder"' in mission
     assert '"inline": true' in mission
     assert '"filesystem"' in mission
+
+
+def test_cli_runs_create_can_use_subagent_template_model_chain(tmp_path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace)])
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "models",
+                "add",
+                "--workspace",
+                str(workspace),
+                "--provider",
+                "ollama",
+                "--protocol",
+                "ollama_chat",
+                "--name",
+                "gemma4",
+                "--base-url",
+                "http://localhost:11434",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "runs",
+                "template-add",
+                "coder",
+                "--workspace",
+                str(workspace),
+                "--description",
+                "Coding worker",
+                "--permission-profile",
+                "safe",
+                "--skill",
+                "filesystem",
+                "--credential",
+                "ollama",
+                "--model",
+                "ollama_gemma4",
+            ]
+        )
+        == 0
+    )
+    assert "Subagent template created: coder" in capsys.readouterr().out
+
+    assert main(["runs", "template-list", "--workspace", str(workspace)]) == 0
+    assert "coder profile=safe models=ollama_gemma4 Coding worker" in capsys.readouterr().out
+
+    assert (
+        main(
+            [
+                "runs",
+                "create",
+                "--workspace",
+                str(workspace),
+                "--task",
+                "Template task.",
+                "--template",
+                "coder",
+            ]
+        )
+        == 0
+    )
+    run_id = capsys.readouterr().out.strip().split(": ")[1]
+    mission = (workspace / "runs" / run_id / "mission.json").read_text(encoding="utf-8")
+    assert '"base_agent": "coder"' in mission
+    assert '"template": true' in mission
+    assert '"model_chain": [' in mission
+    assert '"ollama_gemma4"' in mission
 
 
 def test_cli_runs_create_rejects_inline_profile_with_base_agent(tmp_path) -> None:

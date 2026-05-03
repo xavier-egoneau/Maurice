@@ -53,6 +53,45 @@ class MockProvider:
         yield from self.chunks
 
 
+class FallbackProvider:
+    """Try providers in order when an attempt fails before producing output."""
+
+    def __init__(self, attempts: Sequence[tuple[Provider, str]]) -> None:
+        self.attempts = list(attempts)
+
+    def stream(
+        self,
+        *,
+        messages: Sequence[dict[str, Any]],
+        model: str,
+        tools: Sequence[ToolDeclaration],
+        system: str,
+        limits: dict[str, Any] | None = None,
+    ) -> Iterable[ProviderChunk]:
+        last_index = len(self.attempts) - 1
+        for index, (provider, attempt_model) in enumerate(self.attempts):
+            produced_output = False
+            for raw_chunk in provider.stream(
+                messages=messages,
+                model=attempt_model or model,
+                tools=tools,
+                system=system,
+                limits=limits,
+            ):
+                chunk = ProviderChunk.model_validate(raw_chunk)
+                if (
+                    chunk.status == ProviderStatus.FAILED
+                    and not produced_output
+                    and index < last_index
+                ):
+                    break
+                if str(chunk.type) != "status":
+                    produced_output = True
+                yield chunk
+            else:
+                return
+
+
 class ApiProvider:
     """Generic URL/key provider selected by protocol."""
 

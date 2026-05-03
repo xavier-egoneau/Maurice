@@ -75,13 +75,22 @@ def _approval_response(value: bool | str | dict[str, Any]) -> dict[str, Any]:
 
 
 def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Remove tool results that have no matching tool call (orphaned after interrupted turns)."""
+    """Remove invalid tool call pairs left behind by interrupted turns."""
+    answered_tool_call_ids = {
+        meta["tool_call_id"]
+        for msg in messages
+        if msg.get("role") == "tool"
+        for meta in [msg.get("metadata") or {}]
+        if meta.get("tool_call_id")
+    }
     result: list[dict[str, Any]] = []
     previous_tool_call_ids: set[str] = set()
     for msg in messages:
         meta = msg.get("metadata") or {}
         if msg.get("role") == "tool_call":
             call_id = meta.get("tool_call_id")
+            if call_id and call_id not in answered_tool_call_ids:
+                continue
             if call_id:
                 previous_tool_call_ids.add(call_id)
         if msg.get("role") == "tool":
@@ -614,7 +623,14 @@ class AgentLoop:
                 f"No executor registered for {declaration.name}.",
                 code="executor_missing",
             )
-        raw_result = executor(tool_call.arguments)
+        try:
+            raw_result = executor(tool_call.arguments)
+        except Exception as exc:
+            return self._failed_tool_result(
+                f"Tool {declaration.name} failed: {exc}",
+                code="tool_exception",
+                retryable=False,
+            )
         return ToolResult.model_validate(raw_result)
 
     def _requested_permission_scope(

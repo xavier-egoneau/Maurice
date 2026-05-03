@@ -353,7 +353,7 @@ class AgentConfig(MauriceModel):
     status: Literal["active", "disabled", "archived"] = "active"
     default: bool = False
     channels: list[str] = Field(default_factory=list)
-    model: dict[str, Any] | None = None
+    model_chain: list[str] = Field(default_factory=list)
     event_stream: str | None = None
 
 

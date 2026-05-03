@@ -11,9 +11,10 @@ from pydantic import Field
 from maurice.host.agents import create_agent, list_agents, update_agent
 from maurice.host.credentials import load_workspace_credentials
 from maurice.host.model_catalog import chatgpt_model_choices, ollama_model_choices
-from maurice.host.paths import host_config_path
+from maurice.host.paths import host_config_path, kernel_config_path
+from maurice.host.runtime import _effective_model_config
 from maurice.host.secret_capture import request_secret_capture
-from maurice.kernel.config import load_workspace_config, read_yaml_file, write_yaml_file
+from maurice.kernel.config import load_workspace_config, model_profile_id, model_profile_payload, read_yaml_file, write_yaml_file
 from maurice.kernel.contracts import MauriceModel, SkillManifest
 
 
@@ -649,6 +650,10 @@ def _advance(
             return _Response(text="Creation d'agent annulee.", clear=True)
         if normalized not in YES_WORDS:
             return _Response(text=_summary_question(data))
+        model_chain = None
+        model = data.get("model")
+        if isinstance(model, dict):
+            model_chain = [_upsert_agent_wizard_model_profile(workspace, model)]
         try:
             created = create_agent(
                 workspace,
@@ -657,7 +662,7 @@ def _advance(
                 skills=list(data.get("skills") or []),
                 credentials=_credentials_for_agent(data),
                 channels=["telegram"] if data.get("telegram") else [],
-                model=data.get("model"),
+                model_chain=model_chain,
                 confirmed_permission_elevation=True,
             )
             if data.get("telegram"):
@@ -859,7 +864,7 @@ def _agent_edit_data_for(workspace: Path, agent_id: str) -> dict[str, Any]:
     agent = bundle.agents.agents[agent_id]
     telegram = _telegram_channel_for_agent(bundle.host.channels, agent_id)
     agent_telegram = isinstance(telegram, dict)
-    model = agent.model if agent.model is not None else None
+    model = _effective_model_config(bundle, agent) if agent.model_chain else None
     return {
         "agent": agent.id,
         "permission": agent.permission_profile,
@@ -935,18 +940,53 @@ def _apply_agent_edit(workspace: Path, data: dict[str, Any]) -> None:
     agent_id = str(data["agent"])
     current = load_workspace_config(workspace).agents.agents[agent_id]
     credentials = list(dict.fromkeys([*current.credentials, *_credentials_for_agent(data)]))
+    model = data.get("model") if not data.get("clear_model") else None
+    model_chain: list[str] | None = None
+    if isinstance(model, dict):
+        if current.default:
+            _write_agent_wizard_kernel_model(workspace, model)
+            model_chain = []
+        else:
+            model_chain = [_upsert_agent_wizard_model_profile(workspace, model)]
     update_agent(
         workspace,
         agent_id=agent_id,
         permission_profile=str(data["permission"]),
         skills=list(data.get("skills") or []),
         credentials=credentials,
-        model=data.get("model") if not data.get("clear_model") else None,
-        clear_model=bool(data.get("clear_model")),
+        model_chain=model_chain,
         confirmed_permission_elevation=True,
     )
     if data.get("telegram_changed"):
         _apply_telegram_edit(workspace, data)
+
+
+def _write_agent_wizard_kernel_model(workspace: Path, model: dict[str, Any]) -> None:
+    kernel_path = kernel_config_path(workspace)
+    kernel_data = read_yaml_file(kernel_path)
+    kernel = kernel_data.setdefault("kernel", {})
+    _register_agent_wizard_model_profile(kernel, model, make_default=True)
+    write_yaml_file(kernel_path, kernel_data)
+
+
+def _upsert_agent_wizard_model_profile(workspace: Path, model: dict[str, Any]) -> str:
+    kernel_path = kernel_config_path(workspace)
+    kernel_data = read_yaml_file(kernel_path)
+    kernel = kernel_data.setdefault("kernel", {})
+    profile_id = _register_agent_wizard_model_profile(kernel, model, make_default=False)
+    write_yaml_file(kernel_path, kernel_data)
+    return profile_id
+
+
+def _register_agent_wizard_model_profile(kernel: dict[str, Any], model: dict[str, Any], *, make_default: bool) -> str:
+    payload = model_profile_payload(model)
+    profile_id = model_profile_id(payload)
+    models = kernel.setdefault("models", {})
+    entries = models.setdefault("entries", {})
+    entries[profile_id] = payload
+    if make_default:
+        models["default"] = profile_id
+    return profile_id
 
 
 def _agent_edit_model_label(data: dict[str, Any], workspace: Path) -> str:
@@ -959,9 +999,10 @@ def _agent_edit_model_label(data: dict[str, Any], workspace: Path) -> str:
     if isinstance(agent_id, str):
         bundle = load_workspace_config(workspace)
         agent = bundle.agents.agents.get(agent_id)
-        if agent is not None and agent.model:
-            return str(agent.model.get("name") or agent.model.get("provider") or "configure")
-        return str(bundle.kernel.model.name)
+        if agent is not None and agent.model_chain:
+            model = _effective_model_config(bundle, agent)
+            return str(model.get("name") or model.get("provider") or "configure")
+        return str(_effective_model_config(bundle, agent).get("name") if agent is not None else "defaut")
     return "defaut"
 
 
@@ -1271,7 +1312,7 @@ def _model_choices_for_workspace(
 ) -> tuple[dict[str, Any], list[tuple[str, str]]]:
     bundle = load_workspace_config(workspace)
     agent = bundle.agents.agents.get(agent_id) if agent_id else None
-    model = dict(agent.model) if agent is not None and agent.model else bundle.kernel.model.model_dump(mode="json")
+    model = _effective_model_config(bundle, agent) if agent is not None else _effective_model_config(bundle, None)
     provider = model.get("provider")
     protocol = model.get("protocol")
     if provider == "auth" and protocol == "chatgpt_codex":

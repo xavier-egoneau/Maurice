@@ -33,7 +33,7 @@ from maurice.host.credentials import (
     CredentialRecord, CredentialsStore, credentials_path,
     ensure_workspace_credentials_migrated, load_workspace_credentials, write_workspace_credentials,
 )
-from maurice.host.commands.gateway_server import _gateway_serve_until_stopped, _telegram_poll_until_stopped
+from maurice.host.commands.gateway_server import _gateway_serve_until_stopped, _WebTelegramPollers
 from maurice.host.commands.scheduler import _scheduler_serve_until_stopped
 from maurice.host.dashboard import build_dashboard_snapshot
 from maurice.host.delivery import (
@@ -154,23 +154,25 @@ def _start_services(
             )
         )
     telegram_active = telegram and _telegram_service_configured(bundle, agent_id)
+    telegram_pollers = _WebTelegramPollers(
+        Path(bundle.host.workspace_root),
+        agent_id=agent_id,
+        poll_seconds=max(poll_seconds, 0.1),
+    ) if telegram and (telegram_active or gateway) else None
     if telegram_active:
-        for channel_name, _channel_config in _telegram_channel_configs(bundle):
-            if agent_id and str(_channel_config.get("agent") or "main") != agent_id:
-                continue
-            workers.append(
-                threading.Thread(
-                    target=_telegram_poll_until_stopped,
-                    args=(Path(bundle.host.workspace_root), agent_id, max(poll_seconds, 0.1), stop_event),
-                    kwargs={"channel_name": channel_name},
-                    daemon=True,
-                )
+        workers.append(
+            threading.Thread(
+                target=_telegram_pollers_until_stopped,
+                args=(telegram_pollers, stop_event),
+                daemon=True,
             )
+        )
     if gateway:
         workers.append(
             threading.Thread(
                 target=_gateway_serve_until_stopped,
                 args=(Path(bundle.host.workspace_root), agent_id, max(poll_seconds, 0.1), stop_event),
+                kwargs={"telegram_pollers": telegram_pollers},
                 daemon=True,
             )
         )
@@ -203,6 +205,8 @@ def _start_services(
     finally:
         stop_event.set()
         server._running = False
+        if telegram_pollers is not None:
+            telegram_pollers.stop()
         for worker in workers:
             worker.join(timeout=5)
         for sig, handler in previous_handlers.items():
@@ -393,6 +397,17 @@ def _telegram_service_configured(bundle: ConfigBundle, agent_id: str | None) -> 
     return False
 
 
+def _telegram_pollers_until_stopped(pollers: _WebTelegramPollers | None, stop_event: threading.Event) -> None:
+    if pollers is None:
+        return
+    try:
+        while not stop_event.is_set():
+            pollers.sync()
+            stop_event.wait(pollers.poll_seconds)
+    finally:
+        pollers.stop()
+
+
 def _service_names(*, scheduler: bool, gateway: bool, telegram: bool) -> str:
     names = []
     if scheduler:
@@ -554,8 +569,8 @@ def _doctor_workspace(workspace_root: Path) -> None:
     print(f"Maurice credentials: {credentials_path()}")
     default_agent = _default_agent(bundle)
     print(f"Maurice model: {_effective_model_label(bundle, default_agent)}")
-    if default_agent is not None and default_agent.model:
+    if default_agent is not None and default_agent.model_chain:
         print(
-            f"Maurice model note: {default_agent.id} overrides kernel.model; "
-            "kernel.model is only the fallback default."
+            f"Maurice model note: {default_agent.id} uses an agent model override; "
+            "kernel.models.default is only the fallback default."
         )

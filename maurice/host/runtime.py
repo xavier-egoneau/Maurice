@@ -15,13 +15,14 @@ from maurice.host.project_registry import list_known_projects, record_known_proj
 from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.classifier import Classifier
 from maurice.kernel.compaction import CompactionConfig
-from maurice.kernel.config import ConfigBundle, load_workspace_config
+from maurice.kernel.config import ConfigBundle, default_model_config, load_workspace_config
 from maurice.kernel.events import EventStore
 from maurice.kernel.loop import AgentLoop, TurnResult
 from maurice.kernel.permissions import PermissionContext
 from maurice.kernel.providers import (
     ApiProvider,
     ChatGPTCodexProvider,
+    FallbackProvider,
     MockProvider,
     OllamaCompatibleProvider,
     OpenAICompatibleProvider,
@@ -83,8 +84,7 @@ def build_global_agent_loop(
             session_id=session_id,
         ).load()
         ensure_skill_services(registry)
-    model_config = _effective_model_config(bundle, agent)
-    provider = _provider_for_config(bundle, message, credentials, agent=agent)
+    provider, model_config = _provider_and_model_for_config(bundle, message, credentials, agent=agent)
     skill_ctx = SkillContext(
         permission_context=permission_context,
         event_store=event_store,
@@ -132,7 +132,7 @@ def build_global_agent_loop(
     )
     classifier = None
     if approvals_cfg.mode == "auto":
-        classifier_model = approvals_cfg.classifier_model or str(model_config.get("name") or bundle.kernel.model.name)
+        classifier_model = approvals_cfg.classifier_model or str(model_config.get("name") or "mock")
         classifier = Classifier(
             provider=provider,
             model=classifier_model,
@@ -151,7 +151,7 @@ def build_global_agent_loop(
                 ctx.approvals_path,
                 event_store=event_store,
             ),
-            model=str(model_config.get("name") or bundle.kernel.model.name),
+            model=str(model_config.get("name") or "mock"),
             system_prompt=_agent_system_prompt(
                 workspace,
                 agent=agent,
@@ -260,10 +260,24 @@ def _agent_system_prompt(
 
 
 def _effective_model_config(bundle: ConfigBundle, agent: Any = None) -> dict[str, Any]:
-    agent_model = getattr(agent, "model", None)
-    if agent_model:
-        return dict(agent_model)
-    return bundle.kernel.model.model_dump(mode="json")
+    chain = _effective_model_chain(bundle, agent)
+    return dict(chain[0]) if chain else default_model_config(bundle)
+
+
+def _effective_model_chain(bundle: ConfigBundle, agent: Any = None) -> list[dict[str, Any]]:
+    model_ids = list(getattr(agent, "model_chain", None) or [])
+    if model_ids:
+        chain = [
+            profile.model_dump(mode="json")
+            for model_id in model_ids
+            if (profile := bundle.kernel.models.entries.get(model_id)) is not None
+        ]
+        if chain:
+            return chain
+    default_model = bundle.kernel.models.entries.get(bundle.kernel.models.default)
+    if default_model is not None:
+        return [default_model.model_dump(mode="json")]
+    return [default_model_config(bundle)]
 
 
 def _model_credential(model: dict[str, Any], credentials: CredentialsStore | None) -> Any:
@@ -284,8 +298,52 @@ def _provider_for_config(
     *,
     agent: Any = None,
 ) -> Any:
-    model = _effective_model_config(bundle, agent)
-    provider_name = model["provider"]
+    provider, _model = _provider_and_model_for_config(bundle, message, credentials, agent=agent)
+    return provider
+
+
+def _provider_and_model_for_config(
+    bundle: ConfigBundle,
+    message: str,
+    credentials: CredentialsStore | None = None,
+    *,
+    agent: Any = None,
+) -> tuple[Any, dict[str, Any]]:
+    chain = _effective_model_chain(bundle, agent)
+    attempts: list[tuple[Any, dict[str, Any]]] = []
+    last_provider: Any | None = None
+    last_model: dict[str, Any] | None = None
+    for model in chain:
+        provider = _provider_for_model_config(bundle, message, model, credentials, agent=agent)
+        if not isinstance(provider, UnsupportedProvider):
+            attempts.append((provider, model))
+            continue
+        last_provider = provider
+        last_model = model
+    if len(attempts) == 1:
+        provider, model = attempts[0]
+        return provider, model
+    if len(attempts) > 1:
+        provider_attempts = [
+            (provider, str(model.get("name") or "mock"))
+            for provider, model in attempts
+        ]
+        return FallbackProvider(provider_attempts), attempts[0][1]
+    if last_provider is not None and last_model is not None:
+        return last_provider, last_model
+    fallback = default_model_config(bundle)
+    return _provider_for_model_config(bundle, message, fallback, credentials, agent=agent), fallback
+
+
+def _provider_for_model_config(
+    bundle: ConfigBundle,
+    message: str,
+    model: dict[str, Any],
+    credentials: CredentialsStore | None = None,
+    *,
+    agent: Any = None,
+) -> Any:
+    provider_name = model.get("provider") or "mock"
     if provider_name == "mock":
         return MockProvider([
             {"type": "text_delta", "delta": f"Mock response: {message}"},
@@ -294,7 +352,7 @@ def _provider_for_config(
     if provider_name == "api":
         protocol = model.get("protocol")
         if not protocol:
-            return UnsupportedProvider(code="missing_protocol", message="API provider requires kernel.model.protocol.")
+            return UnsupportedProvider(code="missing_protocol", message="API provider requires a model protocol.")
         credential = _model_credential(model, credentials)
         return ApiProvider(
             protocol=protocol,

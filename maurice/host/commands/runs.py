@@ -100,6 +100,7 @@ def _runs_create(
     agent_id: str | None,
     task: str,
     base_agent: str | None,
+    template: str | None,
     inline_profile: str | None,
     context_summary: str,
     context_inheritance: str,
@@ -121,6 +122,7 @@ def _runs_create(
         workspace_root,
         parent_agent_id=agent.id,
         base_agent_id=base_agent,
+        template_id=template,
         inline_profile=inline_profile,
     )
     run = store.create(
@@ -176,7 +178,7 @@ def _base_agent_profile(workspace_root: Path, base_agent_id: str) -> tuple[str, 
             "credentials": list(agent.credentials),
             "permission_profile": agent.permission_profile,
             "channels": list(agent.channels),
-            "model": agent.model,
+            "model_chain": list(agent.model_chain),
         },
     )
 
@@ -187,10 +189,12 @@ def _resolve_run_profile(
     *,
     parent_agent_id: str,
     base_agent_id: str | None,
+    template_id: str | None,
     inline_profile: str | None,
 ) -> tuple[str, dict[str, object]]:
-    if inline_profile and base_agent_id:
-        raise SystemExit("--inline-profile cannot be combined with --base-agent")
+    selectors = [value for value in (base_agent_id, template_id, inline_profile) if value]
+    if len(selectors) > 1:
+        raise SystemExit("--base-agent, --template and --inline-profile cannot be combined")
     if inline_profile:
         try:
             profile = json.loads(inline_profile)
@@ -203,10 +207,82 @@ def _resolve_run_profile(
         profile.setdefault("credentials", [])
         profile.setdefault("permission_profile", "safe")
         profile.setdefault("channels", [])
-        profile.setdefault("model", None)
+        profile.setdefault("model_chain", [])
         profile["inline"] = True
         return str(profile["id"]), profile
+    if template_id:
+        return _subagent_template_profile(workspace_root, template_id)
     return _base_agent_profile(workspace_root, base_agent_id or parent_agent_id)
+
+
+def _subagent_template_profile(workspace_root: Path, template_id: str) -> tuple[str, dict[str, object]]:
+    bundle = load_workspace_config(workspace_root)
+    try:
+        template = bundle.kernel.subagents.templates[template_id]
+    except KeyError as exc:
+        raise SystemExit(f"Unknown subagent template: {template_id}") from exc
+    missing = [profile_id for profile_id in template.model_chain if profile_id not in bundle.kernel.models.entries]
+    if missing:
+        raise SystemExit(f"Unknown model profile(s) in subagent template {template_id}: {', '.join(missing)}")
+    return (
+        template.id,
+        {
+            "id": template.id,
+            "template": True,
+            "description": template.description,
+            "skills": list(template.skills),
+            "credentials": list(template.credentials),
+            "permission_profile": template.permission_profile,
+            "channels": list(template.channels),
+            "model_chain": list(template.model_chain),
+        },
+    )
+
+
+def _runs_templates_list(workspace_root: Path) -> None:
+    bundle = load_workspace_config(workspace_root)
+    templates = sorted(bundle.kernel.subagents.templates.values(), key=lambda item: item.id)
+    if not templates:
+        print("No subagent templates.")
+        return
+    for template in templates:
+        models = ", ".join(template.model_chain) if template.model_chain else "-"
+        print(f"{template.id} profile={template.permission_profile} models={models} {template.description}".rstrip())
+
+
+def _runs_templates_add(
+    workspace_root: Path,
+    *,
+    template_id: str,
+    description: str,
+    permission_profile: str,
+    skills: list[str] | None,
+    credentials: list[str] | None,
+    model_chain: list[str] | None,
+) -> None:
+    bundle = load_workspace_config(workspace_root)
+    if template_id in bundle.kernel.subagents.templates:
+        raise SystemExit(f"Subagent template already exists: {template_id}")
+    model_chain = model_chain or []
+    missing = [profile_id for profile_id in model_chain if profile_id not in bundle.kernel.models.entries]
+    if missing:
+        raise SystemExit(f"Unknown model profile(s): {', '.join(missing)}")
+    if permission_profile not in {"safe", "limited", "power"}:
+        raise SystemExit("Permission profile must be safe, limited or power.")
+    kernel_path = kernel_config_path(workspace_root)
+    kernel_data = read_yaml_file(kernel_path)
+    template = {
+        "id": template_id,
+        "description": description,
+        "skills": skills or [],
+        "credentials": credentials or [],
+        "permission_profile": permission_profile,
+        "channels": [],
+        "model_chain": model_chain,
+    }
+    kernel_data.setdefault("kernel", {}).setdefault("subagents", {}).setdefault("templates", {})[template_id] = template
+    write_yaml_file(kernel_path, kernel_data)
+    print(f"Subagent template created: {template_id}")
 
 
 
@@ -542,4 +618,3 @@ def _run_approval_store_for(workspace_root: Path, agent_id: str | None):
         ),
         agent,
     )
-

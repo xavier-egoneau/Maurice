@@ -46,6 +46,7 @@ body {
 #status.on { background: var(--accent); box-shadow: 0 0 5px #d9770666; }
 #status.busy { animation: pulse 1s ease-in-out infinite; }
 #agent {
+  display: none;
   margin-left: 0;
   min-width: 130px;
   max-width: 220px;
@@ -57,6 +58,7 @@ body {
   font-size: 12px;
   outline: none;
 }
+body.agent-switching #agent { display: block; }
 #tools-toggle {
   margin-left: auto;
   border: none;
@@ -694,6 +696,8 @@ body.tools-hidden .tool-activity { display: none; }
 #agent-permission,
 #agent-provider,
 #agent-model-select,
+#agent-fallback-provider,
+#agent-fallback-model-select,
 #agent-base-url,
 #agent-api-key,
 #agent-telegram-token,
@@ -912,6 +916,22 @@ body.tools-hidden .tool-activity { display: none; }
         <div id="agent-model-current" class="field-hint"></div>
       </div>
       <div class="field">
+        <label class="switch-row">
+          <span class="switch-copy">
+            <strong>Ajouter un fallback</strong>
+            <span>Utilise ce modèle si le principal échoue avant de répondre.</span>
+          </span>
+          <input id="agent-fallback-enabled" type="checkbox">
+        </label>
+        <div id="agent-fallback-fields" class="conditional-field">
+          <label for="agent-fallback-provider">Provider fallback</label>
+          <select id="agent-fallback-provider"></select>
+          <label for="agent-fallback-model-select">Modele fallback</label>
+          <select id="agent-fallback-model-select"></select>
+          <div id="agent-fallback-current" class="field-hint"></div>
+        </div>
+      </div>
+      <div class="field">
         <div class="field-title">Telegram</div>
         <label class="switch-row">
           <span class="switch-copy">
@@ -1002,6 +1022,11 @@ const agentApiKeyField = $("agent-api-key-field");
 const agentApiKey = $("agent-api-key");
 const agentModelSelect = $("agent-model-select");
 const agentModelCurrent = $("agent-model-current");
+const agentFallbackEnabled = $("agent-fallback-enabled");
+const agentFallbackFields = $("agent-fallback-fields");
+const agentFallbackProvider = $("agent-fallback-provider");
+const agentFallbackModelSelect = $("agent-fallback-model-select");
+const agentFallbackCurrent = $("agent-fallback-current");
 const agentTelegramEnabled = $("agent-telegram-enabled");
 const agentTelegramFields = $("agent-telegram-fields");
 const agentTelegramToken = $("agent-telegram-token");
@@ -1468,6 +1493,8 @@ async function loadAgents() {
     const res = await apiFetch("/api/agents");
     const data = await res.json();
     const agents = Array.isArray(data.agents) && data.agents.length ? data.agents : [{id: "main"}];
+    const switching = data.agent_switching === true;
+    document.body.classList.toggle("agent-switching", switching);
     agentSelect.innerHTML = "";
     for (const agent of agents) {
       const opt = document.createElement("option");
@@ -1476,13 +1503,18 @@ async function loadAgents() {
       if (agent.model) opt.title = `${agent.provider || ""}:${agent.model}`;
       agentSelect.appendChild(opt);
     }
-    if (!agents.some(agent => agent.id === activeAgent)) activeAgent = agents[0].id;
+    if (!switching) {
+      activeAgent = String(data.default_agent || agents[0].id || "main");
+    } else if (!agents.some(agent => agent.id === activeAgent)) {
+      activeAgent = agents[0].id;
+    }
     agentSelect.value = activeAgent;
     localStorage.setItem(AGENT_KEY, activeAgent);
     setOnline(true);
   } catch (error) {
     console.error(error);
     agentSelect.innerHTML = '<option value="main">main</option>';
+    document.body.classList.remove("agent-switching");
     activeAgent = "main";
   }
 }
@@ -1809,6 +1841,7 @@ async function openAgentDialog(targetAgent) {
       if (choice.id === provider.current) opt.selected = true;
       agentProvider.appendChild(opt);
     }
+    renderFallbackProviderOptions(provider.choices || [], data.fallback || {});
     agentBaseUrl.value = provider.base_url || agentProvider.selectedOptions[0]?.dataset.defaultBaseUrl || "";
     agentApiKey.value = "";
     renderProviderFields();
@@ -1816,6 +1849,13 @@ async function openAgentDialog(targetAgent) {
     const model = data.model || {};
     agentModelCurrent.textContent = `${model.provider || "modele"}:${model.model || ""}`;
     renderAgentModelOptions(model.model || "");
+    const fallback = data.fallback || {};
+    agentFallbackEnabled.checked = Boolean(fallback.enabled);
+    agentFallbackCurrent.textContent = fallback.enabled
+      ? `${fallback.provider || "modele"}:${fallback.model || ""}`
+      : "Aucun fallback configure.";
+    if (fallback.provider) agentFallbackProvider.value = fallback.provider;
+    renderFallbackFields(fallback.model || "");
     const telegram = data.telegram || {};
     agentTelegramEnabled.checked = Boolean(telegram.enabled);
     agentTelegramToken.value = "";
@@ -1875,6 +1915,61 @@ function renderAgentModelOptions(currentModel = "") {
   }
 }
 
+function cloneProviderOption(choice, currentProvider = "") {
+  const opt = document.createElement("option");
+  opt.value = choice.id;
+  opt.textContent = choice.label || choice.id;
+  opt.dataset.defaultModel = choice.default_model || "";
+  opt.dataset.defaultBaseUrl = choice.default_base_url || "";
+  opt._models = Array.isArray(choice.models) ? choice.models : [];
+  if (choice.id === currentProvider) opt.selected = true;
+  return opt;
+}
+
+function renderFallbackProviderOptions(choices, fallback = {}) {
+  agentFallbackProvider.innerHTML = "";
+  for (const choice of choices || []) {
+    agentFallbackProvider.appendChild(cloneProviderOption(choice, fallback.provider || ""));
+  }
+  if (fallback.provider && !Array.from(agentFallbackProvider.options).some(option => option.value === fallback.provider)) {
+    const opt = document.createElement("option");
+    opt.value = fallback.provider;
+    opt.textContent = fallback.provider;
+    opt.selected = true;
+    opt._models = [];
+    agentFallbackProvider.appendChild(opt);
+  }
+}
+
+function renderFallbackFields(currentModel = "") {
+  agentFallbackFields.style.display = agentFallbackEnabled.checked ? "grid" : "none";
+  const selected = agentFallbackProvider.selectedOptions[0];
+  const models = selected?._models || [];
+  const fallback = selected?.dataset.defaultModel || currentModel || "";
+  agentFallbackModelSelect.innerHTML = "";
+  for (const model of models) {
+    const opt = document.createElement("option");
+    opt.value = model.id;
+    opt.textContent = model.label || model.id;
+    if (model.id === currentModel) opt.selected = true;
+    agentFallbackModelSelect.appendChild(opt);
+  }
+  if (!agentFallbackModelSelect.options.length && fallback) {
+    const opt = document.createElement("option");
+    opt.value = fallback;
+    opt.textContent = fallback;
+    opt.selected = true;
+    agentFallbackModelSelect.appendChild(opt);
+  }
+  if (currentModel && !Array.from(agentFallbackModelSelect.options).some(option => option.value === currentModel)) {
+    const opt = document.createElement("option");
+    opt.value = currentModel;
+    opt.textContent = currentModel;
+    opt.selected = true;
+    agentFallbackModelSelect.insertBefore(opt, agentFallbackModelSelect.firstChild);
+  }
+}
+
 function renderWebSearchFields() {
   const webCheckbox = agentSkills.querySelector('input[value="web"]');
   const webEnabled = Boolean(webCheckbox?.checked);
@@ -1899,6 +1994,7 @@ async function applyAgentConfig() {
   const agentId = agentModalBackdrop.dataset.agentId || activeAgent;
   const skills = Array.from(agentSkills.querySelectorAll("input[type=checkbox]:checked")).map(input => input.value);
   const model = agentModelSelect.value || "";
+  const fallbackProviderOption = agentFallbackProvider.selectedOptions[0];
   agentApply.disabled = true;
   try {
     const res = await apiFetch("/api/agent", {
@@ -1912,6 +2008,10 @@ async function applyAgentConfig() {
         model,
         base_url: agentBaseUrl.value.trim(),
         api_key: agentApiKey.value,
+        fallback_enabled: agentFallbackEnabled.checked,
+        fallback_provider: agentFallbackEnabled.checked ? agentFallbackProvider.value : "",
+        fallback_model: agentFallbackEnabled.checked ? agentFallbackModelSelect.value : "",
+        fallback_base_url: agentFallbackEnabled.checked ? (fallbackProviderOption?.dataset.defaultBaseUrl || "") : "",
         web_search_base_url: agentWebSearchUrl.value.trim(),
         telegram_enabled: agentTelegramEnabled.checked,
         telegram_token: agentTelegramToken.value,
@@ -1985,6 +2085,13 @@ agentProvider.onchange = () => {
   agentBaseUrl.value = selected?.dataset.defaultBaseUrl || "";
   renderProviderFields();
   renderAgentModelOptions(selected?.dataset.defaultModel || "");
+};
+agentFallbackEnabled.onchange = () => {
+  renderFallbackFields(agentFallbackModelSelect.value || agentFallbackProvider.selectedOptions[0]?.dataset.defaultModel || "");
+};
+agentFallbackProvider.onchange = () => {
+  const selected = agentFallbackProvider.selectedOptions[0];
+  renderFallbackFields(selected?.dataset.defaultModel || "");
 };
 agentWebSearchUrl.oninput = renderWebSearchFields;
 agentTelegramEnabled.onchange = renderTelegramFields;

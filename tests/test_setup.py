@@ -4,7 +4,7 @@ import yaml
 
 from maurice.host.project import global_config_path
 from maurice.host.setup import _provider_choices, _test_provider_connection, run_setup
-from maurice.kernel.config import load_workspace_config
+from maurice.kernel.config import default_model_config, load_workspace_config
 
 
 def test_run_setup_writes_usage_mode_and_tests_provider(tmp_path, monkeypatch, capsys) -> None:
@@ -174,8 +174,9 @@ def test_run_setup_global_reuses_existing_chatgpt_auth(tmp_path, monkeypatch, ca
     assert config["usage"]["mode"] == "global"
     assert config["provider"]["credential"] == "chatgpt"
     assert credentials["credentials"]["chatgpt"]["value"] == "existing-token"
-    assert bundle.kernel.model.provider == "auth"
-    assert bundle.kernel.model.credential == "chatgpt"
+    model = default_model_config(bundle)
+    assert model["provider"] == "auth"
+    assert model["credential"] == "chatgpt"
     assert "chatgpt" in bundle.agents.agents["main"].credentials
     assert "Auth ChatGPT existante conservée" in capsys.readouterr().out
 

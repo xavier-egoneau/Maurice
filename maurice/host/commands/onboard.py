@@ -69,7 +69,15 @@ from maurice.host.telegram import (
 from maurice.host.workspace import ensure_workspace_content_migrated, initialize_workspace
 from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.compaction import CompactionConfig
-from maurice.kernel.config import ConfigBundle, load_workspace_config, read_yaml_file, write_yaml_file
+from maurice.kernel.config import (
+    ConfigBundle,
+    default_model_config,
+    load_workspace_config,
+    model_profile_id,
+    model_profile_payload,
+    read_yaml_file,
+    write_yaml_file,
+)
 from maurice.kernel.events import EventStore
 from maurice.kernel.loop import AgentLoop, TurnResult
 from maurice.kernel.permissions import PermissionContext
@@ -106,7 +114,7 @@ def _onboarding_existing_values(workspace_root: Path) -> dict[str, Any]:
     host = host_data.get("host") if isinstance(host_data.get("host"), dict) else {}
     gateway = host.get("gateway") if isinstance(host.get("gateway"), dict) else {}
     permissions = kernel.get("permissions") if isinstance(kernel.get("permissions"), dict) else {}
-    model = kernel.get("model") if isinstance(kernel.get("model"), dict) else {}
+    model = kernel.get("model") if isinstance(kernel.get("model"), dict) else _raw_default_model(kernel)
     skills = skills_data.get("skills") if isinstance(skills_data.get("skills"), dict) else {}
     web_skill = skills.get("web") if isinstance(skills.get("web"), dict) else {}
     channels = host.get("channels") if isinstance(host.get("channels"), dict) else {}
@@ -152,6 +160,18 @@ def _onboarding_provider_choice(model: dict[str, Any]) -> str:
     if provider == "ollama" or (provider == "api" and protocol == "ollama_chat"):
         return "ollama"
     return "mock"
+
+
+def _raw_default_model(kernel: dict[str, Any]) -> dict[str, Any]:
+    models = kernel.get("models") if isinstance(kernel.get("models"), dict) else {}
+    entries = models.get("entries") if isinstance(models.get("entries"), dict) else {}
+    default_id = models.get("default")
+    if isinstance(default_id, str) and isinstance(entries.get(default_id), dict):
+        return entries[default_id]
+    for entry in entries.values():
+        if isinstance(entry, dict):
+            return entry
+    return {}
 
 
 
@@ -309,7 +329,7 @@ def _onboard_agent_model(workspace_root: Path, *, agent_id: str) -> None:
     if agent_id not in bundle.agents.agents:
         raise SystemExit(f"Unknown agent: {agent_id}")
     agent = bundle.agents.agents[agent_id]
-    existing = _model_existing_values(agent.model or bundle.kernel.model.model_dump(mode="json"))
+    existing = _model_existing_values(_agent_existing_model_config(bundle, agent))
     print(f"Maurice model onboarding: {agent_id}")
     print("")
     _print_dim("Appuie sur Entree pour conserver la valeur proposee.")
@@ -319,9 +339,15 @@ def _onboard_agent_model(workspace_root: Path, *, agent_id: str) -> None:
         credentials.append(credential_to_allow)
     if agent.default:
         _write_kernel_model(workspace, kernel_model)
-        update_agent(workspace, agent_id=agent_id, clear_model=True, credentials=credentials)
+        update_agent(workspace, agent_id=agent_id, credentials=credentials, model_chain=[])
     else:
-        update_agent(workspace, agent_id=agent_id, model=kernel_model, credentials=credentials)
+        profile_id = _upsert_model_profile(workspace, kernel_model)
+        update_agent(
+            workspace,
+            agent_id=agent_id,
+            credentials=credentials,
+            model_chain=[profile_id],
+        )
     if provider == "chatgpt" and _ask_yes_no("Connect ChatGPT now?", default=False):
         _auth_login("chatgpt", workspace)
     print("")
@@ -333,8 +359,40 @@ def _onboard_agent_model(workspace_root: Path, *, agent_id: str) -> None:
 def _write_kernel_model(workspace: Path, kernel_model: dict[str, object]) -> None:
     kernel_path = kernel_config_path(workspace)
     kernel_data = read_yaml_file(kernel_path)
-    kernel_data.setdefault("kernel", {})["model"] = kernel_model
+    kernel = kernel_data.setdefault("kernel", {})
+    _register_model_profile(kernel, kernel_model, make_default=True)
     write_yaml_file(kernel_path, kernel_data)
+
+
+def _upsert_model_profile(workspace: Path, model: dict[str, object]) -> str:
+    kernel_path = kernel_config_path(workspace)
+    kernel_data = read_yaml_file(kernel_path)
+    kernel = kernel_data.setdefault("kernel", {})
+    profile_id = _register_model_profile(kernel, model, make_default=False)
+    write_yaml_file(kernel_path, kernel_data)
+    return profile_id
+
+
+def _register_model_profile(kernel: dict[str, Any], model: dict[str, object], *, make_default: bool) -> str:
+    payload = model_profile_payload(dict(model))
+    profile_id = model_profile_id(payload)
+    models = kernel.setdefault("models", {})
+    entries = models.setdefault("entries", {})
+    entries[profile_id] = payload
+    if make_default:
+        models["default"] = profile_id
+    return profile_id
+
+
+def _agent_existing_model_config(bundle: ConfigBundle, agent: Any) -> dict[str, Any]:
+    for model_id in agent.model_chain:
+        profile = bundle.kernel.models.entries.get(model_id)
+        if profile is not None:
+            return profile.model_dump(mode="json")
+    default_profile = bundle.kernel.models.entries.get(bundle.kernel.models.default)
+    if default_profile is not None:
+        return default_profile.model_dump(mode="json")
+    return default_model_config(bundle)
 
 
 
@@ -419,8 +477,9 @@ def _write_onboarding_config(
     write_yaml_file(host_config_path(workspace), host_data)
 
     kernel_data = _existing_config(existing, "kernel_data") or read_yaml_file(kernel_config_path(workspace))
-    kernel_data.setdefault("kernel", {})["model"] = kernel_model
-    kernel_data["kernel"].setdefault("permissions", {})["profile"] = profile
+    kernel = kernel_data.setdefault("kernel", {})
+    _register_model_profile(kernel, kernel_model, make_default=True)
+    kernel.setdefault("permissions", {})["profile"] = profile
     write_yaml_file(kernel_config_path(workspace), kernel_data)
 
     fresh_agents_data = read_yaml_file(agents_config_path(workspace))
@@ -716,4 +775,3 @@ def _ask_yes_no(prompt: str, *, default: bool) -> bool:
         if value in {"n", "no", "non"}:
             return False
         print("Please answer yes or no.")
-

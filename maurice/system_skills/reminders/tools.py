@@ -194,7 +194,10 @@ def create(
     if not isinstance(text, str) or not text.strip():
         return _error("invalid_arguments", "reminders.create requires non-empty text.")
     agents = agents or {}
-    targets = _resolve_targets(arguments, agents=agents, current_agent_id=agent_id)
+    try:
+        targets = _resolve_targets(arguments, agents=agents, current_agent_id=agent_id)
+    except ValueError as exc:
+        return _error("invalid_arguments", str(exc))
     if targets:
         return _create_for_targets(
             arguments,
@@ -469,25 +472,30 @@ def _resolve_targets(
     agents: dict[str, dict[str, Any]],
     current_agent_id: str,
 ) -> list[str]:
-    target_agent_id = arguments.get("target_agent_id")
-    target_scope = arguments.get("target_scope")
+    target_agent_id = _optional_target_string(arguments.get("target_agent_id"), field="target_agent_id")
+    target_scope = _optional_target_string(arguments.get("target_scope"), field="target_scope")
     if target_agent_id is None and target_scope is None:
         return []
     if target_agent_id is not None:
-        if not isinstance(target_agent_id, str) or not target_agent_id.strip():
-            raise ValueError("target_agent_id must be a non-empty string.")
-        target = target_agent_id.strip()
+        target = target_agent_id
         if target not in agents:
             raise ValueError(f"Unknown active agent: {target}")
         return [target]
-    if not isinstance(target_scope, str):
-        raise ValueError("target_scope must be a string.")
-    normalized = target_scope.strip().lower()
+    normalized = target_scope.lower()
     if normalized in {"current", "current_agent", "agent"}:
         return [current_agent_id] if current_agent_id in agents else []
     if normalized not in {"all_active_agents", "all", "everyone", "tout_le_monde", "tous_les_agents"}:
         raise ValueError("target_scope must be current_agent or all_active_agents.")
     return sorted(agents)
+
+
+def _optional_target_string(value: Any, *, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string.")
+    cleaned = value.strip()
+    return cleaned or None
 
 
 def _confirmation_message(reminder: Reminder) -> str:

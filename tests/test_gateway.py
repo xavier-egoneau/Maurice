@@ -30,7 +30,7 @@ from maurice.host.gateway import GatewayHttpServer
 from maurice.host.agents import create_agent
 from maurice.host.workspace import initialize_workspace
 from maurice.host.paths import host_config_path, kernel_config_path
-from maurice.kernel.config import load_workspace_config
+from maurice.kernel.config import default_model_config, load_workspace_config
 from maurice.kernel.config import read_yaml_file, write_yaml_file
 from maurice.host.credentials import load_workspace_credentials
 from maurice.kernel.approvals import ApprovalStore
@@ -840,7 +840,82 @@ def test_gateway_http_server_serves_web_ui_and_agents() -> None:
         assert "clipboardData" in html
         assert "user-attachments" in html
         assert "/api/attachment" in html
+        assert agents["agent_switching"] is False
+        assert agents["default_agent"] == "main"
         assert agents["agents"] == [{"id": "main", "provider": "mock", "model": "mock"}]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_gateway_http_server_hides_agent_switching_by_default() -> None:
+    calls = []
+    server = GatewayHttpServer(
+        host="127.0.0.1",
+        port=0,
+        router=MessageRouter(
+            run_turn=lambda **kwargs: calls.append(kwargs) or DummyTurn(),
+            default_agent_id="main",
+        ),
+        web_agents=lambda: [
+            {"id": "main", "provider": "mock", "model": "mock"},
+            {"id": "num2", "provider": "mock", "model": "mock"},
+        ],
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.address
+        with request.urlopen(f"http://{host}:{port}/api/agents", timeout=5) as response:
+            agents = json.loads(response.read().decode("utf-8"))
+        req = request.Request(
+            f"http://{host}:{port}/api/message",
+            data=json.dumps(
+                {
+                    "agent_id": "num2",
+                    "session_id": "web:num2:1",
+                    "peer_id": "web:num2:1",
+                    "message": "Bonjour",
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert agents["agent_switching"] is False
+        assert agents["agents"] == [{"id": "main", "provider": "mock", "model": "mock"}]
+        assert payload["ok"] is True
+        assert calls[0]["agent_id"] == "main"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_gateway_http_server_can_enable_agent_switching_for_development() -> None:
+    server = GatewayHttpServer(
+        host="127.0.0.1",
+        port=0,
+        router=MessageRouter(run_turn=lambda **_kwargs: DummyTurn()),
+        web_agents=lambda: [
+            {"id": "main", "provider": "mock", "model": "mock"},
+            {"id": "num2", "provider": "mock", "model": "mock"},
+        ],
+        web_agent_switching=True,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.address
+        with request.urlopen(f"http://{host}:{port}/api/agents", timeout=5) as response:
+            agents = json.loads(response.read().decode("utf-8"))
+
+        assert agents["agent_switching"] is True
+        assert agents["agents"] == [
+            {"id": "main", "provider": "mock", "model": "mock"},
+            {"id": "num2", "provider": "mock", "model": "mock"},
+        ]
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -1099,7 +1174,7 @@ def test_gateway_model_update_writes_default_agent_kernel_model(tmp_path, monkey
 
     assert status["model"] == "gpt-5"
     assert changed["model"] == "gpt-5.4"
-    assert bundle.kernel.model.name == "gpt-5.4"
+    assert default_model_config(bundle)["name"] == "gpt-5.4"
 
 
 def test_gateway_model_status_labels_include_model_id(tmp_path, monkeypatch) -> None:
@@ -1186,9 +1261,10 @@ def test_gateway_agent_config_update_changes_provider_and_telegram(tmp_path) -> 
     assert changed["updated"] is True
     assert changed["web_search"]["configured"] is True
     assert changed["web_search"]["base_url"] == "https://search.example"
-    assert agent.model["provider"] == "api"
-    assert agent.model["protocol"] == "openai_chat_completions"
-    assert agent.model["name"] == "gpt-4o-mini"
+    assert agent.model_chain == ["api_gpt_4o_mini"]
+    assert bundle.kernel.models.entries["api_gpt_4o_mini"].provider == "api"
+    assert bundle.kernel.models.entries["api_gpt_4o_mini"].protocol == "openai_chat_completions"
+    assert bundle.kernel.models.entries["api_gpt_4o_mini"].name == "gpt-4o-mini"
     assert "openai" in agent.credentials
     assert credentials["openai"].value == "openai-secret"
     assert credentials["telegram_bot_maurice_polo"].value == "telegram-secret"
@@ -1196,6 +1272,45 @@ def test_gateway_agent_config_update_changes_provider_and_telegram(tmp_path) -> 
     assert telegram["allowed_users"] == [123, 456]
     assert "telegram" in agent.channels
     assert skills_data["skills"]["web"]["base_url"] == "https://search.example"
+
+
+def test_gateway_agent_config_update_can_add_model_fallback(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    (runtime / "maurice").mkdir(parents=True)
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+    create_agent(workspace, agent_id="maurice_polo", permission_profile="limited")
+    monkeypatch.setattr(
+        "maurice.host.commands.gateway_server.chatgpt_model_choices",
+        lambda: [("gpt-5.4", "GPT-5.4")],
+    )
+    monkeypatch.setattr(
+        "maurice.host.commands.gateway_server.ollama_model_choices",
+        lambda _base_url, api_key="": [("gemma4", "Gemma 4")],
+    )
+
+    changed = _gateway_agent_config_update(
+        workspace,
+        "maurice_polo",
+        {
+            "provider": "chatgpt",
+            "model": "gpt-5.4",
+            "fallback_enabled": True,
+            "fallback_provider": "ollama_local",
+            "fallback_model": "gemma4",
+            "fallback_base_url": "http://localhost:11434",
+        },
+    )
+    bundle = load_workspace_config(workspace)
+    agent = bundle.agents.agents["maurice_polo"]
+
+    assert changed["updated"] is True
+    assert changed["fallback"]["enabled"] is True
+    assert changed["fallback"]["provider"] == "ollama_local"
+    assert changed["fallback"]["model"] == "gemma4"
+    assert agent.model_chain == ["auth_gpt_5_4", "ollama_gemma4"]
+    assert bundle.kernel.models.entries["auth_gpt_5_4"].credential == "chatgpt"
+    assert bundle.kernel.models.entries["ollama_gemma4"].base_url == "http://localhost:11434"
 
 
 def test_gateway_agent_config_exposes_single_telegram_default_session(tmp_path) -> None:

@@ -213,7 +213,12 @@ def test_mock_provider_can_call_declared_filesystem_tool(tmp_path) -> None:
         executors={"filesystem.read": read_text},
     )
 
-    result = loop.run_turn(agent_id="main", session_id="sess_1", message="Read notes")
+    result = loop.run_turn(
+        agent_id="main",
+        session_id="sess_1",
+        message="Read notes",
+        limits={"max_tool_iterations": 1},
+    )
 
     assert result.tool_results[0].ok
     assert result.tool_results[0].data["content"] == "hello from disk"
@@ -259,6 +264,57 @@ def test_sanitize_messages_drops_orphan_tool_results() -> None:
     )
 
     assert [message["role"] for message in messages] == ["user", "tool_call", "tool"]
+
+
+def test_sanitize_messages_drops_unanswered_tool_calls() -> None:
+    messages = _sanitize_messages(
+        [
+            {"role": "user", "content": "rappel", "metadata": {}},
+            {
+                "role": "tool_call",
+                "content": "",
+                "metadata": {
+                    "tool_call_id": "call_missing",
+                    "tool_name": "reminders.create",
+                    "tool_arguments": {"text": "Faire a manger"},
+                },
+            },
+        ]
+    )
+
+    assert [message["role"] for message in messages] == ["user"]
+
+
+def test_loop_records_tool_output_when_executor_raises(tmp_path) -> None:
+    provider = MockProvider(
+        [
+            {
+                "type": "tool_call",
+                "tool_call": {
+                    "id": "call_1",
+                    "name": "filesystem.read",
+                    "arguments": {"path": "notes.md"},
+                },
+            },
+            {"type": "status", "status": "completed"},
+        ]
+    )
+
+    def broken_executor(_arguments):
+        raise ValueError("boom")
+
+    loop = make_loop(tmp_path, provider, executors={"filesystem.read": broken_executor})
+
+    result = loop.run_turn(
+        agent_id="main",
+        session_id="sess_1",
+        message="Read notes",
+        limits={"max_tool_iterations": 1},
+    )
+
+    assert result.tool_results[0].ok is False
+    assert result.tool_results[0].error.code == "tool_exception"
+    assert [message.role for message in result.session.messages] == ["user", "tool_call", "tool"]
 
 
 def test_loop_can_continue_after_tool_result_when_limit_allows(tmp_path) -> None:

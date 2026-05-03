@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import Field
 
 from maurice.host.monitoring import build_monitoring_snapshot
+from maurice.host.runtime import _effective_model_config
 from maurice.kernel.config import ConfigBundle, load_workspace_config
 from maurice.kernel.contracts import Event, MauriceModel
 from maurice.kernel.events import EventStore
@@ -341,10 +342,7 @@ def _model_label(bundle: ConfigBundle, agent_id: str) -> str:
 
 def _effective_model(bundle: ConfigBundle, agent_id: str) -> dict:
     agent = bundle.agents.agents.get(agent_id)
-    override = agent.model if agent else None
-    if isinstance(override, dict):
-        return override
-    return bundle.kernel.model.model_dump(mode="json")
+    return _effective_model_config(bundle, agent)
 
 
 def _agent_status(raw: str, active: bool) -> str:

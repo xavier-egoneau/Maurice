@@ -3,7 +3,8 @@ from __future__ import annotations
 from maurice.host.workspace import initialize_workspace
 from maurice.kernel.events import EventStore
 from maurice.kernel.permissions import PermissionContext
-from maurice.kernel.config import load_workspace_config
+from maurice.host.paths import kernel_config_path
+from maurice.kernel.config import load_workspace_config, read_yaml_file, write_yaml_file
 from maurice.system_skills.host.tools import (
     agent_create,
     agent_delete,
@@ -11,6 +12,9 @@ from maurice.system_skills.host.tools import (
     agent_update,
     logs,
     status,
+    subagent_run_create,
+    subagent_template_create,
+    subagent_template_list,
     telegram_bind,
 )
 
@@ -85,6 +89,56 @@ def test_host_agent_tools_manage_durable_agents(tmp_path) -> None:
     assert updated.ok is True
     assert updated.data["agent"]["permission_profile"] == "limited"
     assert deleted.ok is True
+
+
+def test_host_subagent_template_tools_create_template_and_run(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+    kernel_path = kernel_config_path(workspace)
+    kernel_data = read_yaml_file(kernel_path)
+    kernel_data["kernel"]["models"]["entries"]["ollama_gemma4"] = {
+        "provider": "ollama",
+        "protocol": "ollama_chat",
+        "name": "gemma4",
+        "base_url": "http://localhost:11434",
+        "credential": "ollama",
+        "tier": "middle",
+        "capabilities": ["text", "tools"],
+        "privacy": "local",
+    }
+    write_yaml_file(kernel_path, kernel_data)
+    context = PermissionContext(workspace_root=str(workspace), runtime_root=str(runtime))
+
+    created = subagent_template_create(
+        {
+            "template_id": "coder",
+            "description": "Coding worker",
+            "permission_profile": "safe",
+            "skills": ["filesystem"],
+            "credentials": ["ollama"],
+            "model_chain": ["ollama_gemma4"],
+        },
+        context,
+    )
+    listed = subagent_template_list({}, context)
+    run = subagent_run_create(
+        {
+            "task": "Run tests.",
+            "template_id": "coder",
+            "write_paths": ["$workspace/runs/**"],
+            "permission_classes": ["fs.read"],
+        },
+        context,
+        agent_id="main",
+    )
+
+    assert created.ok is True
+    assert listed.data["templates"][0]["model_chain"] == ["ollama_gemma4"]
+    assert run.ok is True
+    assert run.data["template"]["model_chain"] == ["ollama_gemma4"]
+    assert (workspace / "runs" / run.data["run"]["id"] / "mission.json").is_file()
 
 
 def test_host_telegram_bind_connects_existing_bot_to_agent(tmp_path) -> None:

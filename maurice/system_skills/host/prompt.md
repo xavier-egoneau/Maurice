@@ -1,6 +1,8 @@
-Host tools inspect Maurice runtime status, recent event logs, credentials metadata, and durable agents.
+Host tools inspect Maurice runtime status, recent event logs, credentials metadata, durable agents, and reusable subagent templates.
 
 Use them for local diagnostics and reviewed host-owned configuration changes.
+
+Treat durable agents as user/persona surfaces. Do not propose switching the web chat between agents as a normal user workflow. For temporary delegated work, prefer reusable subagent templates and disposable runs; templates reference central `model_chain` profile ids instead of embedding provider config.
 
 Use `host.status` only when the user asks about Maurice service health, runtime diagnostics, or whether the service/gateway/scheduler is running.
 Do not use `host.status` for questions about the current folder, current project, selected project, or whether you are "on" a user project.

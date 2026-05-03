@@ -460,7 +460,7 @@ def _initialize_global_workspace(workspace: Path, permission_profile: str) -> Pa
 
 def _configure_global_workspace_provider(workspace: Path, config_lines: list[str], permission_profile: str) -> None:
     from maurice.host.paths import agents_config_path, kernel_config_path
-    from maurice.kernel.config import read_yaml_file, write_yaml_file
+    from maurice.kernel.config import model_profile_id, model_profile_payload, read_yaml_file, write_yaml_file
     import yaml
 
     config = yaml.safe_load("\n".join(config_lines) + "\n") or {}
@@ -470,7 +470,12 @@ def _configure_global_workspace_provider(workspace: Path, config_lines: list[str
 
     kernel_model = _kernel_model_from_provider(provider)
     kernel_data = read_yaml_file(kernel_config_path(workspace))
-    kernel_data.setdefault("kernel", {})["model"] = kernel_model
+    kernel = kernel_data.setdefault("kernel", {})
+    payload = model_profile_payload(kernel_model)
+    profile_id = model_profile_id(payload)
+    models = kernel.setdefault("models", {})
+    models["default"] = profile_id
+    models.setdefault("entries", {})[profile_id] = payload
     kernel_data["kernel"].setdefault("permissions", {})["profile"] = permission_profile
     write_yaml_file(kernel_config_path(workspace), kernel_data)
 

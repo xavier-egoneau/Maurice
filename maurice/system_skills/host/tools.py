@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from maurice.host.agents import create_agent, delete_agent, list_agents, update_agent
 from maurice.host.credentials import load_workspace_credentials
-from maurice.host.paths import host_config_path
+from maurice.host.paths import host_config_path, kernel_config_path
 from maurice.host.secret_capture import request_secret_capture
 from maurice.host.service import inspect_service_status, read_service_logs
-from maurice.kernel.config import read_yaml_file, write_yaml_file
+from maurice.kernel.config import load_workspace_config, read_yaml_file, write_yaml_file
 from maurice.kernel.contracts import ToolResult
+from maurice.kernel.events import EventStore
 from maurice.kernel.permissions import PermissionContext
+from maurice.kernel.runs import RunStore
 
 
 def build_executors(ctx: Any) -> dict[str, Any]:
@@ -36,6 +39,13 @@ def host_tool_executors(
         "host.agent_create": lambda arguments: agent_create(arguments, context),
         "host.agent_update": lambda arguments: agent_update(arguments, context),
         "host.agent_delete": lambda arguments: agent_delete(arguments, context),
+        "host.subagent_template_list": lambda arguments: subagent_template_list(arguments, context),
+        "host.subagent_template_create": lambda arguments: subagent_template_create(arguments, context),
+        "host.subagent_run_create": lambda arguments: subagent_run_create(
+            arguments,
+            context,
+            agent_id=agent_id,
+        ),
         "host.telegram_bind": lambda arguments: telegram_bind(arguments, context),
         "host.request_secret": lambda arguments: request_secret(
             arguments,
@@ -50,6 +60,13 @@ def host_tool_executors(
         "maurice.system_skills.host.tools.agent_create": lambda arguments: agent_create(arguments, context),
         "maurice.system_skills.host.tools.agent_update": lambda arguments: agent_update(arguments, context),
         "maurice.system_skills.host.tools.agent_delete": lambda arguments: agent_delete(arguments, context),
+        "maurice.system_skills.host.tools.subagent_template_list": lambda arguments: subagent_template_list(arguments, context),
+        "maurice.system_skills.host.tools.subagent_template_create": lambda arguments: subagent_template_create(arguments, context),
+        "maurice.system_skills.host.tools.subagent_run_create": lambda arguments: subagent_run_create(
+            arguments,
+            context,
+            agent_id=agent_id,
+        ),
         "maurice.system_skills.host.tools.telegram_bind": lambda arguments: telegram_bind(arguments, context),
         "maurice.system_skills.host.tools.request_secret": lambda arguments: request_secret(
             arguments,
@@ -149,7 +166,7 @@ def agent_create(arguments: dict[str, Any], context: PermissionContext) -> ToolR
             skills=_optional_string_list(arguments.get("skills"), "skills"),
             credentials=_optional_string_list(arguments.get("credentials"), "credentials"),
             channels=_optional_string_list(arguments.get("channels"), "channels"),
-            model=_optional_dict(arguments.get("model"), "model"),
+            model_chain=_optional_string_list(arguments.get("model_chain"), "model_chain"),
             make_default=bool(arguments.get("make_default", False)),
             confirmed_permission_elevation=True,
         )
@@ -178,8 +195,7 @@ def agent_update(arguments: dict[str, Any], context: PermissionContext) -> ToolR
             skills=_optional_string_list(arguments.get("skills"), "skills"),
             credentials=_optional_string_list(arguments.get("credentials"), "credentials"),
             channels=_optional_string_list(arguments.get("channels"), "channels"),
-            model=_optional_dict(arguments.get("model"), "model"),
-            clear_model=bool(arguments.get("clear_model", False)),
+            model_chain=_optional_string_list(arguments.get("model_chain"), "model_chain"),
             make_default=_optional_bool(arguments.get("make_default")),
             confirmed_permission_elevation=True,
         )
@@ -215,6 +231,156 @@ def agent_delete(arguments: dict[str, Any], context: PermissionContext) -> ToolR
         trust="local_mutable",
         artifacts=[],
         events=[{"name": "host.agent.deleted", "payload": {"agent_id": agent.id}}],
+        error=None,
+    )
+
+
+def subagent_template_list(arguments: dict[str, Any], context: PermissionContext) -> ToolResult:
+    del arguments
+    bundle = load_workspace_config(_workspace_root(context))
+    templates = [
+        {
+            "id": template.id,
+            "description": template.description,
+            "skills": list(template.skills),
+            "credentials": list(template.credentials),
+            "permission_profile": template.permission_profile,
+            "model_chain": list(template.model_chain),
+        }
+        for template in sorted(bundle.kernel.subagents.templates.values(), key=lambda item: item.id)
+    ]
+    models = [
+        {"id": profile_id, **profile.model_dump(mode="json")}
+        for profile_id, profile in sorted(bundle.kernel.models.entries.items())
+    ]
+    return ToolResult(
+        ok=True,
+        summary=f"{len(templates)} subagent template(s) configured.",
+        data={"templates": templates, "models": models},
+        trust="local_mutable",
+        artifacts=[],
+        events=[{"name": "host.subagent_templates.listed", "payload": {"count": len(templates)}}],
+        error=None,
+    )
+
+
+def subagent_template_create(arguments: dict[str, Any], context: PermissionContext) -> ToolResult:
+    template_id = arguments.get("template_id")
+    if not isinstance(template_id, str) or not template_id.strip():
+        return _error("invalid_arguments", "host.subagent_template_create requires template_id.")
+    template_id = template_id.strip()
+    description = _optional_string(arguments.get("description")) or ""
+    permission_profile = _optional_string(arguments.get("permission_profile")) or "safe"
+    if permission_profile not in {"safe", "limited", "power"}:
+        return _error("invalid_arguments", "permission_profile must be safe, limited or power.")
+    skills = _optional_string_list(arguments.get("skills"), "skills") or []
+    credentials = _optional_string_list(arguments.get("credentials"), "credentials") or []
+    model_chain = _optional_string_list(arguments.get("model_chain"), "model_chain") or []
+
+    workspace = _workspace_root(context)
+    bundle = load_workspace_config(workspace)
+    if template_id in bundle.kernel.subagents.templates:
+        return _error("template_exists", f"Subagent template already exists: {template_id}")
+    missing = [profile_id for profile_id in model_chain if profile_id not in bundle.kernel.models.entries]
+    if missing:
+        return _error("unknown_model_profile", f"Unknown model profile(s): {', '.join(missing)}")
+
+    kernel_path = kernel_config_path(workspace)
+    kernel_data = read_yaml_file(kernel_path)
+    template = {
+        "id": template_id,
+        "description": description,
+        "skills": skills,
+        "credentials": credentials,
+        "permission_profile": permission_profile,
+        "channels": [],
+        "model_chain": model_chain,
+    }
+    kernel_data.setdefault("kernel", {}).setdefault("subagents", {}).setdefault("templates", {})[template_id] = template
+    write_yaml_file(kernel_path, kernel_data)
+    return ToolResult(
+        ok=True,
+        summary=f"Subagent template created: {template_id}.",
+        data={"template": template},
+        trust="local_mutable",
+        artifacts=[],
+        events=[{"name": "host.subagent_template.created", "payload": {"template_id": template_id}}],
+        error=None,
+    )
+
+
+def subagent_run_create(
+    arguments: dict[str, Any],
+    context: PermissionContext,
+    *,
+    agent_id: str | None,
+) -> ToolResult:
+    task = arguments.get("task")
+    if not isinstance(task, str) or not task.strip():
+        return _error("invalid_arguments", "host.subagent_run_create requires task.")
+    template_id = arguments.get("template_id")
+    if not isinstance(template_id, str) or not template_id.strip():
+        return _error("invalid_arguments", "host.subagent_run_create requires template_id.")
+    workspace = _workspace_root(context)
+    bundle = load_workspace_config(workspace)
+    parent_id = _optional_string(arguments.get("parent_agent_id")) or agent_id
+    if not parent_id or parent_id not in bundle.agents.agents:
+        return _error("unknown_agent", "Unknown parent agent.")
+    parent = bundle.agents.agents[parent_id]
+    try:
+        template = bundle.kernel.subagents.templates[template_id.strip()]
+    except KeyError:
+        return _error("unknown_template", f"Unknown subagent template: {template_id}")
+    missing = [profile_id for profile_id in template.model_chain if profile_id not in bundle.kernel.models.entries]
+    if missing:
+        return _error("unknown_model_profile", f"Unknown model profile(s): {', '.join(missing)}")
+
+    write_paths = _optional_string_list(arguments.get("write_paths"), "write_paths") or []
+    permission_classes = _optional_string_list(arguments.get("permission_classes"), "permission_classes") or []
+    constraints = _optional_string_list(arguments.get("constraints"), "constraints") or []
+    plan = _optional_string_list(arguments.get("plan"), "plan") or []
+    event_stream = Path(parent.event_stream) if parent.event_stream else workspace / "agents" / parent.id / "events.jsonl"
+    store = RunStore(
+        workspace / "agents" / parent.id / "runs.json",
+        workspace_root=workspace,
+        event_store=EventStore(event_stream),
+    )
+    profile = {
+        "id": template.id,
+        "template": True,
+        "description": template.description,
+        "skills": list(template.skills),
+        "credentials": list(template.credentials),
+        "permission_profile": template.permission_profile,
+        "channels": list(template.channels),
+        "model_chain": list(template.model_chain),
+    }
+    run = store.create(
+        parent_agent_id=parent.id,
+        task=task.strip(),
+        base_agent=template.id,
+        base_agent_profile=profile,
+        context_summary=_optional_string(arguments.get("context_summary")) or "",
+        relevant_files=[],
+        constraints=constraints,
+        plan=plan,
+        write_scope={"paths": write_paths},
+        permission_scope={"classes": permission_classes},
+        dependency_policy={"requires_parent_approval": True},
+        output_contract={"requires_self_check": bool(arguments.get("requires_self_check", False))},
+    )
+    return ToolResult(
+        ok=True,
+        summary=f"Subagent run created: {run.id}.",
+        data={"run": run.model_dump(mode="json"), "template": profile},
+        trust="local_mutable",
+        artifacts=[{"type": "path", "path": str(workspace / "runs" / run.id / "mission.json")}],
+        events=[
+            {
+                "name": "host.subagent_run.created",
+                "payload": {"run_id": run.id, "template_id": template.id, "parent_agent_id": parent.id},
+            }
+        ],
         error=None,
     )
 
@@ -364,7 +530,7 @@ def _agent_record(agent) -> dict[str, Any]:
         "permission_profile": agent.permission_profile,
         "status": agent.status,
         "channels": list(agent.channels),
-        "model": agent.model,
+        "model_chain": list(agent.model_chain),
         "event_stream": agent.event_stream,
     }
 

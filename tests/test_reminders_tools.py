@@ -236,6 +236,26 @@ def test_reminder_create_can_target_named_agent(tmp_path) -> None:
     assert ReminderStore(tmp_path / "workspace" / "agents" / "paul" / "reminders" / "reminders.json").list()[0].text == "Dormir"
 
 
+def test_reminder_create_ignores_empty_target_agent_id(tmp_path) -> None:
+    permission_context = agent_context(tmp_path, "main")
+    run_at = datetime.now(UTC) + timedelta(minutes=10)
+
+    created = create(
+        {"text": "Faire a manger", "run_at": run_at.isoformat(), "target_agent_id": ""},
+        permission_context,
+        agents={
+            "main": {"id": "main", "workspace": str(tmp_path / "workspace" / "agents" / "main")},
+            "paul": {"id": "paul", "workspace": str(tmp_path / "workspace" / "agents" / "paul")},
+        },
+        agent_id="main",
+    )
+
+    assert created.ok
+    assert created.data["reminder"]["text"] == "Faire a manger"
+    assert ReminderStore(tmp_path / "workspace" / "agents" / "main" / "reminders" / "reminders.json").list()[0].text == "Faire a manger"
+    assert not (tmp_path / "workspace" / "agents" / "paul" / "reminders" / "reminders.json").exists()
+
+
 def test_recurring_reminder_uses_interval_and_stays_scheduled_after_fire(tmp_path) -> None:
     permission_context = context(tmp_path)
     job_store = JobStore(tmp_path / "workspace" / "agents" / "main" / "jobs.json")

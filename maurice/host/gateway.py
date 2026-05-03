@@ -514,6 +514,7 @@ class GatewayHttpServer:
         web_model_update: Callable[[str, str], dict[str, Any]] | None = None,
         web_agent_config: Callable[[str], dict[str, Any]] | None = None,
         web_agent_update: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+        web_agent_switching: bool = False,
         web_uploads: WebUploads | None = None,
         web_attachment: WebAttachment | None = None,
         web_turn_cancel: WebTurnCancel | None = None,
@@ -537,6 +538,7 @@ class GatewayHttpServer:
             web_model_update=web_model_update,
             web_agent_config=web_agent_config,
             web_agent_update=web_agent_update,
+            web_agent_switching=web_agent_switching,
             web_uploads=web_uploads,
             web_attachment=web_attachment,
             web_turn_cancel=web_turn_cancel,
@@ -571,6 +573,7 @@ class GatewayHttpServer:
         web_model_update: Callable[[str, str], dict[str, Any]] | None,
         web_agent_config: Callable[[str], dict[str, Any]] | None,
         web_agent_update: Callable[[str, dict[str, Any]], dict[str, Any]] | None,
+        web_agent_switching: bool,
         web_uploads: WebUploads | None,
         web_attachment: WebAttachment | None,
         web_turn_cancel: WebTurnCancel | None,
@@ -593,14 +596,24 @@ class GatewayHttpServer:
                         self._write_json(403, {"ok": False, "error": "forbidden"})
                         return
                     agents = web_agents() if web_agents is not None else [{"id": router.default_agent_id}]
-                    self._write_json(200, {"ok": True, "agents": agents})
+                    if not web_agent_switching:
+                        agents = self._single_web_agent(agents)
+                    self._write_json(
+                        200,
+                        {
+                            "ok": True,
+                            "agents": agents,
+                            "agent_switching": bool(web_agent_switching),
+                            "default_agent": router.default_agent_id,
+                        },
+                    )
                     return
                 if parsed.path == "/api/session":
                     if not self._authorized(parsed):
                         self._write_json(403, {"ok": False, "error": "forbidden"})
                         return
                     query = parse_qs(parsed.query)
-                    agent_id = query.get("agent_id", [router.default_agent_id])[0]
+                    agent_id = self._web_agent_id(query.get("agent_id", [router.default_agent_id])[0])
                     session_id = query.get("session_id", [""])[0]
                     if not session_id:
                         self._write_json(400, {"ok": False, "error": "missing_session_id"})
@@ -667,7 +680,7 @@ class GatewayHttpServer:
                         self._write_json(403, {"ok": False, "error": "forbidden"})
                         return
                     query = parse_qs(parsed.query)
-                    agent_id = query.get("agent_id", [router.default_agent_id])[0]
+                    agent_id = self._web_agent_id(query.get("agent_id", [router.default_agent_id])[0])
                     payload = (
                         web_model_status(agent_id)
                         if web_model_status is not None
@@ -680,7 +693,7 @@ class GatewayHttpServer:
                         self._write_json(403, {"ok": False, "error": "forbidden"})
                         return
                     query = parse_qs(parsed.query)
-                    agent_id = query.get("agent_id", [router.default_agent_id])[0]
+                    agent_id = self._web_agent_id(query.get("agent_id", [router.default_agent_id])[0])
                     payload = (
                         web_agent_config(agent_id)
                         if web_agent_config is not None
@@ -698,7 +711,7 @@ class GatewayHttpServer:
                         return
                     try:
                         payload = self._read_payload()
-                        agent_id = str(payload.get("agent_id") or router.default_agent_id)
+                        agent_id = self._web_agent_id(payload.get("agent_id"))
                         session_id = str(payload.get("session_id") or "")
                         local_cancelled = router.cancel(agent_id, session_id)
                         remote_cancelled = (
@@ -723,7 +736,7 @@ class GatewayHttpServer:
                         return
                     try:
                         payload = self._read_payload()
-                        agent_id = str(payload.get("agent_id") or router.default_agent_id)
+                        agent_id = self._web_agent_id(payload.get("agent_id"))
                         session_id = payload.get("session_id")
                         session_id = str(session_id) if session_id else ""
                         message_text = str(payload.get("message") or payload.get("text") or "")
@@ -763,7 +776,7 @@ class GatewayHttpServer:
                         return
                     try:
                         payload = self._read_payload()
-                        agent_id = str(payload.get("agent_id") or router.default_agent_id)
+                        agent_id = self._web_agent_id(payload.get("agent_id"))
                         model = str(payload.get("model") or "").strip()
                         if not model:
                             self._write_json(400, {"ok": False, "error": "missing_model"})
@@ -784,7 +797,7 @@ class GatewayHttpServer:
                         return
                     try:
                         payload = self._read_payload()
-                        agent_id = str(payload.get("agent_id") or router.default_agent_id)
+                        agent_id = self._web_agent_id(payload.get("agent_id"))
                         result = (
                             web_agent_update(agent_id, payload)
                             if web_agent_update is not None
@@ -834,7 +847,7 @@ class GatewayHttpServer:
                     self._write_json(403, {"ok": False, "error": "forbidden"})
                     return
                 query = parse_qs(parsed.query)
-                agent_id = query.get("agent_id", [router.default_agent_id])[0]
+                agent_id = self._web_agent_id(query.get("agent_id", [router.default_agent_id])[0])
                 session_id = query.get("session_id", [""])[0]
                 if not session_id:
                     self._write_json(400, {"ok": False, "error": "missing_session_id"})
@@ -861,6 +874,19 @@ class GatewayHttpServer:
                 if not isinstance(payload, dict):
                     raise ValueError("JSON payload must be an object.")
                 return payload
+
+            def _web_agent_id(self, requested: Any) -> str:
+                if not web_agent_switching:
+                    return router.default_agent_id
+                return str(requested or router.default_agent_id)
+
+            def _single_web_agent(self, agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                for agent in agents:
+                    if str(agent.get("id") or "") == router.default_agent_id:
+                        return [agent]
+                if agents:
+                    return [agents[0]]
+                return [{"id": router.default_agent_id}]
 
             def _channel_path(self) -> str | None:
                 prefix = "/channels/"
