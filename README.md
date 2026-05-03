@@ -97,6 +97,20 @@ as the active project. Use `--dir` to force a folder context or `--workspace` to
 force a workspace context while still keeping the launch folder as the active
 project.
 
+Maurice intentionally has one active project per chat window or session. The
+active project is the folder used for relative paths, Git state, project memory,
+and dev commands such as `/plan`, `/dev`, `/check`, `/review`, and `/commit`.
+You can still open several terminals or browser chats at the same time: one
+`maurice web` launched from `app-a` can work on `app-a`, while another launched
+from `app-b` works on `app-b`. The limit is only inside one conversation: there
+is one default project target at a time.
+
+In global mode, each agent has its own list of projects it has already seen,
+stored under `<workspace>/agents/<agent-id>/projects.json`. Maurice does not
+scan the disk or treat every IDE-open folder as active. A remembered project
+becomes active only when you launch Maurice from that folder or select it
+explicitly.
+
 ```bash
 maurice start          # start daemon services and open the browser chat
 maurice restart        # restart daemon services after config or code changes
@@ -134,7 +148,8 @@ When `dev` is enabled, project commands work against the active context:
 In folder context, the project is the current folder. In desktop context,
 `maurice web` also treats the launch folder as the active project, even when it
 is outside the assistant workspace. Maurice still offers `/projects` and
-`/project open <name>` for workspace-owned projects and older workflows.
+`/project open <name>` for workspace-owned projects, remembered projects, and
+older workflows.
 
 ## Uninstall
 

@@ -31,6 +31,7 @@ def run_autonomous_command(
     command_name: str,
     autonomy_config: dict[str, Any],
     original_text: str,
+    cancel_event: Any | None = None,
 ) -> tuple[TurnResult, bool]:
     """Run the autonomous continuation loop after an initial command turn.
 
@@ -81,6 +82,7 @@ def run_autonomous_command(
                 "visible_user_message": original_text,
                 "autonomy_continuation": continuation_count,
             },
+            cancel_event=cancel_event,
         )
         tool_activity = bool(turn.tool_results)
         any_tool_activity = any_tool_activity or tool_activity

@@ -43,6 +43,34 @@ It carries:
 The central rule is simple: once a context is resolved, host wiring should use
 `ctx.*` instead of re-deriving paths from legacy names.
 
+## Active Project
+
+An active project is the single folder that project-relative work targets for a
+chat window, terminal session, channel session, or API session. It is where
+relative file paths resolve first, where Git status and diffs are read, and
+where project memory such as
+`.maurice/PLAN.md`, `.maurice/DECISIONS.md`, `.maurice/AGENTS.md`, and
+`.maurice/dreams.md` lives.
+
+Maurice deliberately keeps only one active project per conversation session.
+Several sessions can run at the same time with different active projects, for
+example two `maurice web` processes launched from two different repositories.
+Within one session, ambiguous project work has a single default target. This is
+a context rule, not a project discovery system:
+
+- In folder context, the active project is the folder context root.
+- In global web context, the active project is the folder where `maurice web`
+  was launched, when one is available.
+- In older global dev flows, the active project may be an agent-owned project
+  selected under `<workspace>/agents/<agent-id>/content/`.
+
+Global agents may keep a per-agent list of projects they have already seen. The
+list is stored under `<workspace>/agents/<agent-id>/projects.json`, next to that
+agent's content and runtime state. That list is only history: Maurice records a
+project when it was explicitly active; it does not scan the filesystem or infer
+active projects from an IDE. A known project becomes active only when the user
+launches a context from that folder or selects it explicitly.
+
 ## Folder Context
 
 Folder context is project-centered and transient. It is used when a user stands
@@ -127,6 +155,8 @@ At this level:
   assistant workspace.
 - `$project` points at `active_project_root` when one is available; otherwise it
   falls back to the agent content project selected by legacy dev state.
+- known projects can be listed per agent, but they are not active unless selected
+  for the current chat window, channel session, or API session.
 - sessions are shared under `<workspace>/sessions`.
 - per-agent events and approvals live under `<workspace>/agents/<agent-id>/`.
 - memory is `<workspace>/skills/memory/memory.sqlite`.

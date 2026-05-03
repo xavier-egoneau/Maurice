@@ -261,6 +261,24 @@ class TestMauriceServer:
         t.join(timeout=2.0)
         assert not server._running
 
+    def test_serve_can_run_inside_worker_thread(self, tmp_path):
+        _write_mock_config(tmp_path)
+        server = MauriceServer(tmp_path)
+        socket_path = tmp_path / "maurice.sock"
+        thread = _start_server_thread(server, socket_path)
+
+        assert thread.is_alive()
+
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(str(socket_path))
+        buf = bytearray()
+        _send(client, {"type": "shutdown"})
+        assert _recv_line(client, buf) == {"type": "ok"}
+        client.close()
+        thread.join(timeout=2.0)
+
+        assert not thread.is_alive()
+
     def test_approval_protocol_roundtrip(self, tmp_path):
         """Protocol: client handles approval_required, sends approval, gets done."""
         srv_sock, cli_sock = self._make_pair()

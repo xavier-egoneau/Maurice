@@ -231,7 +231,7 @@ def test_loader_loads_system_host_skill() -> None:
     assert "runtime status" in skill.prompt
     assert "Ask exactly one question at a time" in skill.prompt
     assert "`filesystem` : lire/ecrire des fichiers" in skill.prompt
-    assert "`self_update` : proposer des ameliorations" in skill.prompt
+    assert "`self_update` : signaler des bugs Maurice" in skill.prompt
     assert "Envoie-moi maintenant le token BotFather" in skill.prompt
     assert "Quels ids Telegram" in skill.prompt
     assert registry.tools["host.status"].permission.permission_class == "host.control"
@@ -316,8 +316,17 @@ def test_loader_loads_system_self_update_skill() -> None:
 
     assert skill.state == SkillState.LOADED
     assert "self_update.propose" in registry.tools
+    assert "self_update.report_bug" in registry.tools
+    assert "/auto_update_list" in registry.commands
+    assert "/auto_update_show" in registry.commands
+    assert "/auto_update_validate" in registry.commands
+    assert "/auto_update_apply" in registry.commands
     assert "proposals" in skill.prompt
+    assert "`self_update.report_bug`" in skill.prompt
+    assert "Do not edit files in `maurice/system_skills/`" in skill.prompt
+    assert "`system_skill`, `target_name` `dev`" in skill.prompt
     assert registry.tools["self_update.propose"].permission.permission_class == "runtime.write"
+    assert registry.tools["self_update.report_bug"].permission.permission_class == "fs.write"
 
 
 def test_loader_reads_prompt_and_dream_fragments(tmp_path) -> None:

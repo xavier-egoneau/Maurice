@@ -171,6 +171,7 @@ class MauriceServer:
         self._last_activity = time.monotonic()
         self._lock = threading.Lock()
         self._active_connections = 0
+        self._active_turns: dict[tuple[str, str], threading.Event] = {}
         self._running = True
 
         self.ctx.sessions_path.mkdir(parents=True, exist_ok=True)
@@ -295,6 +296,13 @@ class MauriceServer:
                     self._running = False
                     _send(conn, {"type": "ok"})
                     break
+                if kind == "cancel_turn":
+                    cancelled = self._cancel_turn(
+                        agent_id=msg.get("agent_id"),
+                        session_id=str(msg.get("session_id") or "default"),
+                    )
+                    _send(conn, {"type": "cancelled", "cancelled": cancelled})
+                    continue
                 if kind == "turn":
                     self._last_activity = time.monotonic()
                     self._handle_turn(conn, buf, msg)
@@ -415,19 +423,24 @@ class MauriceServer:
         source_metadata: dict | None = None,
         message_metadata: dict | None = None,
     ) -> None:
+        cancel_event = self._register_turn(agent_id=agent_id or "main", session_id=session_id)
         if self.ctx.scope == "global":
-            self._run_global_agent_turn(
-                conn,
-                buf,
-                message,
-                session_id,
-                agent_id=agent_id,
-                limits=limits,
-                source_channel=source_channel,
-                source_peer_id=source_peer_id,
-                source_metadata=source_metadata,
-                message_metadata=message_metadata,
-            )
+            try:
+                self._run_global_agent_turn(
+                    conn,
+                    buf,
+                    message,
+                    session_id,
+                    agent_id=agent_id,
+                    limits=limits,
+                    source_channel=source_channel,
+                    source_peer_id=source_peer_id,
+                    source_metadata=source_metadata,
+                    message_metadata=message_metadata,
+                    cancel_event=cancel_event,
+                )
+            finally:
+                self._unregister_turn(agent_id=agent_id or "main", session_id=session_id, event=cancel_event)
             return
         provider = _build_provider(self.cfg, message)
         loop = self._make_loop(provider, conn, buf)
@@ -438,12 +451,18 @@ class MauriceServer:
                 message=message,
                 limits=limits,
                 message_metadata=message_metadata,
+                cancel_event=cancel_event,
             )
             if result.error:
                 _send(conn, {"type": "error", "message": result.error})
             for tr in result.tool_results:
-                _send(conn, {"type": "tool_result", "summary": tr.summary, "ok": tr.ok,
-                             "error": tr.error.code if tr.error else None})
+                _send(conn, {
+                    "type": "tool_result",
+                    "summary": tr.summary,
+                    "ok": tr.ok,
+                    "error": tr.error.code if tr.error else None,
+                    "artifacts": [artifact.model_dump(mode="json") for artifact in tr.artifacts],
+                })
             _send(conn, {
                 "type": "done",
                 "status": result.status,
@@ -455,6 +474,8 @@ class MauriceServer:
             import traceback
             _send(conn, {"type": "error", "message": traceback.format_exc()})
             _send(conn, {"type": "done", "status": "failed"})
+        finally:
+            self._unregister_turn(agent_id=agent_id or "main", session_id=session_id, event=cancel_event)
 
     def _ctx_with_active_project(self, source_metadata: dict | None) -> MauriceContext:
         if self.ctx.scope != "global" or not isinstance(source_metadata, dict):
@@ -482,6 +503,7 @@ class MauriceServer:
         source_peer_id: str | None = None,
         source_metadata: dict | None = None,
         message_metadata: dict | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         def approval_callback(tool_name: str, arguments: dict, permission_class: str, reason: str) -> bool:
             _send(conn, {
@@ -525,12 +547,18 @@ class MauriceServer:
                 message=message,
                 limits=limits,
                 message_metadata=message_metadata,
+                cancel_event=cancel_event,
             )
             if result.error:
                 _send(conn, {"type": "error", "message": result.error})
             for tr in result.tool_results:
-                _send(conn, {"type": "tool_result", "summary": tr.summary, "ok": tr.ok,
-                             "error": tr.error.code if tr.error else None})
+                _send(conn, {
+                    "type": "tool_result",
+                    "summary": tr.summary,
+                    "ok": tr.ok,
+                    "error": tr.error.code if tr.error else None,
+                    "artifacts": [artifact.model_dump(mode="json") for artifact in tr.artifacts],
+                })
             _send(conn, {
                 "type": "done",
                 "status": result.status,
@@ -543,6 +571,26 @@ class MauriceServer:
             import traceback
             _send(conn, {"type": "error", "message": traceback.format_exc()})
             _send(conn, {"type": "done", "status": "failed"})
+
+    def _register_turn(self, *, agent_id: str, session_id: str) -> threading.Event:
+        event = threading.Event()
+        with self._lock:
+            self._active_turns[(agent_id, session_id)] = event
+        return event
+
+    def _unregister_turn(self, *, agent_id: str, session_id: str, event: threading.Event) -> None:
+        with self._lock:
+            if self._active_turns.get((agent_id, session_id)) is event:
+                del self._active_turns[(agent_id, session_id)]
+
+    def _cancel_turn(self, *, agent_id: Any, session_id: str) -> bool:
+        key = (str(agent_id or "main"), session_id)
+        with self._lock:
+            event = self._active_turns.get(key)
+        if event is None:
+            return False
+        event.set()
+        return True
 
     def _idle_watchdog(self) -> None:
         while self._running:
@@ -583,8 +631,9 @@ class MauriceServer:
         def _shutdown(*_: Any) -> None:
             self._running = False
 
-        signal.signal(signal.SIGTERM, _shutdown)
-        signal.signal(signal.SIGINT, _shutdown)
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, _shutdown)
+            signal.signal(signal.SIGINT, _shutdown)
 
         while self._running:
             try:

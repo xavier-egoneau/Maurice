@@ -176,6 +176,7 @@ def _build_gateway_http_server(
     host: str | None,
     port: int | None,
     active_project: Path | None = None,
+    telegram_pollers: "_WebTelegramPollers | None" = None,
 ) -> GatewayHttpServer:
     router, agent, bundle = _gateway_router_for(
         workspace_root,
@@ -215,13 +216,28 @@ def _build_gateway_http_server(
         web_model_status=lambda agent_id: _gateway_model_status(workspace, agent_id),
         web_model_update=lambda agent_id, model: _gateway_model_update(workspace, agent_id, model),
         web_agent_config=lambda agent_id: _gateway_agent_config_status(workspace, agent_id),
-        web_agent_update=lambda agent_id, payload: _gateway_agent_config_update(workspace, agent_id, payload),
+        web_agent_update=lambda agent_id, payload: _gateway_agent_config_update_and_sync_telegram(
+            workspace,
+            agent_id,
+            payload,
+            telegram_pollers=telegram_pollers,
+        ),
         web_uploads=lambda agent_id, session_id, attachments: _store_web_uploads(
             _gateway_prov_root(workspace, agent_id) / "uploads",
             session_id=session_id,
             attachments=attachments,
         ),
         web_attachment=_read_web_attachment,
+        web_turn_cancel=lambda agent_id, session_id: _cancel_turn_for_context(
+            resolve_global_context(
+                workspace,
+                agent=_resolve_agent(bundle, agent_id),
+                bundle=bundle,
+                active_project=active_project,
+            ),
+            agent_id,
+            session_id,
+        ),
     )
 
 
@@ -232,6 +248,7 @@ def _build_gateway_http_server_for_context(
     host: str,
     port: int,
     web_token: str | None = None,
+    telegram_pollers: "_WebTelegramPollers | None" = None,
 ) -> GatewayHttpServer:
     if ctx.scope == "global":
         return _build_gateway_http_server(
@@ -240,6 +257,7 @@ def _build_gateway_http_server_for_context(
             host=host,
             port=port,
             active_project=ctx.active_project_root,
+            telegram_pollers=telegram_pollers,
         )
     router = _gateway_router_for_local_context(ctx)
     return GatewayHttpServer(
@@ -270,6 +288,11 @@ def _build_gateway_http_server_for_context(
             attachments=attachments,
         ),
         web_attachment=_read_web_attachment,
+        web_turn_cancel=lambda agent_id, session_id: _cancel_turn_for_context(
+            ctx,
+            agent_id,
+            session_id,
+        ),
         web_token=web_token,
     )
 
@@ -441,9 +464,35 @@ def _session_tool_activity(session_messages: list[Any]) -> dict[str, list[dict[s
         ok = metadata.get("ok")
         entry["ok"] = ok
         entry["status"] = "ok" if ok is True else "failed" if ok is False else "done"
-        entry["summary"] = message.content
+        entry["summary"] = message.content.splitlines()[0][:100] if message.content else ""
         entry["completed_at"] = message.created_at.isoformat()
+        artifacts = metadata.get("artifacts")
+        if isinstance(artifacts, list) and artifacts:
+            entry["artifacts"] = artifacts
+            diff = _tool_diff_from_artifacts(artifacts)
+            if diff:
+                entry["diff"] = diff
     return activity_by_correlation
+
+
+def _tool_diff_from_artifacts(artifacts: list[Any]) -> dict[str, Any] | None:
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or artifact.get("type") != "diff":
+            continue
+        data = artifact.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        diff = data.get("diff")
+        if not isinstance(diff, str) or not diff:
+            continue
+        return {
+            "path": str(data.get("path") or artifact.get("path") or ""),
+            "diff": diff,
+            "truncated": bool(data.get("truncated")),
+            "insertions": int(data.get("insertions") or 0),
+            "deletions": int(data.get("deletions") or 0),
+        }
+    return None
 
 
 
@@ -522,6 +571,67 @@ def _telegram_poll_until_stopped(
             print(f"Telegram polling error: {_redact_secret(str(exc), token)}")
         stop_event.wait(poll_seconds)
     print("Telegram polling stopped")
+
+
+class _WebTelegramPollers:
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        agent_id: str | None,
+        poll_seconds: float = 2.0,
+    ) -> None:
+        self.workspace = Path(workspace)
+        self.agent_id = agent_id
+        self.poll_seconds = max(poll_seconds, 0.1)
+        self._lock = threading.Lock()
+        self._workers: dict[str, tuple[tuple[Any, ...], threading.Event, threading.Thread]] = {}
+
+    def sync(self) -> None:
+        bundle = load_workspace_config(self.workspace)
+        wanted: dict[str, tuple[Any, ...]] = {}
+        for channel_name, config in _telegram_channel_configs(bundle):
+            if config.get("enabled", True) is False:
+                continue
+            channel_agent = str(config.get("agent") or "main")
+            if self.agent_id and channel_agent != self.agent_id:
+                continue
+            signature = (
+                channel_agent,
+                str(config.get("credential") or "telegram_bot"),
+                tuple(_int_list(config.get("allowed_users"))),
+                tuple(_int_list(config.get("allowed_chats"))),
+            )
+            wanted[channel_name] = signature
+
+        with self._lock:
+            for channel_name, (signature, stop_event, thread) in list(self._workers.items()):
+                if wanted.get(channel_name) == signature and thread.is_alive():
+                    continue
+                stop_event.set()
+                del self._workers[channel_name]
+
+            for channel_name, signature in wanted.items():
+                if channel_name in self._workers:
+                    continue
+                stop_event = threading.Event()
+                thread = threading.Thread(
+                    target=_telegram_poll_until_stopped,
+                    args=(self.workspace, self.agent_id, self.poll_seconds, stop_event),
+                    kwargs={"channel_name": channel_name},
+                    daemon=True,
+                )
+                self._workers[channel_name] = (signature, stop_event, thread)
+                thread.start()
+
+    def stop(self) -> None:
+        with self._lock:
+            workers = list(self._workers.values())
+            self._workers.clear()
+        for _signature, stop_event, _thread in workers:
+            stop_event.set()
+        for _signature, _stop_event, thread in workers:
+            thread.join(timeout=5)
 
 
 
@@ -691,6 +801,15 @@ def _safe_slug(value: str) -> str:
     return normalized[:80] or "upload"
 
 
+def _cancel_requested(cancel_event: Any | None) -> bool:
+    is_set = getattr(cancel_event, "is_set", None)
+    return bool(is_set()) if callable(is_set) else False
+
+
+def _cancel_turn_for_context(ctx: MauriceContext, agent_id: str, session_id: str) -> bool:
+    return MauriceClient(ctx).cancel_turn(agent_id=agent_id, session_id=session_id)
+
+
 
 def _gateway_router_for_local_context(ctx: MauriceContext) -> MessageRouter:
     event_store = EventStore(ctx.events_path)
@@ -706,6 +825,7 @@ def _gateway_router_for_local_context(ctx: MauriceContext) -> MessageRouter:
             source_metadata=kwargs.get("source_metadata"),
             limits=kwargs.get("limits"),
             message_metadata=kwargs.get("message_metadata"),
+            cancel_event=kwargs.get("cancel_event"),
         )
 
     skill_registry = SkillLoader(
@@ -785,6 +905,7 @@ def _gateway_router_for(
             source_metadata=kwargs.get("source_metadata"),
             limits=kwargs.get("limits"),
             message_metadata=kwargs.get("message_metadata"),
+            cancel_event=kwargs.get("cancel_event"),
         )
 
     credentials = load_workspace_credentials(workspace).visible_to(agent.credentials)
@@ -870,6 +991,7 @@ def _run_turn_via_global_server(
     source_metadata: dict[str, Any] | None = None,
     limits: dict[str, Any] | None = None,
     message_metadata: dict[str, Any] | None = None,
+    cancel_event: Any | None = None,
 ) -> TurnResult:
     source_metadata = _source_metadata_with_active_project(ctx, source_metadata)
     client = MauriceClient(ctx)
@@ -884,6 +1006,7 @@ def _run_turn_via_global_server(
             source_metadata=source_metadata,
             limits=limits,
             message_metadata=message_metadata,
+            cancel_event=cancel_event,
         )
     client.connect()
     assistant_text = ""
@@ -904,6 +1027,8 @@ def _run_turn_via_global_server(
             limits=limits,
             message_metadata=message_metadata,
         ):
+            if _cancel_requested(cancel_event):
+                MauriceClient(ctx).cancel_turn(agent_id=agent_id, session_id=session_id)
             kind = event.get("type")
             if kind == "text_delta":
                 assistant_text += str(event.get("delta") or "")
@@ -914,6 +1039,7 @@ def _run_turn_via_global_server(
                         ok=bool(event.get("ok")),
                         summary=str(event.get("summary") or ""),
                         trust="trusted",
+                        artifacts=event.get("artifacts") if isinstance(event.get("artifacts"), list) else [],
                         error=(
                             ToolError(
                                 code=str(error_code),
@@ -941,6 +1067,7 @@ def _run_turn_via_global_server(
         session = store.load(agent_id, session_id)
     except FileNotFoundError:
         session = store.create(agent_id, session_id=session_id)
+    tool_activity = _session_tool_activity(session.messages).get(turn_correlation_id, [])
     return TurnResult(
         session=session,
         correlation_id=turn_correlation_id,
@@ -950,6 +1077,7 @@ def _run_turn_via_global_server(
         error=error_message,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        tool_activity=tool_activity,
     )
 
 
@@ -975,6 +1103,7 @@ def _run_turn_via_local_server(
     source_metadata: dict[str, Any] | None = None,
     limits: dict[str, Any] | None = None,
     message_metadata: dict[str, Any] | None = None,
+    cancel_event: Any | None = None,
 ) -> TurnResult:
     client = MauriceClient(ctx)
     client.ensure_running()
@@ -997,6 +1126,8 @@ def _run_turn_via_local_server(
             limits=limits,
             message_metadata=message_metadata,
         ):
+            if _cancel_requested(cancel_event):
+                MauriceClient(ctx).cancel_turn(agent_id=agent_id, session_id=session_id)
             kind = event.get("type")
             if kind == "text_delta":
                 assistant_text += str(event.get("delta") or "")
@@ -1007,6 +1138,7 @@ def _run_turn_via_local_server(
                         ok=bool(event.get("ok")),
                         summary=str(event.get("summary") or ""),
                         trust="trusted",
+                        artifacts=event.get("artifacts") if isinstance(event.get("artifacts"), list) else [],
                         error=(
                             ToolError(
                                 code=str(error_code),
@@ -1034,6 +1166,7 @@ def _run_turn_via_local_server(
         session = store.load(agent_id, session_id)
     except FileNotFoundError:
         session = store.create(agent_id, session_id=session_id)
+    tool_activity = _session_tool_activity(session.messages).get(turn_correlation_id, [])
     return TurnResult(
         session=session,
         correlation_id=turn_correlation_id,
@@ -1043,6 +1176,7 @@ def _run_turn_via_local_server(
         error=error_message,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        tool_activity=tool_activity,
     )
 
 
@@ -1260,6 +1394,7 @@ def _gateway_agent_config_status(workspace: Path, agent_id: str) -> dict[str, An
             "credential": channel_config.get("credential"),
             "allowed_users": _int_list(channel_config.get("allowed_users")),
             "allowed_chats": _int_list(channel_config.get("allowed_chats")),
+            "status": channel_config.get("status"),
         }
     return {
         "ok": True,
@@ -1347,6 +1482,23 @@ def _gateway_agent_config_update(workspace: Path, agent_id: str, payload: dict[s
         **_gateway_agent_config_status(workspace, updated.id),
         "updated": True,
     }
+
+
+def _gateway_agent_config_update_and_sync_telegram(
+    workspace: Path,
+    agent_id: str,
+    payload: dict[str, Any],
+    *,
+    telegram_pollers: _WebTelegramPollers | None,
+) -> dict[str, Any]:
+    result = _gateway_agent_config_update(workspace, agent_id, payload)
+    if result.get("ok") and telegram_pollers is not None and "telegram_enabled" in payload:
+        telegram_pollers.sync()
+        telegram = result.get("telegram")
+        if isinstance(telegram, dict) and telegram.get("enabled"):
+            telegram["runtime"] = "polling"
+            telegram["status"] = "active"
+    return result
 
 
 def _effective_agent_skills(bundle: ConfigBundle, agent, available_skills: dict[str, str]) -> list[str]:

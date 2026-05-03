@@ -27,7 +27,7 @@ DEFAULT_SKILL_DESCRIPTIONS: dict[str, str] = {
     "dreaming": "consolider la mémoire et agir avec proactivité",
     "skills": "créer de nouvelles compétences",
     "host": "diagnostiquer et configurer Maurice",
-    "self_update": "préparer des améliorations du runtime",
+    "self_update": "signaler des bugs Maurice et préparer des améliorations",
     "dev": "piloter un projet de développement",
 }
 

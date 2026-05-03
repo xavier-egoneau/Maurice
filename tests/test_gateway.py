@@ -5,6 +5,7 @@ import json
 import threading
 from pathlib import Path
 from urllib import request
+import time
 
 from maurice.host.command_registry import CommandRegistry, CommandResult, RuntimeCommand, core_commands
 from maurice.host.channels import ChannelAdapterRegistry
@@ -13,6 +14,7 @@ from maurice.host.commands.gateway_server import (
     _build_gateway_http_server_for_context,
     _gateway_agent_config_status,
     _gateway_agent_config_update,
+    _gateway_agent_config_update_and_sync_telegram,
     _gateway_model_status,
     _gateway_model_update,
     _record_gateway_exchange_in_store,
@@ -20,13 +22,14 @@ from maurice.host.commands.gateway_server import (
     _read_web_attachment,
     _store_web_uploads,
     _telegram_response_text,
+    _WebTelegramPollers,
 )
 from maurice.host.context import resolve_global_context, resolve_local_context
 from maurice.host.gateway import InboundMessage, MessageRouter, OutboundMessage
 from maurice.host.gateway import GatewayHttpServer
 from maurice.host.agents import create_agent
 from maurice.host.workspace import initialize_workspace
-from maurice.host.paths import kernel_config_path
+from maurice.host.paths import host_config_path, kernel_config_path
 from maurice.kernel.config import load_workspace_config
 from maurice.kernel.config import read_yaml_file, write_yaml_file
 from maurice.host.credentials import load_workspace_credentials
@@ -73,6 +76,14 @@ class InterruptedTurn:
     correlation_id = "turn_interrupted"
 
 
+class CancelledTurn:
+    assistant_text = ""
+    tool_results = []
+    status = "cancelled"
+    error = "annulé par l'utilisateur"
+    correlation_id = "turn_cancelled"
+
+
 PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
@@ -95,6 +106,8 @@ def test_gateway_routes_inbound_message_to_turn_runner(tmp_path) -> None:
         }
     )
 
+    cancel_event = calls[0].pop("cancel_event")
+    assert callable(cancel_event.is_set)
     assert calls == [
             {
                 "message": "Bonjour",
@@ -1185,6 +1198,74 @@ def test_gateway_agent_config_update_changes_provider_and_telegram(tmp_path) -> 
     assert skills_data["skills"]["web"]["base_url"] == "https://search.example"
 
 
+def test_gateway_agent_config_update_syncs_web_telegram_pollers(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    (runtime / "maurice").mkdir(parents=True)
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+
+    class FakePollers:
+        synced = False
+
+        def sync(self):
+            self.synced = True
+
+    pollers = FakePollers()
+    changed = _gateway_agent_config_update_and_sync_telegram(
+        workspace,
+        "main",
+        {
+            "telegram_enabled": True,
+            "telegram_token": "telegram-secret",
+            "telegram_allowed_users": "123",
+        },
+        telegram_pollers=pollers,
+    )
+
+    assert changed["updated"] is True
+    assert changed["telegram"]["enabled"] is True
+    assert changed["telegram"]["runtime"] == "polling"
+    assert changed["telegram"]["status"] == "active"
+    assert pollers.synced is True
+
+
+def test_web_telegram_pollers_start_enabled_channels(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    (runtime / "maurice").mkdir(parents=True)
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+    host_data = read_yaml_file(host_config_path(workspace))
+    host_data.setdefault("host", {}).setdefault("channels", {})["telegram"] = {
+        "adapter": "telegram",
+        "enabled": True,
+        "agent": "main",
+        "credential": "telegram_bot",
+        "allowed_users": [123],
+        "allowed_chats": [],
+    }
+    write_yaml_file(host_config_path(workspace), host_data)
+    started = threading.Event()
+    calls = []
+
+    def fake_poll(workspace_root, agent_id, poll_seconds, stop_event, *, channel_name):
+        calls.append((Path(workspace_root), agent_id, poll_seconds, channel_name))
+        started.set()
+        stop_event.wait(2)
+
+    monkeypatch.setattr(
+        "maurice.host.commands.gateway_server._telegram_poll_until_stopped",
+        fake_poll,
+    )
+
+    pollers = _WebTelegramPollers(workspace, agent_id=None, poll_seconds=0.1)
+    try:
+        pollers.sync()
+        assert started.wait(timeout=2)
+        assert calls == [(workspace, None, 0.1, "telegram")]
+    finally:
+        pollers.stop()
+
+
 def test_gateway_agent_config_update_rejects_invalid_web_search_url(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     runtime = tmp_path / "runtime"
@@ -1349,6 +1430,65 @@ def test_gateway_web_session_history_attaches_tool_activity(tmp_path) -> None:
     assert history[1]["metadata"]["context"]["total_tokens"] == 65_000
 
 
+def test_gateway_web_session_history_attaches_tool_diff_artifacts(tmp_path) -> None:
+    from maurice.host.cli import _gateway_web_session_history
+
+    sessions = SessionStore(tmp_path / "sessions")
+    sessions.create("main", session_id="web:main:1")
+    sessions.append_message(
+        "main",
+        "web:main:1",
+        role="tool_call",
+        content="",
+        correlation_id="corr_1",
+        metadata={
+            "tool_call_id": "call_1",
+            "tool_name": "filesystem.write",
+            "tool_arguments": {"path": "README.md", "content": "new"},
+        },
+    )
+    sessions.append_message(
+        "main",
+        "web:main:1",
+        role="tool",
+        content="C'est écrit dans `README.md`.\n\nData:\n{}",
+        correlation_id="corr_1",
+        metadata={
+            "tool_call_id": "call_1",
+            "tool_name": "filesystem.write",
+            "ok": True,
+            "artifacts": [
+                {
+                    "type": "diff",
+                    "path": str(tmp_path / "README.md"),
+                    "data": {
+                        "path": str(tmp_path / "README.md"),
+                        "diff": "--- README.md\n+++ README.md\n@@ -1 +1 @@\n-old\n+new\n",
+                        "insertions": 1,
+                        "deletions": 1,
+                        "truncated": False,
+                    },
+                }
+            ],
+        },
+    )
+    sessions.append_message(
+        "main",
+        "web:main:1",
+        role="assistant",
+        content="C'est fait.",
+        correlation_id="corr_1",
+    )
+
+    history = _gateway_web_session_history(tmp_path, "main", "web:main:1")
+
+    tool = history[0]["tools"][0]
+    assert tool["summary"] == "C'est écrit dans `README.md`."
+    assert tool["diff"]["insertions"] == 1
+    assert tool["diff"]["deletions"] == 1
+    assert "+new" in tool["diff"]["diff"]
+
+
 def test_telegram_response_text_appends_context_summary() -> None:
     text = _telegram_response_text(
         "Salut",
@@ -1396,6 +1536,130 @@ def test_gateway_http_server_web_api_message_routes_to_router() -> None:
     finally:
         server.shutdown()
         thread.join(timeout=5)
+
+
+def test_gateway_http_server_can_cancel_active_web_message() -> None:
+    started = threading.Event()
+    finished = threading.Event()
+    seen_cancel_event = None
+
+    def run_turn(**kwargs):
+        nonlocal seen_cancel_event
+        seen_cancel_event = kwargs["cancel_event"]
+        started.set()
+        deadline = time.monotonic() + 5
+        while not seen_cancel_event.is_set() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        finished.set()
+        return CancelledTurn()
+
+    server = GatewayHttpServer(
+        host="127.0.0.1",
+        port=0,
+        router=MessageRouter(run_turn=run_turn),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    message_thread = None
+    try:
+        host, port = server.address
+        message_result = {}
+
+        def post_message():
+            req = request.Request(
+                f"http://{host}:{port}/api/message",
+                data=json.dumps(
+                    {
+                        "agent_id": "main",
+                        "session_id": "web:main:1",
+                        "peer_id": "web:main:1",
+                        "message": "Longue generation",
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with request.urlopen(req, timeout=5) as response:
+                message_result.update(json.loads(response.read().decode("utf-8")))
+
+        message_thread = threading.Thread(target=post_message)
+        message_thread.start()
+        assert started.wait(timeout=2)
+
+        cancel_req = request.Request(
+            f"http://{host}:{port}/api/message/cancel",
+            data=json.dumps(
+                {
+                    "agent_id": "main",
+                    "session_id": "web:main:1",
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(cancel_req, timeout=5) as response:
+            cancel_payload = json.loads(response.read().decode("utf-8"))
+
+        message_thread.join(timeout=5)
+        assert cancel_payload == {"ok": True, "cancelled": True}
+        assert finished.is_set()
+        assert message_result["result"]["status"] == "cancelled"
+        assert "Réponse interrompue" in message_result["result"]["outbound"]["text"]
+    finally:
+        if message_thread is not None:
+            message_thread.join(timeout=1)
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_gateway_stop_command_cancels_active_session_turn() -> None:
+    started = threading.Event()
+    finished = threading.Event()
+
+    def run_turn(**kwargs):
+        cancel_event = kwargs["cancel_event"]
+        started.set()
+        deadline = time.monotonic() + 5
+        while not cancel_event.is_set() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        finished.set()
+        return CancelledTurn()
+
+    router = MessageRouter(run_turn=run_turn)
+    message_result = {}
+
+    def run_message():
+        result = router.handle(
+            {
+                "channel": "local",
+                "peer_id": "peer_1",
+                "text": "Longue generation",
+                "agent_id": "main",
+            }
+        )
+        message_result["status"] = result.status
+
+    thread = threading.Thread(target=run_message)
+    thread.start()
+    try:
+        assert started.wait(timeout=2)
+
+        stop_result = router.handle(
+            {
+                "channel": "local",
+                "peer_id": "peer_1",
+                "text": "/stop",
+                "agent_id": "main",
+            }
+        )
+
+        thread.join(timeout=5)
+        assert stop_result.outbound.text == "Annulation demandee pour la reponse en cours."
+        assert stop_result.outbound.metadata["cancelled"] is True
+        assert finished.is_set()
+        assert message_result["status"] == "cancelled"
+    finally:
+        thread.join(timeout=1)
 
 
 def test_gateway_http_server_web_api_message_accepts_image_upload(tmp_path) -> None:

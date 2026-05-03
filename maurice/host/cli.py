@@ -60,7 +60,7 @@ from maurice.host.commands.gateway_server import (
     _looks_like_internal_gateway_message, _gateway_web_session_reset,
     _telegram_poll_until_stopped, _telegram_poll_once,
     _gateway_router_for, _reset_gateway_session, _record_gateway_exchange,
-    _compact_gateway_session, _gateway_model_summary,
+    _compact_gateway_session, _gateway_model_summary, _WebTelegramPollers,
 )
 from maurice.host.context import MauriceContext, resolve_global_context, resolve_local_context
 from maurice.host.commands.dashboard import (
@@ -131,6 +131,7 @@ from maurice.host.auth import (
     save_chatgpt_auth,
 )
 from maurice.host.channels import ChannelAdapterRegistry
+from maurice.host.client import MauriceClient
 from maurice.host.command_registry import CommandRegistry
 from maurice.host.credentials import (
     CredentialRecord,
@@ -256,6 +257,9 @@ def _web_chat(
     if ctx.scope == "local" and agent_id not in {None, "main"}:
         raise SystemExit("Le contexte local expose seulement l'agent `main`.")
     token = secrets.token_urlsafe(24)
+    telegram_pollers = _web_telegram_pollers_for_context(ctx, agent_id=agent_id)
+    if telegram_pollers is not None:
+        telegram_pollers.sync()
     try:
         server = _build_gateway_http_server_for_context(
             ctx,
@@ -263,6 +267,7 @@ def _web_chat(
             host=host,
             port=port,
             web_token=token,
+            telegram_pollers=telegram_pollers,
         )
     except OSError as exc:
         if exc.errno == errno.EADDRINUSE:
@@ -287,6 +292,20 @@ def _web_chat(
         print("Maurice web chat stopped")
     finally:
         server.shutdown()
+        if telegram_pollers is not None:
+            telegram_pollers.stop()
+
+
+def _web_telegram_pollers_for_context(
+    ctx: MauriceContext,
+    *,
+    agent_id: str | None,
+) -> _WebTelegramPollers | None:
+    if ctx.scope != "global":
+        return None
+    if MauriceClient(ctx).is_running():
+        return None
+    return _WebTelegramPollers(ctx.context_root, agent_id=agent_id)
 
 
 def build_parser() -> argparse.ArgumentParser:

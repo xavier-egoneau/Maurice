@@ -33,7 +33,7 @@ from maurice.host.credentials import (
     CredentialRecord, CredentialsStore, credentials_path,
     ensure_workspace_credentials_migrated, load_workspace_credentials, write_workspace_credentials,
 )
-from maurice.host.commands.gateway_server import _gateway_serve_until_stopped
+from maurice.host.commands.gateway_server import _gateway_serve_until_stopped, _telegram_poll_until_stopped
 from maurice.host.commands.scheduler import _scheduler_serve_until_stopped
 from maurice.host.dashboard import build_dashboard_snapshot
 from maurice.host.delivery import (
@@ -65,7 +65,7 @@ from maurice.host.self_update import (
 from maurice.host.server import MauriceServer
 from maurice.host.service import check_install, inspect_service_status, read_service_logs
 from maurice.host.telegram import (
-    _credential_value, _telegram_channel_configured, _telegram_channel_configs,
+    _credential_value, _telegram_channel_configs,
     _telegram_channel_for_agent, _telegram_offset_path, _validate_telegram_first_message,
     _telegram_get_updates, _telegram_bot_username, _telegram_send_message,
     _telegram_send_chat_action, _telegram_api_json, _telegram_update_to_inbound,
@@ -149,9 +149,10 @@ def _start_services(
                 daemon=True,
             )
         )
-    if telegram and _telegram_channel_configured(bundle):
+    telegram_active = telegram and _telegram_service_configured(bundle, agent_id)
+    if telegram_active:
         for channel_name, _channel_config in _telegram_channel_configs(bundle):
-            if agent_id and _channel_config.get("agent") not in {None, agent_id}:
+            if agent_id and str(_channel_config.get("agent") or "main") != agent_id:
                 continue
             workers.append(
                 threading.Thread(
@@ -184,7 +185,8 @@ def _start_services(
     for sig in (signal.SIGTERM, signal.SIGINT):
         previous_handlers[sig] = signal.getsignal(sig)
         signal.signal(sig, lambda _signum, _frame: stop_event.set())
-    print("Maurice started. Press Ctrl+C to stop.")
+    print(f"Maurice started. Services: {_service_names(scheduler=scheduler, gateway=gateway, telegram=telegram_active)}.")
+    print("Press Ctrl+C to stop.")
     for worker in workers:
         worker.start()
         if worker is server_thread:
@@ -224,7 +226,8 @@ def _start_services_daemon(
     if existing_pid and _pid_is_running(existing_pid):
         _check_running_service_meta(ctx, existing_pid)
         raise SystemExit(f"Maurice already appears to be running with pid {existing_pid}.")
-    if not scheduler and not gateway and not (telegram and _telegram_channel_configured(bundle)):
+    telegram_active = telegram and _telegram_service_configured(bundle, agent_id)
+    if not scheduler and not gateway and not telegram_active:
         print("No Maurice services to start.")
         return
     log_path = workspace / "maurice-service.log"
@@ -262,6 +265,7 @@ def _start_services_daemon(
         if pid and _pid_is_running(pid):
             _write_service_meta(ctx, pid)
             print(f"Maurice started in background with pid {pid}.")
+            print(f"Services: {_service_names(scheduler=scheduler, gateway=gateway, telegram=telegram_active)}.")
             print(f"Logs: {log_path}")
             if gateway and open_browser:
                 _open_gateway_ui(bundle)
@@ -272,6 +276,7 @@ def _start_services_daemon(
     if process.poll() is None:
         _write_service_meta(ctx, process.pid)
         print(f"Maurice start requested in background with pid {process.pid}.")
+        print(f"Services: {_service_names(scheduler=scheduler, gateway=gateway, telegram=telegram_active)}.")
         print(f"Logs: {log_path}")
         if gateway and open_browser:
             _open_gateway_ui(bundle)
@@ -372,6 +377,27 @@ def _service_host_config_missing(workspace: Path) -> bool:
         or not host.get("runtime_root")
         or not host.get("workspace_root")
     )
+
+
+def _telegram_service_configured(bundle: ConfigBundle, agent_id: str | None) -> bool:
+    for _channel_name, config in _telegram_channel_configs(bundle):
+        if config.get("enabled", True) is False:
+            continue
+        if agent_id and str(config.get("agent") or "main") != agent_id:
+            continue
+        return True
+    return False
+
+
+def _service_names(*, scheduler: bool, gateway: bool, telegram: bool) -> str:
+    names = []
+    if scheduler:
+        names.append("scheduler")
+    if gateway:
+        names.append("gateway")
+    if telegram:
+        names.append("telegram")
+    return ", ".join(names) if names else "none"
 
 
 def _wait_for_socket(socket_path: Path, *, timeout_seconds: float = 5.0) -> None:

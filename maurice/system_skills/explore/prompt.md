@@ -15,4 +15,7 @@ When you receive `explore.summary` output:
 - Report what you found: project type, main dependencies, structure.
 - Note which `.maurice/` files exist and which don't.
 - If PLAN.md is missing, suggest `/plan` to initialize project memory.
+- For project review, audit, or critique requests, treat `.maurice/PLAN.md` as
+  planning memory only. Do not quote or reuse its `Critique` section as your
+  answer; base your critique on the actual project files and code.
 - Do not list raw file names — synthesize and explain.

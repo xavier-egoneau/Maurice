@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime, timedelta
 
 from maurice.kernel.approvals import ApprovalStore
@@ -78,6 +79,37 @@ def test_agent_system_prompt_explains_content_root(tmp_path) -> None:
     assert "secrets" in prompt
 
 
+def test_agent_system_prompt_makes_direct_requests_override_plan(tmp_path) -> None:
+    from maurice.host.cli import _agent_system_prompt
+
+    prompt = _agent_system_prompt(tmp_path / "workspace")
+
+    assert "A direct user request in the current turn is always the source of truth" in prompt
+    assert "Do not let an old PLAN.md redirect" in prompt
+    assert "Use PLAN.md only when the user explicitly asks" in prompt
+    assert "do not answer from the `Critique` section of PLAN.md" in prompt
+
+
+def test_agent_system_prompt_lists_known_projects(tmp_path) -> None:
+    from maurice.host.cli import _agent_system_prompt
+    from maurice.host.project_registry import record_known_project
+
+    agent_workspace = tmp_path / "workspace" / "agents" / "main"
+    project = tmp_path / "project-alpha"
+    project.mkdir()
+    record_known_project(agent_workspace, project)
+
+    class Agent:
+        workspace = str(agent_workspace)
+
+    prompt = _agent_system_prompt(tmp_path / "workspace", agent=Agent())
+
+    assert "Known projects" in prompt
+    assert "project-alpha" in prompt
+    assert str(project.resolve()) in prompt
+    assert "do not edit runtime files directly" in prompt
+
+
 def test_loop_preserves_provider_failure_error(tmp_path) -> None:
     provider = MockProvider(
         [
@@ -101,6 +133,31 @@ def test_loop_preserves_provider_failure_error(tmp_path) -> None:
     failed_event = loop.event_store.read_all()[-1]
     assert failed_event.name == "turn.failed"
     assert failed_event.payload["error"] == "provider_error: Bad model."
+
+
+def test_loop_can_cancel_before_provider_turn(tmp_path) -> None:
+    provider = MockProvider(
+        [
+            {"type": "text_delta", "delta": "Trop tard"},
+            {"type": "status", "status": "completed"},
+        ]
+    )
+    cancel_event = threading.Event()
+    cancel_event.set()
+    loop = make_loop(tmp_path, provider)
+
+    result = loop.run_turn(
+        agent_id="main",
+        session_id="sess_1",
+        message="Bonjour",
+        cancel_event=cancel_event,
+    )
+
+    assert result.status == "cancelled"
+    assert result.error == "annulé par l'utilisateur"
+    assert result.assistant_text == ""
+    assert provider.calls == []
+    assert loop.event_store.read_all()[-1].name == "turn.cancelled"
 
 
 def test_loop_marks_missing_terminal_provider_status_as_failed(tmp_path) -> None:
@@ -921,3 +978,121 @@ def test_loop_uses_self_update_proposal_after_runtime_write_approval(tmp_path) -
     proposal_path = result.tool_results[0].data["path"]
     assert proposal_path.startswith(str(workspace / "proposals" / "runtime"))
     assert not (runtime / "maurice" / "kernel" / "loop.py").exists()
+
+
+def test_loop_allows_self_update_bug_report_in_limited_profile(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    workspace.mkdir()
+    runtime.mkdir()
+    context = PermissionContext(workspace_root=str(workspace), runtime_root=str(runtime))
+    registry = SkillLoader(
+        [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
+        enabled_skills=["self_update"],
+    ).load()
+    args = {
+        "target_type": "host",
+        "target_name": "web",
+        "title": "Web turn response is truncated.",
+        "summary": "The web channel displayed an assistant answer cut in the middle of a sentence.",
+        "observed": "The final assistant bubble ended after `J'ai seulement`.",
+        "expected": "The full assistant response should be streamed and persisted.",
+        "severity": "medium",
+        "evidence": ["turn.completed assistant_text was visibly incomplete"],
+    }
+    provider = MockProvider(
+        [
+            {
+                "type": "tool_call",
+                "tool_call": {
+                    "id": "call_1",
+                    "name": "self_update.report_bug",
+                    "arguments": args,
+                },
+            },
+            {"type": "status", "status": "completed"},
+        ]
+    )
+    loop = AgentLoop(
+        provider=provider,
+        registry=registry,
+        session_store=SessionStore(tmp_path / "sessions"),
+        event_store=EventStore(tmp_path / "events.jsonl"),
+        permission_context=context,
+        permission_profile="limited",
+        tool_executors=self_update_tool_executors(context),
+        model="mock",
+        system_prompt="Kernel prompt",
+    )
+
+    result = loop.run_turn(agent_id="main", session_id="sess_1", message="Report runtime bug")
+
+    assert result.tool_results[0].ok
+    report_path = result.tool_results[0].data["path"]
+    assert report_path.startswith(str(workspace / "reports" / "bugs"))
+    assert (workspace / "reports" / "bugs").is_dir()
+
+
+def test_loop_normalizes_self_update_runtime_target_before_permission_check(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    workspace.mkdir()
+    runtime.mkdir()
+    context = PermissionContext(workspace_root=str(workspace), runtime_root=str(runtime))
+    registry = SkillLoader(
+        [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
+        enabled_skills=["self_update"],
+    ).load()
+    args = {
+        "target": "host/system_prompt",
+        "target_type": "host",
+        "target_name": "system_prompt",
+        "runtime_path": "$runtime/maurice/kernel/system_prompt.py",
+        "summary": "Clarify project critique behavior.",
+        "patch": "diff --git a/system_prompt.py b/system_prompt.py\n",
+        "risk": "low",
+        "test_plan": "Run pytest.",
+        "mode": "proposal_only",
+    }
+    approvals = ApprovalStore(tmp_path / "approvals.json")
+    approval = approvals.request(
+        agent_id="main",
+        session_id="sess_1",
+        correlation_id="turn_previous",
+        tool_name="self_update.propose",
+        permission_class="runtime.write",
+        scope={"targets": ["host"], "mode": "proposal_only"},
+        arguments=args,
+        summary="Approve runtime proposal.",
+        reason="Limited profile asks for runtime write proposals.",
+    )
+    approvals.approve(approval.id)
+    provider = MockProvider(
+        [
+            {
+                "type": "tool_call",
+                "tool_call": {
+                    "id": "call_1",
+                    "name": "self_update.propose",
+                    "arguments": args,
+                },
+            },
+            {"type": "status", "status": "completed"},
+        ]
+    )
+    loop = AgentLoop(
+        provider=provider,
+        registry=registry,
+        session_store=SessionStore(tmp_path / "sessions"),
+        event_store=EventStore(tmp_path / "events.jsonl"),
+        permission_context=context,
+        permission_profile="limited",
+        tool_executors=self_update_tool_executors(context),
+        approval_store=approvals,
+        model="mock",
+        system_prompt="Kernel prompt",
+    )
+
+    result = loop.run_turn(agent_id="main", session_id="sess_1", message="Propose update")
+
+    assert result.tool_results[0].ok

@@ -92,6 +92,15 @@ def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def _cancel_requested(cancel_event: Any | None) -> bool:
+    if cancel_event is None:
+        return False
+    is_set = getattr(cancel_event, "is_set", None)
+    if callable(is_set):
+        return bool(is_set())
+    return False
+
+
 class AgentLoop:
     def __init__(
         self,
@@ -136,6 +145,7 @@ class AgentLoop:
         message: str,
         limits: dict[str, Any] | None = None,
         message_metadata: dict[str, Any] | None = None,
+        cancel_event: Any | None = None,
     ) -> TurnResult:
         session = self._load_or_create_session(agent_id, session_id)
         turn = self.session_store.start_turn(agent_id, session.id)
@@ -174,6 +184,10 @@ class AgentLoop:
         total_output_tokens = 0
         try:
             for iteration in range(max_tool_iterations):
+                if _cancel_requested(cancel_event):
+                    status = "cancelled"
+                    provider_error = "annulé par l'utilisateur"
+                    break
                 iteration_text = ""
                 iteration_tool_results: list[ToolResult] = []
                 terminal_status_seen = False
@@ -185,6 +199,10 @@ class AgentLoop:
                     limits=limits or {},
                 ):
                     chunk = ProviderChunk.model_validate(chunk)
+                    if _cancel_requested(cancel_event):
+                        status = "cancelled"
+                        provider_error = "annulé par l'utilisateur"
+                        break
                     if chunk.type == ProviderChunkType.TEXT_DELTA:
                         iteration_text += chunk.delta
                         if self.text_delta_callback is not None:
@@ -227,14 +245,18 @@ class AgentLoop:
                             if chunk.error is not None:
                                 provider_error = f"{chunk.error.code}: {chunk.error.message}"
                         continue
-                if not terminal_status_seen:
+                if status != "cancelled" and not terminal_status_seen:
                     status = "failed"
                     provider_error = "provider_error: Provider stream ended without terminal status."
-                if limits and limits.get("allow_text_tool_calls") and iteration_text:
+                if status != "cancelled" and limits and limits.get("allow_text_tool_calls") and iteration_text:
                     text_tool_calls = self._text_tool_calls(iteration_text)
                     if text_tool_calls:
                         iteration_text = ""
                         for tool_call in text_tool_calls:
+                            if _cancel_requested(cancel_event):
+                                status = "cancelled"
+                                provider_error = "annulé par l'utilisateur"
+                                break
                             self.session_store.append_message(
                                 agent_id,
                                 session.id,
@@ -268,7 +290,7 @@ class AgentLoop:
                         metadata={"autonomy_internal": True} if autonomy_internal else {},
                     )
                 tool_results.extend(iteration_tool_results)
-                if status == "failed" or not iteration_tool_results or iteration_text:
+                if status in {"failed", "cancelled"} or not iteration_tool_results or iteration_text:
                     break
                 if any(result.error and result.error.code == "approval_required" for result in iteration_tool_results):
                     break
@@ -297,6 +319,8 @@ class AgentLoop:
             status="completed" if status == "completed" else "failed",
         )
         event_name = "turn.completed" if status == "completed" else "turn.failed"
+        if status == "cancelled":
+            event_name = "turn.cancelled"
         self.event_store.emit(
             name=event_name,
             kind="fact",
@@ -646,12 +670,12 @@ class AgentLoop:
             return {"actions": [arguments["action"]]}
         if permission_class == PermissionClass.RUNTIME_WRITE:
             scope = {}
-            if "target" in arguments:
-                scope["targets"] = [arguments["target"]]
-            elif arguments.get("target_type") == "system_skill" and "target_name" in arguments:
+            if arguments.get("target_type") == "system_skill" and "target_name" in arguments:
                 scope["targets"] = [f"system_skill:{arguments['target_name']}"]
             elif "target_type" in arguments:
                 scope["targets"] = [arguments["target_type"]]
+            elif "target" in arguments:
+                scope["targets"] = [_normalize_runtime_target(arguments["target"])]
             if "mode" in arguments:
                 scope["mode"] = arguments["mode"]
             else:
@@ -691,6 +715,7 @@ class AgentLoop:
                 "tool_call_id": tool_call.id,
                 "tool_name": tool_call.name,
                 "ok": result.ok,
+                "artifacts": _tool_artifacts(result),
             },
         )
 
@@ -813,7 +838,8 @@ class AgentLoop:
 
 
 def _tool_activity_entry(name: str, arguments: dict[str, Any], result: ToolResult) -> dict[str, Any]:
-    return {
+    artifacts = _tool_artifacts(result)
+    entry = {
         "name": name,
         "label": tool_short_label(name),
         "target": tool_target(name, arguments),
@@ -821,6 +847,36 @@ def _tool_activity_entry(name: str, arguments: dict[str, Any], result: ToolResul
         "summary": result.summary.splitlines()[0][:100] if result.summary else "",
         "error": result.error.code if result.error else None,
     }
+    if artifacts:
+        entry["artifacts"] = artifacts
+    diff = _diff_from_artifacts(artifacts)
+    if diff:
+        entry["diff"] = diff
+    return entry
+
+
+def _tool_artifacts(result: ToolResult) -> list[dict[str, Any]]:
+    return [artifact.model_dump(mode="json") for artifact in result.artifacts]
+
+
+def _diff_from_artifacts(artifacts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for artifact in artifacts:
+        if artifact.get("type") != "diff":
+            continue
+        data = artifact.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        diff = data.get("diff")
+        if not isinstance(diff, str) or not diff:
+            continue
+        return {
+            "path": str(data.get("path") or artifact.get("path") or ""),
+            "diff": diff,
+            "truncated": bool(data.get("truncated")),
+            "insertions": int(data.get("insertions") or 0),
+            "deletions": int(data.get("deletions") or 0),
+        }
+    return None
 
 
 def _tool_result_content(result: ToolResult) -> str:
@@ -837,6 +893,14 @@ def _host_from_url(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     return urlparse(value).hostname
+
+
+def _normalize_runtime_target(value: Any) -> str:
+    target = str(value or "").strip()
+    if target.startswith("system_skill:"):
+        return target
+    first = re.split(r"[:/]", target, maxsplit=1)[0]
+    return first or target
 
 
 _DEFAULT_MAX_TOOL_ITERATIONS = 10

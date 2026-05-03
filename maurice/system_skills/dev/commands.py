@@ -9,6 +9,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from maurice.host.command_registry import CommandContext, CommandResult
+from maurice.host.project_registry import (
+    known_project_by_name,
+    list_known_projects,
+    record_known_project,
+)
 from maurice.kernel.contracts import DreamInput
 from maurice.kernel.permissions import PermissionContext
 
@@ -21,18 +26,26 @@ GUIDANCE_FILES = ("AGENTS.md", "PLAN.md", "DECISIONS.md")
 def projects(context: CommandContext) -> CommandResult:
     active_path = _explicit_active_project_path(context)
     if active_path is not None:
-        return _result(f"Projet actif : `{active_path.name}`\n\n`{active_path}`")
+        _remember_active_project(context, active_path)
     content = _content_root(context)
     project_dirs = sorted(path.name for path in content.iterdir() if path.is_dir() and not path.name.startswith("."))
-    if not project_dirs:
+    known_projects = _known_project_rows(context)
+    if active_path is None and not project_dirs and not known_projects:
         return _result(
             "Aucun projet pour cet agent.\n\n"
             "Cree un dossier dans son espace de contenu, ou lance `/project open monprojet` pour demarrer."
         )
-    rows = "\n".join(f"{index}. `{name}`" for index, name in enumerate(project_dirs, start=1))
+    sections = []
+    if active_path is not None:
+        sections.append(f"Projet actif : `{active_path.name}`\n\n`{active_path}`")
+    if project_dirs:
+        rows = "\n".join(f"{index}. `{name}`" for index, name in enumerate(project_dirs, start=1))
+        sections.append(f"Projets disponibles :\n\n{rows}")
+    if known_projects:
+        sections.append("Projets deja vus :\n\n" + "\n".join(known_projects))
     active = _active_project(context)
-    active_line = f"\n\nProjet actif : `{active}`." if active else ""
-    return _result(f"Projets disponibles :\n\n{rows}{active_line}")
+    active_line = f"\n\nProjet actif : `{active}`." if active and active_path is None else ""
+    return _result("\n\n".join(sections) + active_line)
 
 
 def project(context: CommandContext) -> CommandResult:
@@ -54,6 +67,13 @@ def project(context: CommandContext) -> CommandResult:
         name = _project_name(args.removeprefix("open ").strip())
         if not name:
             return _result("Donne un nom de projet simple : `/project open monprojet`.")
+        known_path = known_project_by_name(_agent_workspace(context), name)
+        content_project = _content_root(context) / name
+        if known_path is not None and not content_project.exists():
+            known_path.mkdir(parents=True, exist_ok=True)
+            _write_state(context, {"active_project_path": str(known_path)})
+            _ensure_project_files(known_path)
+            return _result(f"Projet `{name}` ouvert.\n\nDossier : `{known_path}`")
         path = _content_root(context) / name
         created = not path.exists()
         path.mkdir(parents=True, exist_ok=True)
@@ -129,7 +149,7 @@ def dev(context: CommandContext) -> CommandResult:
         _ensure_project_files(path)
     focus = _args(context).strip()
     if focus:
-        _ensure_focus_task(plan_path, focus)
+        _replace_plan_for_focus(plan_path, focus)
     open_tasks = _open_tasks(plan_path)
     if not open_tasks:
         return _result("Je ne vois pas de prochaine tache claire dans `PLAN.md`.")
@@ -268,11 +288,22 @@ def commit(context: CommandContext) -> CommandResult:
 
 
 def _content_root(context: CommandContext) -> Path:
+    if context.callbacks.get("scope") != "local":
+        agent_workspace = _agent_workspace(context)
+        content = agent_workspace / "content"
+        content.mkdir(parents=True, exist_ok=True)
+        return content
     content_root = context.callbacks.get("content_root")
-    if content_root and context.callbacks.get("scope") == "local":
+    if content_root:
         content = Path(content_root).expanduser().resolve()
         content.mkdir(parents=True, exist_ok=True)
         return content
+    content = _agent_workspace(context) / "content"
+    content.mkdir(parents=True, exist_ok=True)
+    return content
+
+
+def _agent_workspace(context: CommandContext) -> Path:
     agent_workspace_for = context.callbacks.get("agent_workspace_for")
     if callable(agent_workspace_for):
         agent_workspace = agent_workspace_for(context.agent_id)
@@ -282,8 +313,7 @@ def _content_root(context: CommandContext) -> Path:
         workspace = Path(context.callbacks.get("workspace") or ".").expanduser().resolve()
         agent_workspace = workspace / "agents" / context.agent_id
     content = Path(agent_workspace).expanduser().resolve() / "content"
-    content.mkdir(parents=True, exist_ok=True)
-    return content
+    return content.parent
 
 
 def _state_path(context: CommandContext) -> Path:
@@ -312,6 +342,9 @@ def _active_project(context: CommandContext) -> str:
     active_path = _explicit_active_project_path(context)
     if active_path is not None:
         return active_path.name
+    state_path = _state_active_project_path(context)
+    if state_path is not None:
+        return state_path.name
     value = _read_state(context).get("active_project")
     return value if isinstance(value, str) else ""
 
@@ -328,6 +361,10 @@ def _active_project_path(context: CommandContext) -> Path | None:
         path = Path(project_root).expanduser().resolve()
         path.mkdir(parents=True, exist_ok=True)
         return path
+    state_path = _state_active_project_path(context)
+    if state_path is not None:
+        state_path.mkdir(parents=True, exist_ok=True)
+        return state_path
     active = _active_project(context)
     if not active:
         return None
@@ -341,6 +378,35 @@ def _explicit_active_project_path(context: CommandContext) -> Path | None:
     if not value:
         return None
     return Path(value).expanduser().resolve()
+
+
+def _state_active_project_path(context: CommandContext) -> Path | None:
+    value = _read_state(context).get("active_project_path")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return Path(value).expanduser().resolve()
+
+
+def _remember_active_project(context: CommandContext, path: Path) -> None:
+    if context.callbacks.get("scope") != "global":
+        return
+    record_known_project(_agent_workspace(context), path)
+
+
+def _known_project_rows(context: CommandContext) -> list[str]:
+    if context.callbacks.get("scope") != "global":
+        return []
+    content_root = _content_root(context)
+    active_path = _explicit_active_project_path(context)
+    seen_paths = {str(active_path)} if active_path is not None else set()
+    rows = []
+    for project in list_known_projects(_agent_workspace(context)):
+        path = Path(project["path"]).expanduser().resolve()
+        if str(path) in seen_paths or path.parent == content_root:
+            continue
+        suffix = "" if path.exists() else " (introuvable)"
+        rows.append(f"{len(rows) + 1}. `{project['name']}` — `{path}`{suffix}")
+    return rows
 
 
 def _ensure_project_files(path: Path) -> None:
@@ -409,33 +475,19 @@ def _done_tasks(plan_path: Path) -> list[str]:
     return tasks
 
 
-def _ensure_focus_task(plan_path: Path, focus: str) -> None:
+def _replace_plan_for_focus(plan_path: Path, focus: str) -> None:
     focus = " ".join(focus.strip().split())
     if not focus or not plan_path.exists():
         return
-    content = plan_path.read_text(encoding="utf-8")
-    if _normalize_for_match(focus) in _normalize_for_match(content):
-        return
     task = f"- [ ] {focus.rstrip('.')}. [ non parallellisable ]"
-    lines = content.splitlines()
-    for index, line in enumerate(lines):
-        if line.strip().startswith("- [ ]"):
-            lines.insert(index, task)
-            plan_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-            return
-    for index, line in enumerate(lines):
-        if line.strip().lower() == "## taches":
-            insert_at = index + 1
-            while insert_at < len(lines) and not lines[insert_at].strip():
-                insert_at += 1
-            lines.insert(insert_at, task)
-            plan_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-            return
-    plan_path.write_text(content.rstrip() + "\n\n## Taches\n\n" + task + "\n", encoding="utf-8")
-
-
-def _normalize_for_match(text: str) -> str:
-    return " ".join(text.lower().replace("’", "'").split())
+    plan_path.write_text(
+        "# Plan\n\n"
+        "## Objectif\n\n"
+        f"{focus}\n\n"
+        "## Taches\n\n"
+        f"{task}\n",
+        encoding="utf-8",
+    )
 
 
 

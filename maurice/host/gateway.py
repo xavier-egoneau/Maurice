@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import sys
+import threading
 from urllib.parse import parse_qs, urlparse
 from typing import Any
 from uuid import uuid4
@@ -59,6 +60,7 @@ InterceptMessage = Callable[[InboundMessage, str, str, str], str | None]
 RecordExchange = Callable[[InboundMessage, OutboundMessage, bool], None]
 WebUploads = Callable[[str, str, list[dict[str, Any]]], list[dict[str, Any]]]
 WebAttachment = Callable[[str], tuple[str, bytes] | None]
+WebTurnCancel = Callable[[str, str], bool]
 
 
 APPROVAL_ACCEPT_WORDS = {"ok", "oui", "yes", "y", "go", "vas-y", "vasy", "approve", "approuve"}
@@ -113,6 +115,17 @@ class MessageRouter:
         self.command_registry = command_registry or default_command_registry()
         self.command_callbacks = command_callbacks or {}
         self.record_exchange = record_exchange
+        self._active_turns: dict[tuple[str, str], threading.Event] = {}
+        self._active_turns_lock = threading.Lock()
+
+    def cancel(self, agent_id: str | None, session_id: str | None) -> bool:
+        key = (agent_id or self.default_agent_id, session_id or "")
+        with self._active_turns_lock:
+            event = self._active_turns.get(key)
+        if event is None:
+            return False
+        event.set()
+        return True
 
     def handle(self, inbound: InboundMessage | dict[str, Any]) -> GatewayResult:
         message = InboundMessage.model_validate(inbound)
@@ -138,6 +151,7 @@ class MessageRouter:
                 callbacks={
                     "command_registry": self.command_registry,
                     "reset_session": self.reset_session,
+                    "cancel_turn": self.cancel,
                     **self.command_callbacks,
                 },
             )
@@ -161,39 +175,45 @@ class MessageRouter:
                 if not isinstance(autonomy, dict):
                     autonomy = {}
                 command_name = command_result.metadata.get("command") or ""
-                initial_turn = self.run_turn(
-                    message=agent_prompt,
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    correlation_id=correlation_id,
-                    source_channel=message.channel,
-                    source_peer_id=message.peer_id,
-                    source_metadata={
-                        **message.metadata,
-                        "command": command_name,
-                        "original_text": message.text,
-                    },
-                    limits=agent_limits,
-                    message_metadata={
-                        "autonomy_internal": True,
-                        "command": command_name,
-                        "visible_user_message": message.text,
-                    },
-                )
-                turn, any_tool_activity = run_autonomous_command(
-                    run_turn=self.run_turn,
-                    initial_turn=initial_turn,
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    correlation_id=correlation_id,
-                    source_channel=message.channel,
-                    source_peer_id=message.peer_id,
-                    source_metadata={**message.metadata},
-                    agent_limits=agent_limits,
-                    command_name=command_name,
-                    autonomy_config=autonomy,
-                    original_text=message.text,
-                )
+                cancel_event = self._begin_turn(agent_id, session_id)
+                try:
+                    initial_turn = self.run_turn(
+                        message=agent_prompt,
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        correlation_id=correlation_id,
+                        source_channel=message.channel,
+                        source_peer_id=message.peer_id,
+                        source_metadata={
+                            **message.metadata,
+                            "command": command_name,
+                            "original_text": message.text,
+                        },
+                        limits=agent_limits,
+                        message_metadata={
+                            "autonomy_internal": True,
+                            "command": command_name,
+                            "visible_user_message": message.text,
+                        },
+                        cancel_event=cancel_event,
+                    )
+                    turn, any_tool_activity = run_autonomous_command(
+                        run_turn=self.run_turn,
+                        initial_turn=initial_turn,
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        correlation_id=correlation_id,
+                        source_channel=message.channel,
+                        source_peer_id=message.peer_id,
+                        source_metadata={**message.metadata},
+                        agent_limits=agent_limits,
+                        command_name=command_name,
+                        autonomy_config=autonomy,
+                        original_text=message.text,
+                        cancel_event=cancel_event,
+                    )
+                finally:
+                    self._finish_turn(agent_id, session_id, cancel_event)
                 text = _turn_response_text(turn)
                 if autonomy.get("requires_activity") is True and not any_tool_activity:
                     no_activity_text = autonomy.get("no_activity_text")
@@ -243,6 +263,7 @@ class MessageRouter:
                 correlation_id=correlation_id,
                 text=command_result.text,
                 metadata={
+                    **command_result.metadata,
                     "command": command_result.metadata.get("command"),
                     "format": command_result.format,
                 },
@@ -317,17 +338,22 @@ class MessageRouter:
             message_metadata["attachments"] = message.metadata["attachments"]
         if message.metadata.get("visible_user_message") is not None:
             message_metadata["visible_user_message"] = message.metadata.get("visible_user_message")
-        turn = self.run_turn(
-            message=message.text,
-            session_id=session_id,
-            agent_id=agent_id,
-            correlation_id=correlation_id,
-            source_channel=message.channel,
-            source_peer_id=message.peer_id,
-            source_metadata=message.metadata,
-            limits={"max_tool_iterations": 8},
-            **({"message_metadata": message_metadata} if message_metadata else {}),
-        )
+        cancel_event = self._begin_turn(agent_id, session_id)
+        try:
+            turn = self.run_turn(
+                message=message.text,
+                session_id=session_id,
+                agent_id=agent_id,
+                correlation_id=correlation_id,
+                source_channel=message.channel,
+                source_peer_id=message.peer_id,
+                source_metadata=message.metadata,
+                limits={"max_tool_iterations": 8},
+                cancel_event=cancel_event,
+                **({"message_metadata": message_metadata} if message_metadata else {}),
+            )
+        finally:
+            self._finish_turn(agent_id, session_id, cancel_event)
         text = _turn_response_text(turn)
         outbound = OutboundMessage(
             channel=message.channel,
@@ -354,6 +380,17 @@ class MessageRouter:
         if not turn.assistant_text and text:
             self._record_exchange(message, outbound, include_user=False)
         return GatewayResult(inbound=message, outbound=outbound, status=turn.status)
+
+    def _begin_turn(self, agent_id: str, session_id: str) -> threading.Event:
+        event = threading.Event()
+        with self._active_turns_lock:
+            self._active_turns[(agent_id, session_id)] = event
+        return event
+
+    def _finish_turn(self, agent_id: str, session_id: str, event: threading.Event) -> None:
+        with self._active_turns_lock:
+            if self._active_turns.get((agent_id, session_id)) is event:
+                del self._active_turns[(agent_id, session_id)]
 
     def _record_exchange(
         self,
@@ -479,6 +516,7 @@ class GatewayHttpServer:
         web_agent_update: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
         web_uploads: WebUploads | None = None,
         web_attachment: WebAttachment | None = None,
+        web_turn_cancel: WebTurnCancel | None = None,
         web_token: str | None = None,
     ) -> None:
         self.host = host
@@ -501,6 +539,7 @@ class GatewayHttpServer:
             web_agent_update=web_agent_update,
             web_uploads=web_uploads,
             web_attachment=web_attachment,
+            web_turn_cancel=web_turn_cancel,
             web_token=web_token,
         )
         self.server = ThreadingHTTPServer((host, port), handler)
@@ -534,6 +573,7 @@ class GatewayHttpServer:
         web_agent_update: Callable[[str, dict[str, Any]], dict[str, Any]] | None,
         web_uploads: WebUploads | None,
         web_attachment: WebAttachment | None,
+        web_turn_cancel: WebTurnCancel | None,
         web_token: str | None,
     ):
         class Handler(BaseHTTPRequestHandler):
@@ -652,6 +692,31 @@ class GatewayHttpServer:
 
             def do_POST(self) -> None:
                 parsed = urlparse(self.path)
+                if parsed.path == "/api/message/cancel":
+                    if not self._authorized(parsed):
+                        self._write_json(403, {"ok": False, "error": "forbidden"})
+                        return
+                    try:
+                        payload = self._read_payload()
+                        agent_id = str(payload.get("agent_id") or router.default_agent_id)
+                        session_id = str(payload.get("session_id") or "")
+                        local_cancelled = router.cancel(agent_id, session_id)
+                        remote_cancelled = (
+                            web_turn_cancel(agent_id, session_id)
+                            if web_turn_cancel is not None
+                            else False
+                        )
+                    except Exception as exc:
+                        self._write_json(400, {"ok": False, "error": str(exc)})
+                        return
+                    self._write_json(
+                        200,
+                        {
+                            "ok": True,
+                            "cancelled": bool(local_cancelled or remote_cancelled),
+                        },
+                    )
+                    return
                 if parsed.path == "/api/message":
                     if not self._authorized(parsed):
                         self._write_json(403, {"ok": False, "error": "forbidden"})

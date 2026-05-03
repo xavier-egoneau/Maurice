@@ -26,7 +26,7 @@ For assisted agent creation:
   7. `dreaming` : consolider la memoire et agir avec proactivite
   8. `skills` : creer de nouvelles competences
   9. `host` : diagnostiquer Maurice et demander des changements de config valides
-  10. `self_update` : proposer des ameliorations du runtime, sans les appliquer directement
+  10. `self_update` : signaler des bugs Maurice et proposer des ameliorations du runtime, sans les appliquer directement
   11. `dev` : piloter un projet de developpement
 - At the skills step, ask exactly one question like: "Quelles competences veux-tu lui donner ? Reponds par des numeros (`1,2,4`), des noms, `tous`, ou `recommande`."
 - For `/edit_agent`, if the user says "je veux changer les skills" at any point in the edit flow, skip directly to the numbered skills choice and mark the current skills as current/active.

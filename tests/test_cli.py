@@ -19,6 +19,7 @@ from maurice.host.cli import (
 from maurice.host.credentials import load_workspace_credentials
 from maurice.host.paths import host_config_path
 from maurice.host.project import global_config_path
+from maurice.host.project_registry import list_known_projects
 from maurice.host.secret_capture import request_secret_capture
 from maurice.kernel.config import load_workspace_config, read_yaml_file, write_yaml_file
 from maurice.kernel.scheduler import JobStatus, JobStore
@@ -306,6 +307,35 @@ def test_run_one_turn_uses_agent_model_name(tmp_path, capsys, monkeypatch) -> No
     assert captured["approvals_path"] == workspace / "agents" / "coding" / "approvals.json"
 
 
+def test_run_one_turn_records_seen_active_project(tmp_path, capsys, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "outside-project"
+    project.mkdir()
+    main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
+    capsys.readouterr()
+
+    class FakeAgentLoop:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def run_turn(self, **_kwargs):
+            return None
+
+    monkeypatch.setattr("maurice.host.runtime.AgentLoop", FakeAgentLoop)
+
+    run_one_turn(
+        workspace_root=workspace,
+        message="salut",
+        session_id="default",
+        agent_id="main",
+        source_metadata={"active_project_root": str(project)},
+    )
+
+    projects = list_known_projects(workspace / "agents" / "main")
+    assert projects[0]["name"] == "outside-project"
+    assert projects[0]["path"] == str(project.resolve())
+
+
 def test_cli_interactive_onboard_configures_telegram_bot(tmp_path, capsys, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     answers = iter(
@@ -546,6 +576,91 @@ def test_cli_start_daemon_spawns_foreground_command(tmp_path, capsys, monkeypatc
     assert meta["pid"] == 12345
 
 
+def test_cli_start_daemon_enables_telegram_by_default_when_configured(tmp_path, capsys, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace)])
+    host_config = read_yaml_file(host_config_path(workspace))
+    host_config.setdefault("host", {}).setdefault("channels", {})["telegram"] = {
+        "adapter": "telegram",
+        "enabled": True,
+        "agent": "main",
+        "credential": "telegram_bot",
+    }
+    write_yaml_file(host_config_path(workspace), host_config)
+    capsys.readouterr()
+    started = {}
+
+    class FakeProcess:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+    def fake_popen(command, **kwargs):
+        started["command"] = command
+        (workspace / "maurice.pid").write_text("12345\n", encoding="utf-8")
+        return FakeProcess()
+
+    monkeypatch.setattr("maurice.host.commands.service.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("maurice.host.commands.service._pid_is_running", lambda pid: pid == 12345)
+
+    assert main(["start", "--workspace", str(workspace), "--no-scheduler", "--no-gateway", "--no-browser"]) == 0
+    output = capsys.readouterr().out
+
+    assert "--foreground" in started["command"]
+    assert "--no-telegram" not in started["command"]
+    assert "Services: telegram." in output
+
+
+def test_start_services_foreground_can_start_telegram_worker(tmp_path, capsys, monkeypatch) -> None:
+    from maurice.host.commands import service
+    from maurice.host.workspace import initialize_workspace
+
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    initialize_workspace(workspace, runtime)
+    host_config = read_yaml_file(host_config_path(workspace))
+    host_config.setdefault("host", {}).setdefault("channels", {})["telegram"] = {
+        "adapter": "telegram",
+        "enabled": True,
+        "agent": "main",
+        "credential": "telegram_bot",
+    }
+    write_yaml_file(host_config_path(workspace), host_config)
+    calls = []
+
+    class FakeServer:
+        def __init__(self, ctx):
+            self.ctx = ctx
+            self._running = True
+
+        def serve(self, socket_path):
+            calls.append(("server", socket_path.name))
+
+    def fake_telegram_poll(workspace_root, agent_id, poll_seconds, stop_event, *, channel_name):
+        calls.append(("telegram", channel_name))
+        stop_event.set()
+
+    monkeypatch.setattr(service, "MauriceServer", FakeServer)
+    monkeypatch.setattr(service, "_wait_for_socket", lambda _socket_path: None)
+    monkeypatch.setattr(service, "_telegram_poll_until_stopped", fake_telegram_poll)
+
+    service._start_services(
+        workspace,
+        agent_id=None,
+        poll_seconds=0.1,
+        telegram=True,
+        scheduler=False,
+        gateway=False,
+        open_browser=False,
+    )
+    output = capsys.readouterr().out
+
+    assert ("telegram", "telegram") in calls
+    assert "Services: telegram." in output
+
+
 def test_cli_start_opens_gateway_ui_by_default(tmp_path, capsys, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     main(["onboard", "--workspace", str(workspace)])
@@ -728,6 +843,66 @@ def test_cli_web_uses_configured_global_workspace(tmp_path, capsys, monkeypatch)
         f"http://127.0.0.1:43211?token={captured['kwargs']['web_token']}"
     ) in output
     assert f"Working directory: {project.resolve()}" in output
+
+
+def test_cli_web_does_not_start_telegram_polling_when_global_daemon_runs(
+    tmp_path,
+    capsys,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MAURICE_HOME", str(tmp_path / ".maurice"))
+    workspace = tmp_path / "configured-global"
+    project = tmp_path / "outside-project"
+    project.mkdir()
+    main(["onboard", "--workspace", str(workspace)])
+    host_data = read_yaml_file(host_config_path(workspace))
+    host_data.setdefault("host", {}).setdefault("channels", {})["telegram"] = {
+        "adapter": "telegram",
+        "enabled": True,
+        "agent": "main",
+        "credential": "telegram_bot",
+    }
+    write_yaml_file(host_config_path(workspace), host_data)
+    write_yaml_file(global_config_path(), {"usage": {"mode": "global", "workspace": str(workspace)}})
+    capsys.readouterr()
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, ctx) -> None:
+            captured["client_ctx"] = ctx
+
+        def is_running(self) -> bool:
+            return True
+
+    class FakeServer:
+        address = ("127.0.0.1", 43212)
+
+        def serve_forever(self):
+            captured["served"] = True
+
+        def shutdown(self):
+            captured["shutdown"] = True
+
+    def fake_build(ctx, **kwargs):
+        captured["ctx"] = ctx
+        captured["kwargs"] = kwargs
+        return FakeServer()
+
+    def fail_pollers(*_args, **_kwargs):
+        raise AssertionError("maurice web should not start Telegram polling while daemon is running")
+
+    monkeypatch.setattr("maurice.host.cli.MauriceClient", FakeClient)
+    monkeypatch.setattr("maurice.host.cli._WebTelegramPollers", fail_pollers)
+    monkeypatch.setattr("maurice.host.cli._build_gateway_http_server_for_context", fake_build)
+    monkeypatch.chdir(project)
+
+    assert main(["web", "--no-browser"]) == 0
+
+    assert captured["client_ctx"].scope == "global"
+    assert captured["kwargs"]["telegram_pollers"] is None
+    assert captured["ctx"].active_project_root == project.resolve()
+    assert captured["served"] is True
+    assert captured["shutdown"] is True
 
 
 def test_cli_web_reports_occupied_port_without_traceback(tmp_path, monkeypatch) -> None:

@@ -36,6 +36,19 @@ def test_filesystem_write_read_list_and_mkdir(tmp_path) -> None:
     assert (workspace / "content" / "notes" / "today.md").read_text(encoding="utf-8") == "hello"
 
 
+def test_filesystem_write_returns_diff_artifact(tmp_path) -> None:
+    permission_context = context(tmp_path)
+    write_text({"path": "notes/today.md", "content": "hello\n"}, permission_context)
+
+    result = write_text({"path": "notes/today.md", "content": "hello\nworld\n"}, permission_context)
+
+    diff = next(artifact for artifact in result.artifacts if artifact.type == "diff")
+    assert diff.data["insertions"] == 1
+    assert diff.data["deletions"] == 0
+    assert "+world" in diff.data["diff"]
+    assert diff.data["before_exists"] is True
+
+
 def test_filesystem_relative_paths_use_active_project_when_available(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     runtime = tmp_path / "runtime"

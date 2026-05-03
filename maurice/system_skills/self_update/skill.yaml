@@ -12,6 +12,10 @@ dependencies:
   skills: []
   optional_skills: []
 permissions:
+  - class: fs.write
+    scope:
+      paths:
+        - $workspace/reports/bugs/**
   - class: runtime.write
     scope:
       targets:
@@ -63,6 +67,61 @@ tools:
       input: local_mutable
       output: skill_generated
     executor: maurice.system_skills.self_update.tools.propose
+  - name: self_update.report_bug
+    description: Record a Maurice runtime or skill bug under the workspace without proposing a patch.
+    input_schema:
+      type: object
+      properties:
+        target_type:
+          type: string
+        target_name:
+          type: string
+        title:
+          type: string
+        summary:
+          type: string
+        observed:
+          type: string
+        expected:
+          type: string
+        severity:
+          type: string
+        reproduction:
+          type: string
+        workaround:
+          type: string
+        evidence:
+          type: array
+          items:
+            type: string
+        created_by_agent:
+          type: string
+      required: ["target_type", "title", "summary", "observed", "expected", "severity"]
+    permission_class: fs.write
+    permission_scope:
+      paths:
+        - $workspace/reports/bugs/**
+    trust:
+      input: local_mutable
+      output: skill_generated
+    executor: maurice.system_skills.self_update.tools.report_bug
+commands:
+  - name: /auto_update_list
+    description: lister les propositions d'auto-update Maurice
+    handler: maurice.system_skills.self_update.commands.auto_update_list
+    renderer: markdown
+  - name: /auto_update_show
+    description: afficher le detail et le diff d'une proposition d'auto-update
+    handler: maurice.system_skills.self_update.commands.auto_update_show
+    renderer: markdown
+  - name: /auto_update_validate
+    description: verifier une proposition d'auto-update sans l'appliquer
+    handler: maurice.system_skills.self_update.commands.auto_update_validate
+    renderer: markdown
+  - name: /auto_update_apply
+    description: appliquer une proposition d'auto-update apres confirmation explicite
+    handler: maurice.system_skills.self_update.commands.auto_update_apply
+    renderer: markdown
 backend: null
 storage: null
 dreams:

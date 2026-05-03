@@ -11,6 +11,7 @@ from maurice.host.context import MauriceContext, resolve_global_context
 from maurice.host.credentials import CredentialsStore, load_workspace_credentials
 from maurice.host.delivery import _cancel_job_callback, _schedule_reminder_callback
 from maurice.host.paths import maurice_home
+from maurice.host.project_registry import list_known_projects, record_known_project
 from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.classifier import Classifier
 from maurice.kernel.compaction import CompactionConfig
@@ -58,6 +59,8 @@ def build_global_agent_loop(
         active_project=ctx.active_project_root,
     )
     active_project_root = _turn_active_project_path(ctx, agent, source_metadata)
+    if active_project_root:
+        record_known_project(agent.workspace, active_project_root)
     permission_context = PermissionContext(
         workspace_root=str(ctx.content_root),
         runtime_root=str(ctx.runtime_root),
@@ -198,7 +201,12 @@ def _active_dev_project_path(agent: Any | None) -> str | None:
         payload = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    active = payload.get("active_project") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    active_path = payload.get("active_project_path")
+    if isinstance(active_path, str) and active_path.strip():
+        return str(Path(active_path).expanduser().resolve())
+    active = payload.get("active_project")
     if not isinstance(active, str) or not active.strip():
         return None
     return str((agent_workspace / "content" / active.strip()).resolve())
@@ -237,6 +245,7 @@ def _agent_system_prompt(
         workspace=workspace,
         agent_content=agent_content,
         active_project=project,
+        known_projects=list_known_projects(agent_workspace) if agent_workspace is not None else None,
         agent=agent,
     )
 
@@ -324,6 +333,7 @@ def run_one_turn(
     source_metadata: dict[str, Any] | None = None,
     limits: dict[str, Any] | None = None,
     message_metadata: dict[str, Any] | None = None,
+    cancel_event: Any | None = None,
 ) -> TurnResult:
     bundle = load_workspace_config(workspace_root)
     agent = _resolve_agent(bundle, agent_id)
@@ -344,4 +354,5 @@ def run_one_turn(
         message=message,
         limits=limits,
         message_metadata=message_metadata,
+        cancel_event=cancel_event,
     )

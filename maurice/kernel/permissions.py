@@ -149,10 +149,13 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
         PermissionClass.RUNTIME_WRITE: PermissionRule.model_validate(
             {
                 "class": "runtime.write",
-                "decision": "deny",
-                "scope": {"mode": "proposal_only"},
+                "decision": "ask",
+                "scope": {
+                    "targets": ["kernel", "host", "system_skill:*", "packaged_defaults", "installer"],
+                    "mode": "proposal_only",
+                },
                 "rememberable": False,
-                "reason": "Safe profile denies runtime writes.",
+                "reason": "Safe profile asks before creating runtime update proposals.",
             }
         ),
     },
@@ -247,7 +250,7 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "class": "runtime.write",
                 "decision": "ask",
                 "scope": {
-                    "targets": ["kernel", "system_skill:*"],
+                    "targets": ["kernel", "host", "system_skill:*", "packaged_defaults", "installer"],
                     "mode": "proposal_only",
                 },
                 "rememberable": False,
@@ -353,7 +356,7 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "class": "runtime.write",
                 "decision": "ask",
                 "scope": {
-                    "targets": ["kernel", "host", "system_skill:*"],
+                    "targets": ["kernel", "host", "system_skill:*", "packaged_defaults", "installer"],
                     "mode": "proposal_only",
                 },
                 "rememberable": False,

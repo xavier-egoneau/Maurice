@@ -94,7 +94,7 @@ def _tree(args: dict[str, Any], perm: Any) -> ToolResult:
     if not root.is_dir():
         return _err(f"Not a directory: {root}")
 
-    lines: list[str] = [str(root)]
+    lines: list[str] = [_display_path(root, perm)]
     _walk_tree(root, lines, prefix="", depth=depth, current=0,
                include_hidden=include_hidden)
     text = "\n".join(lines)
@@ -175,7 +175,8 @@ def _grep(args: dict[str, Any], perm: Any) -> ToolResult:
         for lineno, line in enumerate(text.splitlines(), start=1):
             if regex.search(line):
                 matches.append({
-                    "file": str(filepath),
+                    "file": _display_path(filepath, perm),
+                    "absolute_file": str(filepath),
                     "line": lineno,
                     "text": line.rstrip(),
                 })
@@ -222,6 +223,7 @@ def _iter_files(root: Path, glob: str) -> list[Path]:
 
 def _summary(args: dict[str, Any], perm: Any) -> ToolResult:
     raw_path = str(args.get("path") or ".")
+    include_project_memory = bool(args.get("include_project_memory", False))
     root = _resolve(raw_path, perm)
     if root is None:
         return _err(f"Path not accessible: {raw_path}")
@@ -264,8 +266,11 @@ def _summary(args: dict[str, Any], perm: Any) -> ToolResult:
         for name in ["AGENTS.md", "PLAN.md", "DECISIONS.md"]:
             f = maurice / name
             if f.exists():
-                content = _read_truncated(f, max_chars=1000)
-                sections.append(f"\n### {name}\n{content}")
+                if include_project_memory:
+                    content = _read_truncated(f, max_chars=1000)
+                    sections.append(f"\n### {name}\n{content}")
+                else:
+                    sections.append(f"\n### {name}\n{_project_memory_brief(name, f)}")
             else:
                 sections.append(f"\n### {name}: not created yet — run /plan to initialize.")
 
@@ -299,6 +304,27 @@ def _read_truncated(path: Path, max_chars: int = 2000) -> str:
         return "(unreadable)"
 
 
+def _project_memory_brief(name: str, path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "exists, unreadable"
+    if name == "PLAN.md":
+        open_tasks = len(re.findall(r"(?m)^\s*-\s*\[\s\]\s+", text))
+        done_tasks = len(re.findall(r"(?m)^\s*-\s*\[[xX]\]\s+", text))
+        return (
+            f"exists ({open_tasks} open task{'s' if open_tasks != 1 else ''}, "
+            f"{done_tasks} done). Not included in general summaries; use `/plan show`, `/tasks`, or `/dev` for plan details."
+        )
+    if name == "DECISIONS.md":
+        decisions = len(re.findall(r"(?m)^\s*-\s+\d{4}-\d{2}-\d{2}\s+-", text))
+        return f"exists ({decisions} recorded decision{'s' if decisions != 1 else ''})."
+    if name == "AGENTS.md":
+        rules = len(re.findall(r"(?m)^\s*-\s+", text))
+        return f"exists ({rules} local rule{'s' if rules != 1 else ''})."
+    return "exists"
+
+
 # ---------------------------------------------------------------------------
 # helpers
 
@@ -317,6 +343,24 @@ def _resolve(raw: str, perm: Any) -> Path | None:
         if value
     ]
     return p if any(_is_relative_to(p, root) for root in allowed_roots) else None
+
+
+def _display_path(path: Path, perm: Any) -> str:
+    variables = perm.variables() if hasattr(perm, "variables") else {}
+    roots = [
+        Path(value).expanduser().resolve()
+        for value in (variables.get("$project"), variables.get("$workspace"))
+        if value
+    ]
+    resolved = path.expanduser().resolve()
+    for root in roots:
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError:
+            continue
+        value = relative.as_posix()
+        return value or "."
+    return resolved.name if resolved.name else str(resolved)
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

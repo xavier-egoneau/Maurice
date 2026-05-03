@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 from pathlib import Path
 import shutil
 from typing import Any
@@ -98,15 +99,21 @@ def write_text(arguments: dict[str, Any], context: PermissionContext) -> ToolRes
     if not isinstance(content, str):
         return _error("invalid_arguments", "filesystem.write requires string content.")
 
+    encoding = arguments.get("encoding", "utf-8")
+    before_exists = path.exists()
+    before_content = ""
+    if before_exists and path.is_file():
+        before_content = path.read_text(encoding=encoding, errors="replace")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding=arguments.get("encoding", "utf-8"))
+    path.write_text(content, encoding=encoding)
+    diff_artifact = _diff_artifact(path, before_content, content, before_exists=before_exists)
 
     return ToolResult(
         ok=True,
         summary=f"C'est écrit dans `{path.name}`.",
-        data={"path": str(path), "bytes": len(content.encode(arguments.get("encoding", "utf-8")))},
+        data={"path": str(path), "bytes": len(content.encode(encoding))},
         trust="local_mutable",
-        artifacts=[{"type": "file", "path": str(path)}],
+        artifacts=[{"type": "file", "path": str(path)}, diff_artifact],
         events=[{"name": "filesystem.file_written", "payload": {"path": str(path)}}],
         error=None,
     )
@@ -195,6 +202,52 @@ def _resolve_path(arguments: dict[str, Any], context: PermissionContext) -> Path
 def _looks_like_current_project_name(candidate: Path, variables: dict[str, str]) -> bool:
     project = Path(variables.get("$project") or "")
     return len(candidate.parts) == 1 and project.name and candidate.parts[0] == project.name
+
+
+def _diff_artifact(
+    path: Path,
+    before: str,
+    after: str,
+    *,
+    before_exists: bool,
+    max_chars: int = 40_000,
+) -> dict[str, Any]:
+    diff_lines = list(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=str(path) if before_exists else "/dev/null",
+            tofile=str(path),
+            lineterm="",
+        )
+    )
+    diff = "\n".join(diff_lines)
+    if diff:
+        diff += "\n"
+    truncated = len(diff) > max_chars
+    if truncated:
+        diff = diff[:max_chars].rstrip() + "\n... diff truncated ..."
+    return {
+        "type": "diff",
+        "path": str(path),
+        "data": {
+            "path": str(path),
+            "diff": diff,
+            "truncated": truncated,
+            "insertions": _changed_line_count(diff, "+"),
+            "deletions": _changed_line_count(diff, "-"),
+            "before_exists": before_exists,
+        },
+    }
+
+
+def _changed_line_count(diff: str, prefix: str) -> int:
+    ignored = {"+++", "---"}
+    return sum(
+        1
+        for line in diff.splitlines()
+        if line.startswith(prefix) and not any(line.startswith(header) for header in ignored)
+    )
 
 
 def _list_summary(entries: list[dict[str, Any]]) -> str:

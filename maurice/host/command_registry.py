@@ -137,6 +137,13 @@ def core_commands() -> list[RuntimeCommand]:
             aliases=("/reset",),
         ),
         RuntimeCommand(
+            name="/stop",
+            description="annuler la reponse en cours dans cette session",
+            owner="system",
+            handler=_stop_handler,
+            aliases=("/cancel",),
+        ),
+        RuntimeCommand(
             name="/compact",
             description="compacter la session courante",
             owner="system",
@@ -204,6 +211,20 @@ def _new_handler(context: CommandContext) -> CommandResult:
     return CommandResult(
         text="Session reinitialisee. On repart proprement.",
         metadata={"command": "/new"},
+    )
+
+
+def _stop_handler(context: CommandContext) -> CommandResult:
+    cancel_turn = context.callbacks.get("cancel_turn")
+    cancelled = bool(cancel_turn(context.agent_id, context.session_id)) if cancel_turn is not None else False
+    text = (
+        "Annulation demandee pour la reponse en cours."
+        if cancelled
+        else "Aucune reponse en cours a annuler dans cette session."
+    )
+    return CommandResult(
+        text=text,
+        metadata={"command": "/stop", "cancelled": cancelled},
     )
 
 

@@ -4,16 +4,24 @@ In folder context, the active project is the folder context root. In global web
 or gateway context, the active project may be the folder where Maurice was
 launched, even when that folder is outside the assistant workspace. Older global
 flows can still select agent-content projects by name.
+There is intentionally only one active project for the current turn/session.
+Known or remembered projects are not automatically active; use them as a list of
+possible targets only when the user asks to list or select a project.
 Do not ask the user for absolute paths when the active project context is enough.
 Maurice's project memory lives in `<project>/.maurice/` and should not pollute the user's Git repository.
 If the user asks "tu es sur le dossier/projet X ?" or "on est sur quel projet ?", answer directly from the active project context.
 Do not turn those questions into a service status check.
+A normal user request is stronger than the saved project plan. Outside `/plan`,
+`/plan show`, `/tasks`, and `/dev`, do not consult `.maurice/PLAN.md` before
+answering or acting on the current request. If the current request conflicts
+with `.maurice/PLAN.md`, treat the file as stale and replace it before using
+plan-driven commands again.
 
 Project memory files:
 
 - `.maurice/AGENTS.md`: local rules for how Maurice should work in this project.
 - `.maurice/DECISIONS.md`: decisions that should survive session compaction.
-- `.maurice/PLAN.md`: ordered checklist used by `/tasks` and `/dev`.
+- `.maurice/PLAN.md`: ordered checklist used only by `/plan`, `/tasks`, and `/dev`; it is not general authority over new chat requests.
 - `.maurice/dreams.md`: project signals that can feed daily dreaming.
 
 Prefer this light cycle:
@@ -50,4 +58,5 @@ After explicit validation, write `.maurice/PLAN.md` with:
 Also write `.maurice/DECISIONS.md` with the durable choices that justify the plan.
 
 When `/dev` is triggered, do actual implementation work with the available tools. Do not merely describe the next task.
+When `/dev <new demand>` is triggered, replace `.maurice/PLAN.md` with a fresh plan centered on that demand before executing. Do not prepend the new demand to an old unrelated plan.
 When executing a task, verify the code, inspect downstream impact, remove dead code when relevant, and check completed items in `.maurice/PLAN.md`.

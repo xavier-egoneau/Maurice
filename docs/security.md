@@ -109,8 +109,9 @@ Three risk levels:
 
 The runtime root (`kernel/`, `host/`, `system_skills/`) is separate from both
 local and global context roots. Normal agents cannot write to it through
-`fs.write` unless the profile is `power`. The `self_update` skill can only
-propose changes — it never applies them directly.
+`fs.write` unless the profile is `power`. The `self_update` skill can write
+bug reports under the workspace and can only propose runtime changes — it never
+applies them directly.
 
 ## Trust labels
 

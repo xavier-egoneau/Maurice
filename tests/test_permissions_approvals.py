@@ -144,6 +144,45 @@ def test_runtime_write_defaults_to_proposal_flow_in_limited_profile(tmp_path) ->
     assert direct_apply.denied
 
 
+def test_limited_profile_allows_host_runtime_proposals_with_approval(tmp_path) -> None:
+    context = PermissionContext(
+        workspace_root=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "runtime"),
+    )
+
+    evaluation = evaluate_permission(
+        "limited",
+        "runtime.write",
+        {"targets": ["host"], "mode": "proposal_only"},
+        context,
+    )
+
+    assert evaluation.requires_approval
+
+
+def test_safe_profile_allows_runtime_proposals_with_approval(tmp_path) -> None:
+    context = PermissionContext(
+        workspace_root=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "runtime"),
+    )
+
+    proposal = evaluate_permission(
+        "safe",
+        "runtime.write",
+        {"targets": ["host"], "mode": "proposal_only"},
+        context,
+    )
+    direct_apply = evaluate_permission(
+        "safe",
+        "runtime.write",
+        {"targets": ["host"], "mode": "apply"},
+        context,
+    )
+
+    assert proposal.requires_approval
+    assert direct_apply.denied
+
+
 def test_host_control_is_scoped_by_action(tmp_path) -> None:
     context = PermissionContext(
         workspace_root=str(tmp_path / "workspace"),

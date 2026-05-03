@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 from pydantic import Field
 
+from maurice.host.paths import host_config_path
 from maurice.kernel.config import load_workspace_config
 from maurice.kernel.contracts import MauriceModel
 from maurice.kernel.events import EventStore
@@ -78,7 +79,7 @@ def list_runtime_proposals(workspace_root: str | Path) -> list[ProposalSummary]:
 
 
 def validate_runtime_proposal(workspace_root: str | Path, proposal_id: str) -> ProposalValidationReport:
-    bundle = load_workspace_config(workspace_root)
+    _workspace, runtime = _host_paths(workspace_root)
     proposal_dir = _proposal_root(workspace_root) / proposal_id
     checks: list[ProposalCheck] = []
     record = _read_record(proposal_dir)
@@ -99,15 +100,15 @@ def validate_runtime_proposal(workspace_root: str | Path, proposal_id: str) -> P
             "permission must remain runtime.write proposal_only",
         )
     )
-    target_path = _expand_runtime_path(record.get("target", {}).get("runtime_path"), Path(bundle.host.runtime_root))
+    target_path = _expand_runtime_path(record.get("target", {}).get("runtime_path"), runtime)
     checks.append(
         _check(
             "target_scope",
-            target_path is not None and _is_relative_to(target_path, Path(bundle.host.runtime_root).resolve()),
+            target_path is not None and _is_relative_to(target_path, runtime.resolve()),
             str(target_path) if target_path is not None else "missing runtime_path",
         )
     )
-    check_result = _git_apply_check(Path(bundle.host.runtime_root), patch_path)
+    check_result = _git_apply_check(runtime, patch_path)
     checks.append(_check("patch_check", check_result.returncode == 0, check_result.stderr.strip() or "git apply --check"))
     return ProposalValidationReport(
         proposal_id=proposal_id,
@@ -118,7 +119,7 @@ def validate_runtime_proposal(workspace_root: str | Path, proposal_id: str) -> P
 
 
 def run_proposal_tests(workspace_root: str | Path, proposal_id: str) -> ProposalTestReport:
-    bundle = load_workspace_config(workspace_root)
+    _workspace, runtime = _host_paths(workspace_root)
     proposal_dir = _proposal_root(workspace_root) / proposal_id
     test_plan = proposal_dir / "test_plan.md"
     commands = _test_commands(test_plan)
@@ -126,7 +127,7 @@ def run_proposal_tests(workspace_root: str | Path, proposal_id: str) -> Proposal
     for command in commands:
         completed = subprocess.run(
             command,
-            cwd=Path(bundle.host.runtime_root),
+            cwd=runtime,
             shell=True,
             text=True,
             capture_output=True,
@@ -156,9 +157,7 @@ def apply_runtime_proposal(
 ) -> ProposalApplyReport:
     if not confirmed:
         raise PermissionError("Applying a runtime proposal requires --confirm-approval.")
-    bundle = load_workspace_config(workspace_root)
-    workspace = Path(bundle.host.workspace_root)
-    runtime = Path(bundle.host.runtime_root)
+    workspace, runtime = _host_paths(workspace_root)
     proposal_dir = _proposal_root(workspace) / proposal_id
     validation = validate_runtime_proposal(workspace, proposal_id)
     tests = run_proposal_tests(workspace, proposal_id) if run_tests else None
@@ -227,8 +226,19 @@ def apply_runtime_proposal(
 
 
 def _proposal_root(workspace_root: str | Path) -> Path:
-    bundle = load_workspace_config(workspace_root)
-    return Path(bundle.host.workspace_root) / "proposals" / "runtime"
+    workspace, _runtime = _host_paths(workspace_root)
+    return workspace / "proposals" / "runtime"
+
+
+def _host_paths(workspace_root: str | Path) -> tuple[Path, Path]:
+    root = Path(workspace_root).expanduser().resolve()
+    if host_config_path(root).is_file():
+        bundle = load_workspace_config(root)
+        return (
+            Path(bundle.host.workspace_root).expanduser().resolve(),
+            Path(bundle.host.runtime_root).expanduser().resolve(),
+        )
+    return root, Path(__file__).resolve().parents[2]
 
 
 def _read_record(proposal_dir: Path) -> dict[str, Any] | None:

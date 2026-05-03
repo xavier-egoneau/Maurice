@@ -270,8 +270,11 @@ body.tools-hidden .tool-activity { display: none; }
 .tool-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   margin-top: 6px;
+}
+.tool-entry {
+  min-width: 0;
 }
 .tool-row {
   display: flex;
@@ -290,6 +293,79 @@ body.tools-hidden .tool-activity { display: none; }
   overflow: hidden;
   flex: 1;
 }
+.tool-row-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.tool-diff-button {
+  border: 1px solid #34302a;
+  background: #15120f;
+  color: #b8aa9b;
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.tool-diff-button:hover {
+  border-color: #7c5a36;
+  color: var(--bright);
+}
+.tool-diff-button.open {
+  border-color: #8a6338;
+  color: var(--bright);
+  background: #201711;
+}
+.tool-diff-panel {
+  margin: 5px 4px 8px;
+  border: 1px solid #2b251f;
+  border-radius: 8px;
+  background: #0f0d0b;
+  overflow: hidden;
+}
+.tool-diff-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 9px;
+  border-bottom: 1px solid #241f1a;
+  color: #a99c8f;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.tool-diff-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-diff-stats {
+  flex-shrink: 0;
+  color: #7f756b;
+}
+.tool-diff-pre {
+  margin: 0;
+  max-height: min(48vh, 420px);
+  overflow: auto;
+  padding: 7px 0;
+  font-size: 12px;
+  line-height: 1.42;
+  color: #cfc6bc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre;
+}
+.diff-line {
+  display: block;
+  min-height: 1.42em;
+  padding: 0 10px;
+}
+.diff-line.add { color: #86d08f; background: rgba(55, 116, 65, 0.16); }
+.diff-line.del { color: #e18a78; background: rgba(143, 62, 45, 0.16); }
+.diff-line.hunk { color: #86a9e6; background: rgba(73, 96, 145, 0.15); }
+.diff-line.file { color: #d7b778; }
+.diff-line.truncated { color: #c99b62; }
 .tool-label {
   color: var(--bright);
   font-size: 12px;
@@ -525,7 +601,8 @@ body.tools-hidden .tool-activity { display: none; }
 }
 .suggestion.active span,
 .suggestion:hover span { color: #c7bdb3; }
-#send {
+#send,
+#stop {
   background: var(--accent-2);
   color: #fde8d8;
   border: none;
@@ -536,7 +613,13 @@ body.tools-hidden .tool-activity { display: none; }
   white-space: nowrap;
 }
 #send:hover { background: #7c3510; }
-#send:disabled { opacity: .45; cursor: default; }
+#stop {
+  background: #3a1813;
+  border: 1px solid #7f2c1d;
+}
+#stop:hover { background: #5f2117; }
+#send:disabled,
+#stop:disabled { opacity: .45; cursor: default; }
 #modal-backdrop,
 #agent-modal-backdrop {
   position: fixed;
@@ -776,6 +859,7 @@ body.tools-hidden .tool-activity { display: none; }
         <div id="autocomplete" role="listbox" aria-label="Commandes"></div>
         <textarea id="input" rows="1" placeholder="Message…" autocomplete="off"></textarea>
       </div>
+      <button id="stop" type="button" hidden>Stop</button>
       <button id="send">Envoyer</button>
     </div>
   </main>
@@ -884,6 +968,7 @@ const statusDot = $("status");
 const messages = $("messages");
 const input = $("input");
 const sendBtn = $("send");
+const stopBtn = $("stop");
 const uploadBtn = $("upload-btn");
 const imageUpload = $("image-upload");
 const attachmentsBox = $("attachments");
@@ -937,15 +1022,47 @@ let lastCommandQuery = "";
 let selectedChangePath = "";
 let pendingAttachments = [];
 const MAX_UPLOAD_BYTES = 10_000_000;
+const HISTORY_REFRESH_MS = 15000;
 
 function esc(value) {
   return String(value ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
 
+function compactDisplayText(value) {
+  const text = String(value ?? "");
+  return text.replace(/(^|[\s("'`])((?:\/[^\s:"'`<>()\[\]{}]+){2,}(?::\d+)?)/g, (_, prefix, path) => {
+    return prefix + compactAbsolutePath(path);
+  });
+}
+
+function compactAbsolutePath(path) {
+  const value = String(path || "");
+  const lineMatch = value.match(/:(\d+)$/);
+  const suffix = lineMatch ? `:${lineMatch[1]}` : "";
+  const clean = suffix ? value.slice(0, -suffix.length) : value;
+  const parts = clean.split("/").filter(Boolean);
+  if (parts.length < 3) return value;
+  const markerRules = [
+    "projets",
+    "projects",
+    "content",
+  ];
+  for (const marker of markerRules) {
+    const index = parts.lastIndexOf(marker);
+    if (index >= 0 && parts.length > index + 2) {
+      return parts.slice(index + 2).join("/") + suffix;
+    }
+    if (index >= 0 && parts.length === index + 2) {
+      return parts[index + 1] + suffix;
+    }
+  }
+  return "…/" + parts.slice(-4).join("/") + suffix;
+}
+
 function renderMd(raw) {
   const saved = [];
   const save = html => { saved.push(html); return "\x00" + (saved.length - 1) + "\x00"; };
-  let s = String(raw ?? "").replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
+  let s = compactDisplayText(raw).replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
     save("<pre><code>" + esc(code) + "</code></pre>")
   );
   s = s.replace(/`([^`\n]+)`/g, (_, code) => save("<code>" + esc(code) + "</code>"));
@@ -986,6 +1103,9 @@ function setOnline(on) {
 function setBusy(on) {
   busy = on;
   sendBtn.disabled = on;
+  stopBtn.hidden = !on;
+  stopBtn.disabled = !on;
+  stopBtn.textContent = "Stop";
   statusDot.classList.toggle("busy", on);
 }
 
@@ -997,12 +1117,12 @@ function mkMsg(cls) {
 
 function addNotice(text) {
   const el = mkMsg("notice");
-  el.textContent = text;
+  el.textContent = compactDisplayText(text);
   messages.appendChild(el);
   scrollBottom();
 }
 
-function addUser(text, attachments = []) {
+function addUser(text, attachments = [], options = {}) {
   const el = mkMsg("user");
   const textEl = document.createElement("div");
   textEl.className = "user-text";
@@ -1010,7 +1130,7 @@ function addUser(text, attachments = []) {
   el.appendChild(textEl);
   addUserAttachments(el, attachments);
   messages.appendChild(el);
-  scrollBottom();
+  if (options.scroll !== false) scrollBottom();
 }
 
 function addUserAttachments(container, attachments) {
@@ -1060,6 +1180,8 @@ function addToolActivity(container, tools) {
   const list = document.createElement("div");
   list.className = "tool-list";
   for (const tool of visibleTools) {
+    const entry = document.createElement("div");
+    entry.className = "tool-entry";
     const row = document.createElement("div");
     row.className = "tool-row";
     const left = document.createElement("div");
@@ -1071,25 +1193,104 @@ function addToolActivity(container, tools) {
     if (tool.target) {
       const targetEl = document.createElement("span");
       targetEl.className = "tool-target";
-      targetEl.textContent = tool.target;
+      targetEl.textContent = compactDisplayText(tool.target);
       left.appendChild(targetEl);
     }
     if (tool.summary) {
       const summaryEl = document.createElement("span");
       summaryEl.className = "tool-summary";
-      summaryEl.textContent = tool.summary;
+      summaryEl.textContent = compactDisplayText(tool.summary);
       left.appendChild(summaryEl);
     }
+    const diff = toolDiffPayload(tool);
     const ok = tool.ok === true || tool.status === "ok";
+    const right = document.createElement("div");
+    right.className = "tool-row-right";
+    if (diff) {
+      const diffPanel = renderToolDiffPanel(diff);
+      diffPanel.hidden = true;
+      const diffButton = document.createElement("button");
+      diffButton.type = "button";
+      diffButton.className = "tool-diff-button";
+      diffButton.textContent = `Diff +${diff.insertions || 0} -${diff.deletions || 0}`;
+      diffButton.onclick = (event) => {
+        event.stopPropagation();
+        const open = diffPanel.hidden;
+        diffPanel.hidden = !open;
+        diffButton.classList.toggle("open", open);
+        diffButton.textContent = open ? "Fermer diff" : `Diff +${diff.insertions || 0} -${diff.deletions || 0}`;
+      };
+      right.appendChild(diffButton);
+      entry.appendChild(diffPanel);
+    }
     const statusEl = document.createElement("span");
     statusEl.className = "tool-status " + (ok ? "ok" : "failed");
     statusEl.textContent = ok ? "✓" : "✗";
+    right.appendChild(statusEl);
     row.appendChild(left);
-    row.appendChild(statusEl);
-    list.appendChild(row);
+    row.appendChild(right);
+    entry.insertBefore(row, entry.firstChild);
+    list.appendChild(entry);
   }
   details.appendChild(list);
   container.appendChild(details);
+}
+
+function toolDiffPayload(tool) {
+  if (tool?.diff?.diff) return tool.diff;
+  const artifacts = Array.isArray(tool?.artifacts) ? tool.artifacts : [];
+  const artifact = artifacts.find(item => item?.type === "diff" && item?.data?.diff);
+  return artifact?.data || null;
+}
+
+function renderToolDiffPanel(diff) {
+  const panel = document.createElement("div");
+  panel.className = "tool-diff-panel";
+
+  const header = document.createElement("div");
+  header.className = "tool-diff-header";
+  const path = document.createElement("span");
+  path.className = "tool-diff-path";
+  path.textContent = compactDisplayText(diff?.path || "diff");
+  const stats = document.createElement("span");
+  stats.className = "tool-diff-stats";
+  stats.innerHTML = `<span class="ins">+${Number(diff?.insertions || 0)}</span> <span class="del">-${Number(diff?.deletions || 0)}</span>`;
+  header.appendChild(path);
+  header.appendChild(stats);
+  panel.appendChild(header);
+
+  const pre = document.createElement("pre");
+  pre.className = "tool-diff-pre";
+  const lines = String(diff?.diff || "Aucun diff disponible.").split("\n");
+  for (const line of lines) {
+    const span = document.createElement("span");
+    span.className = "diff-line " + diffLineClass(line);
+    span.textContent = displayDiffLine(line);
+    pre.appendChild(span);
+  }
+  if (diff?.truncated) {
+    const truncated = document.createElement("span");
+    truncated.className = "diff-line truncated";
+    truncated.textContent = "... diff tronqué ...";
+    pre.appendChild(truncated);
+  }
+  panel.appendChild(pre);
+  return panel;
+}
+
+function diffLineClass(line) {
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+++") || line.startsWith("---")) return "file";
+  if (line.startsWith("+")) return "add";
+  if (line.startsWith("-")) return "del";
+  if (line.startsWith("... diff")) return "truncated";
+  return "ctx";
+}
+
+function displayDiffLine(line) {
+  if (!line) return " ";
+  if (line.startsWith("+++") || line.startsWith("---")) return compactDisplayText(line);
+  return line;
 }
 
 function formatNumber(value) {
@@ -1115,7 +1316,7 @@ function addContextMeter(container, context) {
   container.appendChild(meter);
 }
 
-function addAssistant(text, tools = [], context = null) {
+function addAssistant(text, tools = [], context = null, options = {}) {
   const el = mkMsg("assistant");
   const content = document.createElement("div");
   content.className = "assistant-content";
@@ -1125,7 +1326,7 @@ function addAssistant(text, tools = [], context = null) {
   addContextMeter(el, context);
   messages.appendChild(el);
   maybeAddApprovalActions(el, text);
-  scrollBottom();
+  if (options.scroll !== false) scrollBottom();
 }
 
 function maybeAddApprovalActions(container, text) {
@@ -1165,6 +1366,17 @@ function hideThinking() {
 
 function scrollBottom() {
   messages.scrollTop = messages.scrollHeight;
+}
+
+function isNearBottom(threshold = 32) {
+  return messages.scrollTop + messages.clientHeight >= messages.scrollHeight - threshold;
+}
+
+function selectionTouchesMessages() {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+  const range = selection.getRangeAt(0);
+  return messages.contains(range.commonAncestorContainer);
 }
 
 function apiFetch(url, options = {}) {
@@ -1259,8 +1471,11 @@ async function loadAgents() {
   }
 }
 
-async function loadHistory() {
-  const wasNearBottom = messages.scrollTop + messages.clientHeight >= messages.scrollHeight - 24;
+async function loadHistory(options = {}) {
+  const auto = options.auto === true;
+  const wasNearBottom = isNearBottom();
+  if (auto && (!wasNearBottom || selectionTouchesMessages())) return;
+  const previousScrollTop = messages.scrollTop;
   try {
     const url = `/api/session?agent_id=${encodeURIComponent(activeAgent)}&session_id=${encodeURIComponent(sessionId)}`;
     const res = await apiFetch(url);
@@ -1268,11 +1483,15 @@ async function loadHistory() {
     const data = await res.json();
     messages.innerHTML = "";
     for (const msg of data.messages || []) {
-      if (msg.role === "user") addUser(msg.metadata?.visible_user_message ?? msg.content ?? "", msg.metadata?.attachments || []);
-      else if (msg.role === "assistant") addAssistant(msg.content || "", msg.tools || [], msg.metadata?.context || null);
+      if (msg.role === "user") {
+        addUser(msg.metadata?.visible_user_message ?? msg.content ?? "", msg.metadata?.attachments || [], {scroll: false});
+      } else if (msg.role === "assistant") {
+        addAssistant(msg.content || "", msg.tools || [], msg.metadata?.context || null, {scroll: false});
+      }
       else if (msg.content) addNotice(msg.content);
     }
-    if (wasNearBottom) scrollBottom();
+    if (wasNearBottom && options.keepPosition !== true) scrollBottom();
+    else messages.scrollTop = previousScrollTop;
   } catch (error) {
     console.error(error);
   }
@@ -1322,7 +1541,6 @@ async function sendMessage(text, options = {}) {
     const context = payload.result?.outbound?.metadata?.context || null;
     if (!options.silent) {
       addAssistant(answer, tools, context);
-      void loadHistory();
     }
     return answer;
   } catch (error) {
@@ -1332,6 +1550,26 @@ async function sendMessage(text, options = {}) {
     hideThinking();
     setBusy(false);
     if (!options.silent) void loadGitChanges();
+  }
+}
+
+async function requestStop() {
+  if (!busy || stopBtn.disabled) return;
+  stopBtn.disabled = true;
+  stopBtn.textContent = "Arrêt...";
+  try {
+    await apiFetch("/api/message/cancel", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        agent_id: activeAgent,
+        session_id: sessionId,
+      }),
+    });
+  } catch (error) {
+    console.error(error);
+    stopBtn.disabled = false;
+    stopBtn.textContent = "Stop";
   }
 }
 
@@ -1405,12 +1643,16 @@ async function showDiff(path) {
   try {
     const res = await apiFetch(`/api/git/diff?path=${encodeURIComponent(path)}`);
     const data = await res.json();
-    diffContent.textContent = data.diff || "Aucun diff disponible.";
+    diffContent.textContent = compactDiffText(data.diff || "Aucun diff disponible.");
     diffBox.classList.add("open");
   } catch (error) {
     diffContent.textContent = "Diff indisponible.";
     diffBox.classList.add("open");
   }
+}
+
+function compactDiffText(value) {
+  return String(value ?? "").split("\n").map(line => displayDiffLine(line)).join("\n");
 }
 
 async function openModelDialog() {
@@ -1645,7 +1887,14 @@ async function applyAgentConfig() {
     activeAgent = agentId;
     localStorage.setItem(AGENT_KEY, activeAgent);
     await loadAgents();
-    addNotice(`Agent ${agentId} mis a jour.`);
+    const telegram = data.telegram || {};
+    if (telegram.enabled && telegram.runtime === "polling") {
+      addNotice(`Agent ${agentId} mis a jour. Telegram ecoute maintenant les messages.`);
+    } else if (telegram.enabled) {
+      addNotice(`Agent ${agentId} mis a jour. Telegram est configure ; lance ou redemarre Maurice si le bot ne repond pas.`);
+    } else {
+      addNotice(`Agent ${agentId} mis a jour.`);
+    }
   } catch (error) {
     addAssistant("Erreur agent : " + (error instanceof Error ? error.message : String(error)));
   } finally {
@@ -1668,6 +1917,7 @@ agentSelect.onchange = async () => {
 };
 
 sendBtn.onclick = () => { void send(); };
+stopBtn.onclick = () => { void requestStop(); };
 uploadBtn.onclick = () => imageUpload.click();
 imageUpload.onchange = async () => {
   const files = imageUpload.files;
@@ -1831,10 +2081,10 @@ function closeAutocomplete() {
   await loadGitChanges();
   window.setInterval(() => {
     if (!busy && document.visibilityState === "visible") {
-      void loadHistory();
+      void loadHistory({auto: true});
       void loadGitChanges();
     }
-  }, 5000);
+  }, HISTORY_REFRESH_MS);
 })();
 </script>
 </body>

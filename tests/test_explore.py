@@ -54,6 +54,7 @@ class TestExploreTree:
         ex = _exec(tmp_path)
         result = ex["explore.tree"]({"path": str(tmp_path)})
         assert result.ok
+        assert str(tmp_path) not in result.summary
         assert "src" in result.data["tree"]
         assert "main.py" in result.data["tree"]
 
@@ -105,6 +106,7 @@ class TestExploreGrep:
         result = ex["explore.grep"]({"pattern": "def hello", "path": str(tmp_path)})
         assert result.ok
         assert result.data["matches"]
+        assert str(tmp_path) not in result.summary
         assert "app.py" in result.data["matches"][0]["file"]
 
     def test_no_match(self, tmp_path):
@@ -182,6 +184,18 @@ class TestExploreSummary:
         (tmp_path / ".maurice" / "PLAN.md").write_text("# Plan\n- [ ] Do something")
         ex = _exec(tmp_path)
         result = ex["explore.summary"]({"path": str(tmp_path)})
+        assert result.ok
+        assert "1 open task" in result.data["summary"]
+        assert "Do something" not in result.data["summary"]
+
+    def test_can_include_project_memory_on_request(self, tmp_path):
+        (tmp_path / ".maurice").mkdir()
+        (tmp_path / ".maurice" / "PLAN.md").write_text("# Plan\n- [ ] Do something")
+        ex = _exec(tmp_path)
+        result = ex["explore.summary"]({
+            "path": str(tmp_path),
+            "include_project_memory": True,
+        })
         assert result.ok
         assert "Do something" in result.data["summary"]
 

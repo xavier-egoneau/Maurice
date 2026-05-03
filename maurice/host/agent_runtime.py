@@ -65,6 +65,7 @@ class AgentRuntime:
         source_metadata: dict[str, Any] | None = None,
         limits: dict[str, Any] | None = None,
         message_metadata: dict[str, Any] | None = None,
+        cancel_event: Any | None = None,
     ) -> TurnResult:
         with self._lock:
             if self._bundle is None:
@@ -86,6 +87,7 @@ class AgentRuntime:
                 message=message,
                 limits=limits,
                 message_metadata=message_metadata,
+                cancel_event=cancel_event,
             )
 
     def invalidate(self) -> None:

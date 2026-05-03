@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from maurice.host.command_registry import CommandContext, CommandRegistry, default_command_registry
+from maurice.host.project_registry import record_known_project
+from maurice.host.workspace import initialize_workspace
+from maurice.kernel.permissions import PermissionContext
 from maurice.kernel.skills import SkillLoader, SkillRoot
+from maurice.system_skills.self_update.tools import propose
 
 
 def _context(tmp_path, text: str) -> CommandContext:
@@ -119,6 +123,30 @@ def test_setup_command_points_to_unified_setup() -> None:
     assert "assistant de bureau" in result.text
 
 
+def test_stop_command_uses_cancel_callback() -> None:
+    calls = []
+    commands = default_command_registry()
+
+    result = commands.dispatch(
+        CommandContext(
+            message_text="/stop",
+            channel="web",
+            peer_id="peer_1",
+            agent_id="main",
+            session_id="web:peer_1",
+            correlation_id="corr_1",
+            callbacks={
+                "cancel_turn": lambda agent_id, session_id: calls.append((agent_id, session_id)) or True,
+            },
+        )
+    )
+
+    assert result is not None
+    assert calls == [("main", "web:peer_1")]
+    assert result.metadata["cancelled"] is True
+    assert "Annulation demandee" in result.text
+
+
 def test_help_shows_project_picker_in_global_scope(tmp_path) -> None:
     registry = SkillLoader(
         [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
@@ -171,6 +199,157 @@ def test_command_registry_executes_dev_project_commands(tmp_path) -> None:
     assert (project / ".maurice" / "AGENTS.md").is_file()
     assert (project / ".maurice" / "PLAN.md").is_file()
     assert (project / ".maurice" / "DECISIONS.md").is_file()
+
+
+def test_projects_lists_known_external_projects(tmp_path) -> None:
+    registry = SkillLoader(
+        [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
+        enabled_skills=["dev"],
+    ).load()
+    commands = CommandRegistry.from_skill_registry(registry)
+    workspace = tmp_path / "workspace"
+    agent_workspace = workspace / "agents" / "main"
+    external = tmp_path / "external-app"
+    external.mkdir(parents=True)
+    record_known_project(agent_workspace, external)
+
+    result = commands.dispatch(
+        CommandContext(
+            message_text="/projects",
+            channel="web",
+            peer_id="peer_1",
+            agent_id="main",
+            session_id="web:peer_1",
+            correlation_id="corr_1",
+            callbacks={
+                "scope": "global",
+                "workspace": workspace,
+                "agent_workspace": agent_workspace,
+            },
+        )
+    )
+
+    assert result is not None
+    assert "Projets deja vus" in result.text
+    assert "`external-app`" in result.text
+    assert str(external.resolve()) in result.text
+
+
+def test_project_open_can_reopen_known_external_project(tmp_path) -> None:
+    registry = SkillLoader(
+        [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
+        enabled_skills=["dev"],
+    ).load()
+    commands = CommandRegistry.from_skill_registry(registry)
+    workspace = tmp_path / "workspace"
+    agent_workspace = workspace / "agents" / "main"
+    external = tmp_path / "external-app"
+    external.mkdir(parents=True)
+    record_known_project(agent_workspace, external)
+
+    result = commands.dispatch(
+        CommandContext(
+            message_text="/project open external-app",
+            channel="web",
+            peer_id="peer_1",
+            agent_id="main",
+            session_id="web:peer_1",
+            correlation_id="corr_1",
+            callbacks={
+                "scope": "global",
+                "workspace": workspace,
+                "agent_workspace": agent_workspace,
+            },
+        )
+    )
+
+    assert result is not None
+    assert f"Dossier : `{external.resolve()}`" in result.text
+    assert (external / ".maurice" / "PLAN.md").is_file()
+
+
+def test_self_update_commands_list_show_validate_and_apply(tmp_path) -> None:
+    runtime = tmp_path / "runtime"
+    workspace = tmp_path / "workspace"
+    runtime.mkdir()
+    (runtime / "hello.txt").write_text("old\n", encoding="utf-8")
+    initialize_workspace(workspace, runtime)
+    proposal = propose(
+        {
+            "target_type": "host",
+            "target_name": "hello",
+            "runtime_path": "$runtime/hello.txt",
+            "summary": "Update hello.",
+            "patch": "diff --git a/hello.txt b/hello.txt\n--- a/hello.txt\n+++ b/hello.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            "risk": "low",
+            "test_plan": "$ true",
+            "mode": "proposal_only",
+        },
+        PermissionContext(workspace_root=str(workspace), runtime_root=str(runtime)),
+    )
+    proposal_id = proposal.data["proposal"]["id"]
+    registry = SkillLoader(
+        [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
+        enabled_skills=["self_update"],
+    ).load()
+    commands = CommandRegistry.from_skill_registry(registry)
+
+    def ctx(text: str) -> CommandContext:
+        return CommandContext(
+            message_text=text,
+            channel="web",
+            peer_id="peer_1",
+            agent_id="main",
+            session_id="web:peer_1",
+            correlation_id="corr_1",
+            callbacks={"context_root": workspace, "workspace": workspace},
+        )
+
+    listed = commands.dispatch(ctx("/auto_update_list"))
+    shown = commands.dispatch(ctx(f"/auto_update_show {proposal_id}"))
+    validated = commands.dispatch(ctx(f"/auto_update_validate {proposal_id}"))
+    unconfirmed = commands.dispatch(ctx(f"/auto_update_apply {proposal_id}"))
+    applied = commands.dispatch(ctx(f"/auto_update_apply {proposal_id} confirm"))
+
+    assert listed is not None
+    assert proposal_id in listed.text
+    assert "/auto_update_show" in listed.text
+    assert shown is not None
+    assert "```diff" in shown.text
+    assert "-old" in shown.text
+    assert "+new" in shown.text
+    assert validated is not None
+    assert "Validation" in validated.text
+    assert validated.metadata["ok"] is True
+    assert unconfirmed is not None
+    assert "Application non lancee" in unconfirmed.text
+    assert applied is not None
+    assert "Application" in applied.text
+    assert applied.metadata["applied"] is True
+    assert (runtime / "hello.txt").read_text(encoding="utf-8") == "new\n"
+
+
+def test_self_update_list_command_works_without_global_workspace_config(tmp_path) -> None:
+    registry = SkillLoader(
+        [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
+        enabled_skills=["self_update"],
+    ).load()
+    commands = CommandRegistry.from_skill_registry(registry)
+
+    result = commands.dispatch(
+        CommandContext(
+            message_text="/auto_update_list",
+            channel="cli",
+            peer_id="local",
+            agent_id="main",
+            session_id="local",
+            correlation_id="corr_1",
+            callbacks={"context_root": tmp_path, "workspace": tmp_path},
+        )
+    )
+
+    assert result is not None
+    assert "Aucune proposition" in result.text
 
 
 def test_dev_project_open_moves_legacy_memory_files(tmp_path) -> None:
@@ -382,7 +561,7 @@ def test_dev_command_can_focus_user_request(tmp_path) -> None:
     assert "Demande utilisateur prioritaire pour ce passage : ajouter une lib d'icones" in str(prompt)
 
 
-def test_dev_command_injects_focus_into_existing_generic_plan(tmp_path) -> None:
+def test_dev_command_replaces_existing_plan_when_focus_is_provided(tmp_path) -> None:
     registry = SkillLoader(
         [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
         enabled_skills=["dev"],
@@ -402,5 +581,5 @@ def test_dev_command_injects_focus_into_existing_generic_plan(tmp_path) -> None:
     plan = plan_path.read_text(encoding="utf-8")
     assert result is not None
     assert "- [ ] ajouter une lib d'icones. [ non parallellisable ]" in plan
-    assert plan.index("ajouter une lib d'icones") < plan.index("Implementer le parcours principal")
+    assert "Implementer le parcours principal" not in plan
     assert "ajouter une lib d'icones. [ non parallellisable ]" in result.metadata["agent_prompt"]

@@ -91,6 +91,7 @@ def build_base_prompt(
     now_local: datetime | None = None,
     now_utc: datetime | None = None,
     active_project: str | Path | None = None,
+    known_projects: list[dict[str, str]] | None = None,
     agent: Any = None,
 ) -> str:
     """Return the full system prompt for one turn."""
@@ -105,18 +106,27 @@ def build_base_prompt(
     ]
     if active_project:
         context_lines.append(f"Active project root: {active_project}")
+    if known_projects:
+        project_lines = [
+            f"- {project.get('name')}: {project.get('path')}"
+            for project in known_projects[:12]
+            if project.get("name") and project.get("path")
+        ]
+        if project_lines:
+            context_lines.append("Known projects:\n" + "\n".join(project_lines))
 
     context_block = "\n".join(context_lines)
 
     path_rules = _path_rules(
         agent_content=str(agent_content),
         active_project=str(active_project) if active_project else None,
+        known_projects=bool(known_projects),
     )
 
     return f"{_BASE_PROMPT}\n## Runtime context\n\n{context_block}\n\n{path_rules}".strip()
 
 
-def _path_rules(*, agent_content: str, active_project: str | None) -> str:
+def _path_rules(*, agent_content: str, active_project: str | None, known_projects: bool = False) -> str:
     lines = [
         "## Path resolution",
         "",
@@ -129,14 +139,33 @@ def _path_rules(*, agent_content: str, active_project: str | None) -> str:
             "Relative names resolve there first.",
             "If the user refers to the project itself by name, do not append that name again.",
         ]
+    if known_projects:
+        lines += [
+            "If the user asks which projects are in context or known, answer from the active project "
+            "and Known projects list. Do not claim there are no projects just because no workspace-owned "
+            "project is selected.",
+        ]
     lines += [
         f"Agent content directory: {agent_content}",
         "Use it for user-facing files, drafts, exports, and produced content when no project is active.",
         "Do not put secrets or host configuration in the content directory.",
-        "Project planning memory lives in `<project>/.maurice/` "
-        "(AGENTS.md, DECISIONS.md, PLAN.md, dreams.md). "
-        "These files may not exist yet — if they are missing, suggest running `/plan` to initialize them. "
-        "Never assume they exist; always check first.",
+        "Project memory lives in `<project>/.maurice/` "
+        "(AGENTS.md, DECISIONS.md, PLAN.md, dreams.md), but these files are auxiliary.",
+        "A direct user request in the current turn is always the source of truth. "
+        "Do not let an old PLAN.md redirect, narrow, or delay a new request.",
+        "If the user asks you to improve Maurice itself or your behavior, do not edit runtime "
+        "files directly. Use the self_update proposal flow when available, and target the "
+        "runtime component responsible for the behavior.",
+        "If you encounter a Maurice runtime, tool, provider, permission, web, Telegram, or "
+        "skill bug while working, use the self_update bug-report flow when available so the "
+        "failure leaves a reviewable trace. Then continue if there is a safe next step.",
+        "If the user asks for a project critique, review, or audit, do not answer from the "
+        "`Critique` section of PLAN.md. Treat that section as planning notes only; inspect "
+        "and critique the actual files, architecture, UX, tests, and risks.",
+        "Use PLAN.md only when the user explicitly asks for `/plan`, `/plan show`, `/tasks`, `/dev`, "
+        "or otherwise asks about the saved plan. For ordinary chat requests, do not read or follow PLAN.md first.",
+        "If a new request makes the saved plan obsolete, replace or clear PLAN.md before using it again; "
+        "never tell the user the old plan prevents the requested work.",
         "For reminders, always schedule future datetimes using the current local date and timezone "
         "unless the user explicitly gives another date.",
     ]

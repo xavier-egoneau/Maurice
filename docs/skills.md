@@ -137,6 +137,12 @@ skills should usually include both `$workspace/**` and `$project/**` in their
 permission scopes unless they intentionally operate only on assistant-owned
 workspace data.
 
+There is only one active project for a command or turn. Project-scoped skills
+should treat `active_project_path` / `project_root` as the current target and
+should not scan for additional projects. A global agent can remember projects it
+has explicitly seen in its own `<workspace>/agents/<agent-id>/projects.json`,
+but remembered projects are history until the user opens or selects one.
+
 ## Command declarations
 
 Commands are slash commands dispatched by the host (not by the model).
@@ -216,7 +222,11 @@ local project writes under its own `./skills` when that root exists.
 | `vision` | image description |
 | `reminders` | schedule one-off reminders |
 | `dreaming` | background LLM reflection runs |
-| `self_update` | propose changes to the runtime (proposal-only) |
+| `self_update` | report runtime bugs and propose changes to the runtime (proposal-only) |
 | `skills` | inspect and author skills |
 | `host` | inspect host state (processes, dashboard data) |
 | `dev` | project-scoped development workflow (`/plan`, `/dev`, `/commit`, …) |
+
+`self_update` also exposes channel-neutral commands:
+`/auto_update_list`, `/auto_update_show <id>`, `/auto_update_validate <id>`,
+and `/auto_update_apply <id> confirm`.

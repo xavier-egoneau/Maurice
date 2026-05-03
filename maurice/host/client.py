@@ -250,6 +250,23 @@ class MauriceClient:
         finally:
             self.close()
 
+    def cancel_turn(self, *, agent_id: str | None = None, session_id: str = "default") -> bool:
+        if not self.is_running():
+            return False
+        self.connect()
+        try:
+            payload: dict[str, Any] = {
+                "type": "cancel_turn",
+                "session_id": session_id,
+            }
+            if agent_id is not None:
+                payload["agent_id"] = agent_id
+            _send(self._sock, payload)
+            response = _recv_line(self._sock, self._buf) or {}
+            return bool(response.get("cancelled"))
+        finally:
+            self.close()
+
     # ------------------------------------------------------------------
     # turn
 
@@ -270,7 +287,8 @@ class MauriceClient:
 
         Event types:
           text_delta    — {"type": "text_delta", "delta": str}
-          tool_result   — {"type": "tool_result", "summary": str, "ok": bool, "error": str|None}
+          tool_result   — {"type": "tool_result", "summary": str, "ok": bool,
+                           "error": str|None, "artifacts": list}
           approval_required — {"type": "approval_required", "tool": str, ...}
           done          — {"type": "done", "status": str}
           error         — {"type": "error", "message": str}
