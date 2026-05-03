@@ -58,6 +58,17 @@ def test_agent_wizard_starts_from_add_agent_command(tmp_path) -> None:
     assert "Quel nom unique" in first
 
 
+def test_agent_wizard_refuses_agent_admin_commands_outside_main(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+
+    first = _send(workspace, "/add_agent", agent_id="num2")
+
+    assert "uniquement depuis l'agent `main`" in first
+
+
 def test_agent_wizard_accepts_all_and_numbered_skills(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     runtime = tmp_path / "runtime"
@@ -77,6 +88,7 @@ def test_agent_wizard_accepts_all_and_numbered_skills(tmp_path) -> None:
     bundle = load_workspace_config(workspace)
     assert bundle.agents.agents["agent_tous"].skills == [
         "filesystem",
+        "exec",
         "memory",
         "web",
         "explore",
@@ -122,6 +134,33 @@ def test_agent_wizard_lists_user_skills_from_workspace_roots(tmp_path) -> None:
     assert "`translation`" in skills_question
 
 
+def test_agent_wizard_lists_declarative_user_skills_from_workspace_roots(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+    skill_dir = workspace / "skills" / "calendar_notes"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "skill.md").write_text(
+        "---\n"
+        "name: calendar_notes\n"
+        "description: Read local calendar notes.\n"
+        "---\n"
+        "\n"
+        "# Calendar Notes\n",
+        encoding="utf-8",
+    )
+    (skill_dir / "dreams.md").write_text("Notice calendar events.\n", encoding="utf-8")
+    (skill_dir / "daily.md").write_text("Surface today's events.\n", encoding="utf-8")
+
+    _send(workspace, "nouvel agent")
+    _send(workspace, "agent calendar")
+    _send(workspace, "agenda")
+    skills_question = _send(workspace, "limited")
+
+    assert "`calendar_notes`" in skills_question
+
+
 def test_agent_wizard_lists_models_from_current_provider(tmp_path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     runtime = tmp_path / "runtime"
@@ -157,7 +196,7 @@ def test_agent_wizard_lists_models_from_current_provider(tmp_path, monkeypatch) 
     agent = bundle.agents.agents["agent_modele"]
     assert agent.model_chain == ["auth_gpt_5_4_mini"]
     assert bundle.kernel.models.entries["auth_gpt_5_4_mini"].name == "gpt-5.4-mini"
-    assert bundle.agents.agents["agent_modele"].skills == ["filesystem", "memory"]
+    assert bundle.agents.agents["agent_modele"].skills == ["filesystem", "exec"]
     assert bundle.agents.agents["agent_modele"].credentials == ["chatgpt_codex"]
 
 
@@ -216,6 +255,7 @@ def test_agent_wizard_captures_missing_telegram_token_then_binds_ids(tmp_path) -
     assert bundle.host.channels["telegram_telegram_agent"]["agent"] == "telegram_agent"
     assert bundle.host.channels["telegram_telegram_agent"]["credential"] == "telegram_bot_telegram_agent"
     assert bundle.host.channels["telegram_telegram_agent"]["allowed_users"] == [7910016787]
+    assert bundle.host.channels["telegram_telegram_agent"]["allowed_chats"] == [7910016787]
     assert bundle.agents.agents["telegram_agent"].channels == ["telegram"]
 
 
@@ -309,7 +349,7 @@ def test_agent_wizard_edits_telegram_line_by_line_and_captures_token(tmp_path) -
     _send(workspace, "oui")
     chats_question = _send(workspace, "8744612002, 7910016787")
     assert "IDs utilisateurs enregistres : 8744612002, 7910016787" in chats_question
-    assert "IDs groupes" in chats_question
+    assert "IDs chats prives/groupes" in chats_question
     summary = _send(workspace, "non")
     assert "Resume de la modification Telegram" in summary
     done = _send(workspace, "oui")
@@ -321,6 +361,7 @@ def test_agent_wizard_edits_telegram_line_by_line_and_captures_token(tmp_path) -
     assert bundle.host.channels["telegram_maurice_polo"]["agent"] == "maurice_polo"
     assert bundle.host.channels["telegram_maurice_polo"]["credential"] == "telegram_bot_maurice_polo"
     assert bundle.host.channels["telegram_maurice_polo"]["allowed_users"] == [8744612002, 7910016787]
+    assert bundle.host.channels["telegram_maurice_polo"]["allowed_chats"] == [8744612002, 7910016787]
     assert bundle.agents.agents["maurice_polo"].channels == ["telegram"]
     assert "telegram" not in bundle.agents.agents["main"].channels
 
@@ -412,11 +453,11 @@ def test_agent_wizard_full_agent_edit_can_jump_directly_to_skills(tmp_path) -> N
 
     assert "Choisis les competences a activer" in skills_question
     assert "1. `filesystem` (actuelle)" in skills_question
-    assert "2. `memory` (actuelle)" in skills_question
+    assert "3. `memory` (actuelle)" in skills_question
     assert "`explore`" in skills_question
     assert "Reponds par des numeros" in skills_question
 
-    model_question = _send(workspace, "1,4,13")
+    model_question = _send(workspace, "1,5,14")
     assert "Modele actuel" in model_question
     _send(workspace, "non")
     _send(workspace, "non")

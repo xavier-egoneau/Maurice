@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import subprocess
+
 from maurice.host.command_registry import CommandContext, CommandRegistry, default_command_registry
-from maurice.host.project_registry import record_known_project
+from maurice.host.project_registry import record_known_project, record_machine_project, record_seen_project
 from maurice.host.workspace import initialize_workspace
 from maurice.kernel.permissions import PermissionContext
 from maurice.kernel.skills import SkillLoader, SkillRoot
 from maurice.system_skills.self_update.tools import propose
+from maurice.system_skills.dev.commands import build_dream_input
 
 
 def _context(tmp_path, text: str) -> CommandContext:
@@ -65,7 +68,7 @@ def test_dev_commands_use_explicit_active_project_path(tmp_path) -> None:
     assert "deja centre" in opened.text
 
 
-def test_help_hides_global_project_picker_in_local_scope(tmp_path) -> None:
+def test_help_shows_project_commands_in_local_scope(tmp_path) -> None:
     registry = SkillLoader(
         [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
         enabled_skills=["dev"],
@@ -83,6 +86,7 @@ def test_help_hides_global_project_picker_in_local_scope(tmp_path) -> None:
             callbacks={
                 "scope": "local",
                 "workspace": tmp_path,
+                "active_project_path": tmp_path,
                 "command_registry": commands,
             },
         )
@@ -90,28 +94,114 @@ def test_help_hides_global_project_picker_in_local_scope(tmp_path) -> None:
 
     assert result is not None
     assert "/plan - cadrer" in result.text
-    assert "/project -" not in result.text
-    assert "/projects -" not in result.text
+    assert "/project - ouvrir" in result.text
+    assert "/projects - lister" in result.text
+
+
+def test_help_hides_project_commands_without_active_project(tmp_path) -> None:
+    registry = SkillLoader(
+        [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
+        enabled_skills=["dev"],
+    ).load()
+    commands = CommandRegistry.from_skill_registry(registry)
+
+    result = commands.dispatch(
+        CommandContext(
+            message_text="/help",
+            channel="web",
+            peer_id="peer_1",
+            agent_id="main",
+            session_id="web:peer_1",
+            correlation_id="corr_1",
+            callbacks={
+                "scope": "global",
+                "workspace": tmp_path,
+                "command_registry": commands,
+            },
+        )
+    )
+
+    assert result is not None
+    assert "/project - ouvrir" in result.text
+    assert "/projects - lister" in result.text
+    assert "/plan - cadrer" not in result.text
+    assert "/tasks - afficher" not in result.text
+    assert "/dev - executer" not in result.text
+    assert "/review - relire" not in result.text
+    assert "/commit - preparer" not in result.text
+
+
+def test_project_command_is_refused_without_active_project(tmp_path) -> None:
+    registry = SkillLoader(
+        [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
+        enabled_skills=["dev"],
+    ).load()
+    commands = CommandRegistry.from_skill_registry(registry)
+
+    result = commands.dispatch(
+        CommandContext(
+            message_text="/plan",
+            channel="web",
+            peer_id="peer_1",
+            agent_id="main",
+            session_id="web:peer_1",
+            correlation_id="corr_1",
+            callbacks={
+                "scope": "global",
+                "workspace": tmp_path,
+                "command_registry": commands,
+            },
+        )
+    )
+
+    assert result is not None
+    assert "demande un projet actif" in result.text
+    assert result.metadata["blocked"] == "missing_active_project"
 
 
 def test_default_help_hides_host_commands_in_local_scope() -> None:
     text = default_command_registry().help_text(scope="local")
 
     assert "/help - afficher cette aide" in text
-    assert "/setup - configurer Maurice ou passer en assistant de bureau" in text
+    assert "/setup -" not in text
     assert "/add_agent -" not in text
     assert "/edit_agent -" not in text
 
 
 def test_command_registry_exports_telegram_bot_commands() -> None:
     exported = default_command_registry().telegram_bot_commands(scope="global")
+    exported_for_other_agent = default_command_registry().telegram_bot_commands(
+        scope="global",
+        agent_id="num2",
+    )
 
     assert {"command": "help", "description": "afficher cette aide"} in exported
     assert {"command": "add_agent", "description": "creer un nouvel agent"} in exported
+    assert {"command": "add_agent", "description": "creer un nouvel agent"} not in exported_for_other_agent
+    assert {"command": "edit_agent", "description": "modifier un agent (`/edit_agent <agent>`)"} not in exported_for_other_agent
     assert all(not item["command"].startswith("/") for item in exported)
 
 
-def test_setup_command_points_to_unified_setup() -> None:
+def test_telegram_command_menu_hides_project_commands_without_active_project() -> None:
+    registry = SkillLoader(
+        [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
+        enabled_skills=["dev"],
+    ).load()
+    commands = CommandRegistry.from_skill_registry(registry)
+
+    exported = commands.telegram_bot_commands(scope="global", has_active_project=False)
+    names = {item["command"] for item in exported}
+
+    assert "project" in names
+    assert "projects" in names
+    assert "plan" not in names
+    assert "tasks" not in names
+    assert "dev" not in names
+    assert "review" not in names
+    assert "commit" not in names
+
+
+def test_setup_command_is_not_exposed_as_runtime_command() -> None:
     commands = default_command_registry()
 
     result = commands.dispatch(
@@ -126,9 +216,7 @@ def test_setup_command_points_to_unified_setup() -> None:
         )
     )
 
-    assert result is not None
-    assert "maurice setup" in result.text
-    assert "assistant de bureau" in result.text
+    assert result is None
 
 
 def test_stop_command_uses_cancel_callback() -> None:
@@ -321,14 +409,13 @@ def test_self_update_commands_list_show_validate_and_apply(tmp_path) -> None:
 
     assert listed is not None
     assert proposal_id in listed.text
-    assert "/auto_update_show" in listed.text
-    assert shown is not None
-    assert "```diff" in shown.text
-    assert "-old" in shown.text
-    assert "+new" in shown.text
-    assert validated is not None
-    assert "Validation" in validated.text
-    assert validated.metadata["ok"] is True
+    assert "/auto_update_show" not in listed.text
+    assert f"/auto_update_apply {proposal_id} confirm" in listed.text
+    assert "```diff" in listed.text
+    assert "-old" in listed.text
+    assert "+new" in listed.text
+    assert shown is None
+    assert validated is None
     assert unconfirmed is not None
     assert "Application non lancee" in unconfirmed.text
     assert applied is not None
@@ -497,6 +584,104 @@ def test_dev_projects_are_relative_to_current_agent(tmp_path) -> None:
     assert not (tmp_path / "agents" / "main" / "content" / "app").exists()
 
 
+def test_dev_dream_input_reads_known_external_project_memory(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    agent_workspace = workspace / "agents" / "main"
+    project = tmp_path / "external-app"
+    meta = project / ".maurice"
+    meta.mkdir(parents=True)
+    (meta / "AGENTS.md").write_text("# Rules\n\n- Prefer boring code.\n", encoding="utf-8")
+    (meta / "PLAN.md").write_text(
+        "# Plan\n\n- [ ] Finish the registry. [ non parallellisable ]\n"
+        "- [x] Write the baseline. [ non parallellisable ]\n",
+        encoding="utf-8",
+    )
+    (meta / "DECISIONS.md").write_text("- 2026-05-03 - Keep project memory local.\n", encoding="utf-8")
+    (meta / "dreams.md").write_text("- Watch for stale local/global wording.\n", encoding="utf-8")
+    record_seen_project(agent_workspace, project)
+
+    dream_input = build_dream_input(
+        PermissionContext(
+            workspace_root=str(workspace),
+            runtime_root=str(tmp_path),
+            agent_workspace_root=str(agent_workspace),
+        )
+    )
+
+    assert len(dream_input.signals) == 1
+    signal = dream_input.signals[0]
+    assert signal.type == "dev_project_review"
+    assert signal.data["path"] == str(project.resolve())
+    assert signal.data["open_tasks"] == ["Finish the registry. [ non parallellisable ]"]
+    assert signal.data["done_count"] == 1
+    assert "Keep project memory local" in signal.data["excerpts"]["DECISIONS.md"]
+    assert "Watch for stale" in signal.data["excerpts"]["dreams.md"]
+
+
+def test_dev_dream_input_reads_machine_project_registry(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MAURICE_HOME", str(tmp_path / ".maurice"))
+    workspace = tmp_path / "workspace"
+    agent_workspace = workspace / "agents" / "main"
+    project = tmp_path / "machine-app"
+    meta = project / ".maurice"
+    meta.mkdir(parents=True)
+    (meta / "PLAN.md").write_text("# Plan\n\n- [ ] Ship the global dream.\n", encoding="utf-8")
+    record_machine_project(project)
+
+    dream_input = build_dream_input(
+        PermissionContext(
+            workspace_root=str(workspace),
+            runtime_root=str(tmp_path),
+            agent_workspace_root=str(agent_workspace),
+        )
+    )
+
+    assert len(dream_input.signals) == 1
+    assert dream_input.signals[0].data["path"] == str(project.resolve())
+    assert dream_input.signals[0].data["open_tasks"] == ["Ship the global dream."]
+
+
+def test_dev_dream_input_reports_missing_known_project(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    agent_workspace = workspace / "agents" / "main"
+    missing = tmp_path / "missing-app"
+    record_seen_project(agent_workspace, missing)
+
+    dream_input = build_dream_input(
+        PermissionContext(
+            workspace_root=str(workspace),
+            runtime_root=str(tmp_path),
+            agent_workspace_root=str(agent_workspace),
+        )
+    )
+
+    assert len(dream_input.signals) == 1
+    assert dream_input.signals[0].type == "dev_project_missing"
+    assert dream_input.signals[0].data["path"] == str(missing.resolve())
+
+
+def test_dev_dream_input_respects_signal_limit(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    agent_workspace = workspace / "agents" / "main"
+    for index in range(3):
+        project = tmp_path / f"app-{index}"
+        meta = project / ".maurice"
+        meta.mkdir(parents=True)
+        (meta / "PLAN.md").write_text(f"# Plan {index}\n", encoding="utf-8")
+        record_seen_project(agent_workspace, project)
+
+    dream_input = build_dream_input(
+        PermissionContext(
+            workspace_root=str(workspace),
+            runtime_root=str(tmp_path),
+            agent_workspace_root=str(agent_workspace),
+        ),
+        limit=2,
+    )
+
+    assert len(dream_input.signals) == 2
+
+
 def test_dev_review_returns_project_summary(tmp_path) -> None:
     registry = SkillLoader(
         [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
@@ -537,6 +722,17 @@ def test_dev_command_triggers_autonomous_agent_prompt(tmp_path) -> None:
     assert "execute le plan" in str(prompt).lower()
     assert "Tu es en mode developpement" in str(prompt)
     assert "Utilise les outils disponibles quand ils sont utiles" in str(prompt)
+    assert "branche dediee `maurice/...`" in str(prompt)
+    assert "git merge" in str(prompt)
+    assert "demande explicitement l'approbation utilisateur avant tout merge" in str(prompt)
+    assert "Si l'utilisateur approuve ensuite le merge" in str(prompt)
+    assert "branche de depart" in str(prompt)
+    assert "Ne push jamais sans approbation separee" in str(prompt)
+    assert "passe de finition proportionnee" in str(prompt)
+    assert "supprime le code mort" in str(prompt)
+    assert "Mets a jour la documentation" in str(prompt)
+    assert "Ajoute ou adapte les tests" in str(prompt)
+    assert "credentials, permissions, shell" in str(prompt)
     assert "Ne les ecarte pas comme `deja fait` ou `plan depasse`" in str(prompt)
     assert "Sois concis dans tes messages" in str(prompt)
     assert "3-5 lignes" in result.metadata["autonomy"]["continue_prompt"]
@@ -546,6 +742,59 @@ def test_dev_command_triggers_autonomous_agent_prompt(tmp_path) -> None:
     assert result.metadata["autonomy"]["max_continuations"] == 120
     assert result.metadata["autonomy"]["max_seconds"] == 3600
     assert result.metadata["agent_limits"]["max_tool_iterations"] == 80
+
+
+def test_commit_command_requires_feature_branch_and_merge_approval(tmp_path) -> None:
+    registry = SkillLoader(
+        [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
+        enabled_skills=["dev"],
+    ).load()
+    commands = CommandRegistry.from_skill_registry(registry)
+    commands.dispatch(_context(tmp_path, "/project open app"))
+    project = tmp_path / "agents" / "main" / "content" / "app"
+    subprocess.run(["git", "-C", str(project), "init"], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(project), "branch", "-M", "main"], check=True, capture_output=True, text=True)
+    (project / "app.py").write_text("print('hello')\n", encoding="utf-8")
+
+    result = commands.dispatch(_context(tmp_path, "/commit"))
+
+    assert result is not None
+    assert result.metadata["command"] == "/commit"
+    prompt = str(result.metadata["agent_prompt"])
+    assert "Branche actuelle : main" in prompt
+    assert "Branche de travail Maurice suggeree : maurice/" in prompt
+    assert "Branche cible du merge apres approbation : main" in prompt
+    assert "switch -c maurice/" in prompt
+    assert "Ne lance jamais `git merge`, `git push`" in prompt
+    assert "demande explicitement a l'utilisateur s'il approuve le merge" in prompt
+    assert "le prochain tour devra verifier que le working tree est propre" in prompt
+    assert "merger la branche Maurice vers la branche cible indiquee ci-dessus" in prompt
+    assert "ne jamais push sans approbation separee" in prompt
+
+
+def test_dev_command_records_departure_branch_as_merge_target(tmp_path) -> None:
+    registry = SkillLoader(
+        [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
+        enabled_skills=["dev"],
+    ).load()
+    commands = CommandRegistry.from_skill_registry(registry)
+    commands.dispatch(_context(tmp_path, "/project open app"))
+    project = tmp_path / "agents" / "main" / "content" / "app"
+    subprocess.run(["git", "-C", str(project), "init"], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(project), "branch", "-M", "main"], check=True, capture_output=True, text=True)
+    plan_path = project / ".maurice" / "PLAN.md"
+    plan_path.write_text(
+        "# Plan\n\n## Taches\n\n- [ ] Ajouter une option. [ non parallellisable ]\n",
+        encoding="utf-8",
+    )
+
+    result = commands.dispatch(_context(tmp_path, "/dev"))
+
+    assert result is not None
+    prompt = str(result.metadata["agent_prompt"])
+    assert "Branche actuelle : main" in prompt
+    assert "Branche cible du merge apres approbation : main" in prompt
+    assert "merge la branche `maurice/...` vers la branche de depart" in prompt
 
 
 def test_dev_command_can_focus_user_request(tmp_path) -> None:

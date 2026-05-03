@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from maurice.host import repl
+from maurice.host.project_registry import list_machine_projects
 from maurice.host.project import ensure_maurice_dir
 from maurice.kernel.session import SessionStore
 
@@ -45,5 +46,28 @@ def test_context_bar_is_clamped_to_terminal_width(capsys) -> None:
     assert output.count("█") <= int(repl._console.width * 0.8)
 
 
-def test_welcome_tips_expose_global_setup_bridge() -> None:
-    assert ("/setup", "configurer ou passer en assistant de bureau") in repl._TIPS
+def test_welcome_tips_do_not_expose_setup_command() -> None:
+    assert all(command != "/setup" for command, _description in repl._TIPS)
+
+
+def test_run_repl_records_opened_project(tmp_path, monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, _project_root):
+            pass
+
+        def ensure_running(self):
+            pass
+
+        def connect(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(repl, "MauriceClient", FakeClient)
+    monkeypatch.setattr(repl, "_welcome", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repl._console, "input", lambda *_args, **_kwargs: (_ for _ in ()).throw(EOFError()))
+
+    repl.run_repl(tmp_path, session_id="default")
+
+    assert list_machine_projects()[0]["path"] == str(tmp_path.resolve())

@@ -110,14 +110,6 @@ commands:
     description: lister les propositions d'auto-update Maurice
     handler: maurice.system_skills.self_update.commands.auto_update_list
     renderer: markdown
-  - name: /auto_update_show
-    description: afficher le detail et le diff d'une proposition d'auto-update
-    handler: maurice.system_skills.self_update.commands.auto_update_show
-    renderer: markdown
-  - name: /auto_update_validate
-    description: verifier une proposition d'auto-update sans l'appliquer
-    handler: maurice.system_skills.self_update.commands.auto_update_validate
-    renderer: markdown
   - name: /auto_update_apply
     description: appliquer une proposition d'auto-update apres confirmation explicite
     handler: maurice.system_skills.self_update.commands.auto_update_apply

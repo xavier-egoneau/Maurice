@@ -77,7 +77,6 @@ from maurice.kernel.providers import (
     ApiProvider, ChatGPTCodexProvider, MockProvider,
     OllamaCompatibleProvider, OpenAICompatibleProvider, UnsupportedProvider,
 )
-from maurice.kernel.runs import RunApprovalStore, RunCoordinationStore, RunExecutor, RunStore
 from maurice.kernel.scheduler import JobRunner, JobStatus, JobStore, SchedulerService, utc_now
 from maurice.kernel.session import SessionStore
 from maurice.kernel.skills import SkillContext, SkillLoader
@@ -202,7 +201,6 @@ def _monitor_snapshot(
     print(f"Skills: {len(snapshot.skills)}")
     print(f"Approvals: {snapshot.approvals.total} {snapshot.approvals.by_status}")
     print(f"Jobs: {snapshot.jobs.total} {snapshot.jobs.by_status}")
-    print(f"Runs: {snapshot.runs.total} {snapshot.runs.by_status}")
     print(f"Events: {len(snapshot.events)}")
 
 
@@ -217,4 +215,3 @@ def _monitor_events(workspace_root: Path, *, agent_id: str | None, limit: int) -
         return
     for event in events:
         print(f"{event.time.isoformat()} {event.agent_id} {event.session_id} {event.name} {event.id}")
-

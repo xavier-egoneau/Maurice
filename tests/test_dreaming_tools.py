@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
+from maurice.kernel.contracts import DreamInput
 from maurice.kernel.events import EventStore
 from maurice.kernel.permissions import PermissionContext
-from maurice.kernel.skills import SkillLoader, SkillRoot
-from maurice.system_skills.dreaming.tools import run
+from maurice.kernel.skills import SkillContext, SkillLoader, SkillRoot
+from maurice.system_skills.dreaming.tools import build_executors, run
 from maurice.system_skills.memory.tools import build_dream_input, remember
 
 
@@ -58,6 +61,101 @@ def test_dreaming_run_consumes_memory_dream_input(tmp_path) -> None:
         "dream.started",
         "dream.completed",
     ]
+
+
+def test_dreaming_discovery_passes_runtime_skill_config(tmp_path, monkeypatch) -> None:
+    permission_context = context(tmp_path)
+    skill_registry = registry(["dreaming", "veille", "web"])
+
+    def fake_veille_input(context_arg, *, config=None, all_skill_configs=None):
+        assert context_arg == permission_context
+        assert config == {}
+        assert all_skill_configs["web"]["base_url"] == "http://search.test"
+        return DreamInput(
+            skill="veille",
+            trust="local_mutable",
+            freshness={"generated_at": datetime.now(UTC), "expires_at": None},
+            signals=[],
+        )
+
+    monkeypatch.setattr("maurice.system_skills.veille.tools.build_dream_input", fake_veille_input)
+    executors = build_executors(
+        SkillContext(
+            permission_context=permission_context,
+            registry=skill_registry,
+            all_skill_configs={"web": {"base_url": "http://search.test"}},
+        )
+    )
+
+    result = executors["dreaming.run"]({"skills": ["veille"]})
+
+    assert result.ok
+    assert result.data["report"]["inputs"][0]["skill"] == "veille"
+
+
+def test_dreaming_discovers_user_skill_relative_input_builder(tmp_path) -> None:
+    permission_context = context(tmp_path)
+    skill_dir = tmp_path / "workspace" / "skills" / "calendar"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "skill.yaml").write_text(
+        """
+name: calendar
+version: 0.1.0
+origin: user
+mutable: true
+description: Calendar test skill.
+config_namespace: skills.calendar
+requires:
+  binaries: []
+  credentials: []
+dependencies:
+  skills: []
+  optional_skills: []
+permissions: []
+tools: []
+backend: null
+storage: null
+dreams:
+  attachment: dreams.md
+  input_builder: tools.build_dream_input
+daily:
+  attachment: daily.md
+events:
+  state_publisher: null
+""",
+        encoding="utf-8",
+    )
+    (skill_dir / "dreams.md").write_text("Calendar dream instructions.\n", encoding="utf-8")
+    (skill_dir / "daily.md").write_text("Calendar daily instructions.\n", encoding="utf-8")
+    (skill_dir / "tools.py").write_text(
+        """
+from datetime import UTC, datetime
+from maurice.kernel.contracts import DreamInput
+
+def build_dream_input(context, *, config=None, all_skill_configs=None):
+    return DreamInput(
+        skill="calendar",
+        trust="local_mutable",
+        freshness={"generated_at": datetime.now(UTC), "expires_at": None},
+        signals=[{"id": "calendar_today", "type": "calendar", "summary": "One event today.", "data": {}}],
+    )
+""",
+        encoding="utf-8",
+    )
+    skill_registry = SkillLoader(
+        [
+            SkillRoot(path="maurice/system_skills", origin="system", mutable=False),
+            SkillRoot(path=str(tmp_path / "workspace" / "skills"), origin="user", mutable=True),
+        ],
+        enabled_skills=["dreaming", "calendar"],
+    ).load()
+
+    executors = build_executors(SkillContext(permission_context=permission_context, registry=skill_registry))
+    result = executors["dreaming.run"]({"skills": ["calendar"]})
+
+    assert result.ok
+    assert result.data["attachments"]["calendar"] == "Calendar dream instructions.\n"
+    assert result.data["report"]["inputs"][0]["signals"][0]["summary"] == "One event today."
 
 
 def test_dreaming_run_includes_agent_memory_by_default(tmp_path) -> None:

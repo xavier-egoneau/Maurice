@@ -6,8 +6,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from maurice.kernel.config import SkillRootConfig
 from maurice.kernel.contracts import ToolResult
 from maurice.kernel.permissions import PermissionContext
@@ -57,6 +55,7 @@ def create(
     description = arguments.get("description", f"User skill {name}.")
     if not isinstance(description, str):
         return _error("invalid_arguments", "skills.create description must be a string.")
+    with_code = bool(arguments.get("with_code", False))
 
     workspace_skills = (Path(context.variables()["$workspace"]) / "skills").resolve()
     user_root = _user_skill_root(roots, workspace_skills=workspace_skills)
@@ -72,20 +71,21 @@ def create(
         return _error("permission_denied", "User skills must be created under workspace/skills.")
 
     skill_dir.mkdir(parents=True, exist_ok=False)
-    _write_skill_skeleton(skill_dir, name, description)
+    _write_skill_skeleton(skill_dir, name, description, with_code=with_code)
 
+    artifacts = [
+        {"type": "file", "path": str(skill_dir / "skill.md")},
+        {"type": "file", "path": str(skill_dir / "dreams.md")},
+        {"type": "file", "path": str(skill_dir / "daily.md")},
+    ]
+    if with_code:
+        artifacts.append({"type": "file", "path": str(skill_dir / "tools.py")})
     return ToolResult(
         ok=True,
         summary=f"User skill created: {name}",
         data={"name": name, "path": str(skill_dir)},
         trust="local_mutable",
-        artifacts=[
-            {"type": "file", "path": str(skill_dir / "skill.yaml")},
-            {"type": "file", "path": str(skill_dir / "prompt.md")},
-            {"type": "file", "path": str(skill_dir / "tools.py")},
-            {"type": "file", "path": str(skill_dir / "dreams.md")},
-            {"type": "file", "path": str(skill_dir / "daily.md")},
-        ],
+        artifacts=artifacts,
         events=[{"name": "skills.created", "payload": {"name": name, "path": str(skill_dir)}}],
         error=None,
     )
@@ -135,46 +135,87 @@ def reload(
     )
 
 
-def _write_skill_skeleton(skill_dir: Path, name: str, description: str) -> None:
-    manifest = {
-        "name": name,
-        "version": "0.1.0",
-        "origin": "user",
-        "mutable": True,
-        "required": False,
-        "description": description,
-        "config_namespace": f"skills.{name}",
-        "available_in": ["local", "global"],
-        "requires": {"binaries": [], "credentials": []},
-        "dependencies": {"skills": [], "optional_skills": []},
-        "permissions": [],
-        "tools": [],
-        "backend": None,
-        "storage": None,
-        "dreams": {"attachment": "dreams.md"},
-        "daily": {"attachment": "daily.md"},
-        "events": {"state_publisher": None},
-    }
-    (skill_dir / "skill.yaml").write_text(
-        yaml.safe_dump(manifest, sort_keys=False),
-        encoding="utf-8",
-    )
-    (skill_dir / "prompt.md").write_text(
-        f"{description}\n",
-        encoding="utf-8",
-    )
-    (skill_dir / "tools.py").write_text(
-        '"""User skill tools."""\n',
+def _write_skill_skeleton(skill_dir: Path, name: str, description: str, *, with_code: bool) -> None:
+    (skill_dir / "skill.md").write_text(
+        "---\n"
+        f"name: {name}\n"
+        f"description: {description}\n"
+        "---\n"
+        "\n"
+        f"# {name}\n"
+        "\n"
+        "Describe when Maurice should use this skill, what sources it may read, "
+        "and what boundaries it must respect.\n"
+        "\n"
+        "## Autonomy\n"
+        "\n"
+        "A shareable Maurice skill should be autonomous: document required "
+        "binaries, credentials, local config files, install/setup commands, and "
+        "validation steps. Do not rely on hidden setup from the author's machine.\n"
+        "\n"
+        "Keep this file as the human/agent instructions for the skill. Put dream "
+        "synthesis rules in `dreams.md` and morning digest rules in `daily.md`.\n",
         encoding="utf-8",
     )
     (skill_dir / "dreams.md").write_text(
-        "This user skill does not provide dream inputs yet.\n",
+        "This skill does not contribute concrete dream signals yet.\n"
+        "\n"
+        "Use this file to explain what the dreaming pass should notice, connect, "
+        "or propose for this skill.\n",
         encoding="utf-8",
     )
     (skill_dir / "daily.md").write_text(
-        "This user skill does not contribute to the daily yet.\n",
+        "This skill does not contribute to the daily yet.\n"
+        "\n"
+        "Use this file to explain what belongs in the morning digest for this "
+        "skill, and when the skill should stay silent.\n",
         encoding="utf-8",
     )
+    if with_code:
+        (skill_dir / "tools.py").write_text(
+            '"""Optional code hooks for this user skill."""\n'
+            "\n"
+            "from __future__ import annotations\n"
+            "\n"
+            "from datetime import UTC, datetime\n"
+            "from typing import Any\n"
+            "\n"
+            "from maurice.kernel.contracts import DreamInput\n"
+            "from maurice.kernel.permissions import PermissionContext\n"
+            "\n"
+            "\n"
+            "def tool_declarations() -> list[dict[str, Any]]:\n"
+            "    \"\"\"Return callable chat tools for this skill.\n"
+            "\n"
+            "    Leave this empty when the skill only contributes instructions or dreaming.\n"
+            "    If you add declarations, also return matching executors from build_executors().\n"
+            "    Use permission_class='integration.read' for read-only integrations and\n"
+            "    permission_class='integration.write' for sync or maintenance actions.\n"
+            "    \"\"\"\n"
+            "    return []\n"
+            "\n"
+            "\n"
+            "def build_executors(ctx: Any) -> dict[str, Any]:\n"
+            "    del ctx\n"
+            "    return {}\n"
+            "\n"
+            "\n"
+            "def build_dream_input(\n"
+            "    context: PermissionContext,\n"
+            "    *,\n"
+            "    config: dict[str, Any] | None = None,\n"
+            "    all_skill_configs: dict[str, dict[str, Any]] | None = None,\n"
+            ") -> DreamInput:\n"
+            "    del context, config, all_skill_configs\n"
+            "    return DreamInput(\n"
+            f"        skill={name!r},\n"
+            "        trust=\"skill_generated\",\n"
+            "        freshness={\"generated_at\": datetime.now(UTC), \"expires_at\": None},\n"
+            "        signals=[],\n"
+            "        limits=[\"No coded dream signals yet. Add setup diagnostics before sharing.\"],\n"
+            "    )\n",
+            encoding="utf-8",
+        )
 
 
 def _registry_snapshot(registry) -> list[dict[str, Any]]:
@@ -222,9 +263,9 @@ def _user_skill_root(
 def _find_existing_skill(name: str, roots: list[SkillRoot | SkillRootConfig]) -> Path | None:
     for root in roots:
         skill_root = root if isinstance(root, SkillRoot) else SkillRoot.from_config(root)
-        candidate = Path(skill_root.path).expanduser().resolve() / name / "skill.yaml"
-        if candidate.exists():
-            return candidate.parent
+        candidate = Path(skill_root.path).expanduser().resolve() / name
+        if any((candidate / manifest).exists() for manifest in ("skill.yaml", "skill.md", "SKILL.md")):
+            return candidate
     return None
 
 

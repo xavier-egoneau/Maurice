@@ -93,6 +93,7 @@ def load_credentials(path: str | Path) -> CredentialsStore:
     if not credential_path.exists():
         return CredentialsStore()
     data = yaml.safe_load(credential_path.read_text(encoding="utf-8")) or {}
+    data = _normalize_credential_data(data)
     return CredentialsStore.model_validate(data)
 
 
@@ -104,3 +105,25 @@ def write_credentials(path: str | Path, store: CredentialsStore) -> None:
         encoding="utf-8",
     )
     credential_path.chmod(0o600)
+
+
+def _normalize_credential_data(data: object) -> dict[str, object]:
+    if not isinstance(data, dict):
+        return {"credentials": {}}
+    credentials = data.get("credentials")
+    if not isinstance(credentials, dict):
+        return {**data, "credentials": {}}
+    normalized: dict[str, object] = {}
+    changed = False
+    for name, record in credentials.items():
+        if isinstance(record, dict):
+            normalized[str(name)] = record
+            continue
+        if isinstance(record, str):
+            normalized[str(name)] = {"type": "token", "value": record}
+            changed = True
+            continue
+        changed = True
+    if not changed:
+        return data
+    return {**data, "credentials": normalized}

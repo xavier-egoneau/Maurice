@@ -12,7 +12,8 @@ from maurice.host.command_registry import CommandContext, CommandResult
 from maurice.host.project_registry import (
     known_project_by_name,
     list_known_projects,
-    record_known_project,
+    list_machine_projects,
+    record_seen_project,
 )
 from maurice.kernel.contracts import DreamInput
 from maurice.kernel.permissions import PermissionContext
@@ -21,6 +22,7 @@ from maurice.kernel.permissions import PermissionContext
 STATE_FILE = ".dev_state.json"
 META_DIR = ".maurice"
 GUIDANCE_FILES = ("AGENTS.md", "PLAN.md", "DECISIONS.md")
+DREAM_PROJECT_FILES = ("AGENTS.md", "PLAN.md", "DECISIONS.md", "dreams.md")
 
 
 def projects(context: CommandContext) -> CommandResult:
@@ -153,11 +155,17 @@ def dev(context: CommandContext) -> CommandResult:
     open_tasks = _open_tasks(plan_path)
     if not open_tasks:
         return _result("Je ne vois pas de prochaine tache claire dans `PLAN.md`.")
+    merge_target_branch = _remember_dev_merge_target(context, path, open_tasks, focus=focus)
     return _result(
         "Je lance le mode dev autonome sur le plan actif.",
         metadata={
             "command": "/dev",
-            "agent_prompt": _dev_execution_prompt(path, open_tasks, focus=focus),
+            "agent_prompt": _dev_execution_prompt(
+                path,
+                open_tasks,
+                focus=focus,
+                merge_target_branch=merge_target_branch,
+            ),
             "agent_limits": {"max_tool_iterations": 80, "allow_text_tool_calls": True},
             "autonomy": {
                 "requires_activity": True,
@@ -251,12 +259,19 @@ def commit(context: CommandContext) -> CommandResult:
     diff_stat = _git_diff_stat(path)
     plan_path = _guidance_path(path, "PLAN.md")
     done_tasks = _done_tasks(plan_path) if plan_path.exists() else []
+    current_branch = _git_current_branch(path)
+    suggested_branch = _dev_branch_name(path, done_tasks[-1] if done_tasks else status)
+    merge_target_branch = _merge_target_branch(context, current_branch)
     context_block = "\n".join([
         f"Projet : {path.name}",
         f"Racine Git : {path}",
         "",
         "Fichiers modifies :",
         status,
+        "",
+        f"Branche actuelle : {current_branch or 'inconnue'}",
+        f"Branche de travail Maurice suggeree : {suggested_branch}",
+        f"Branche cible du merge apres approbation : {merge_target_branch or 'branche de depart inconnue'}",
         "",
         f"Stats : {diff_stat}" if diff_stat else "",
     ]).strip()
@@ -275,11 +290,20 @@ def commit(context: CommandContext) -> CommandResult:
                 "   Format : `type: sujet court` ou `type(scope): sujet court`.\n"
                 "   Types acceptes : feat, fix, refactor, docs, test, chore.\n"
                 "   La description doit exprimer le POURQUOI, pas seulement le quoi.\n"
-                "2. Utilise `shell.exec` pour executer :\n"
+                "2. Avant de commiter, verifie la branche courante. Si tu es sur `main`, `master`, "
+                "`develop` ou une branche utilisateur non-Maurice, cree ou bascule d'abord sur une branche "
+                f"`{suggested_branch}` via `git -C {path} switch -c {suggested_branch}`. "
+                "Si la branche existe deja, utilise `git switch` vers cette branche ou choisis un suffixe clair.\n"
+                "3. Utilise `shell.exec` pour executer :\n"
                 f"   `git -C {path} add -A`\n"
                 f"   `git -C {path} commit -m \"<ton message>\"`\n"
-                "3. Reporte le resultat du commit (hash, fichiers, message utilise).\n"
-                "4. Si le commit echoue (hooks, rien a commiter, erreur), explique pourquoi et propose la correction.\n\n"
+                "4. Reporte le resultat du commit (branche, hash, fichiers, message utilise).\n"
+                "5. Ne lance jamais `git merge`, `git push`, suppression de branche ou rebase dans `/commit`. "
+                "Apres le commit, demande explicitement a l'utilisateur s'il approuve le merge. "
+                "Si l'utilisateur approuve ensuite, le prochain tour devra verifier que le working tree est propre, "
+                "merger la branche Maurice vers la branche cible indiquee ci-dessus, et ne jamais push sans "
+                "approbation separee.\n"
+                "6. Si le commit echoue (hooks, rien a commiter, erreur), explique pourquoi et propose la correction.\n\n"
                 "Ne coche pas les taches dans PLAN.md — elles sont deja cochees si elles figurent dans la liste ci-dessus."
             ),
             "agent_limits": {"max_tool_iterations": 6},
@@ -338,6 +362,12 @@ def _write_state(context: CommandContext, data: dict[str, str]) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def _update_state(context: CommandContext, data: dict[str, str]) -> None:
+    state = _read_state(context)
+    state.update(data)
+    _write_state(context, state)
+
+
 def _active_project(context: CommandContext) -> str:
     active_path = _explicit_active_project_path(context)
     if active_path is not None:
@@ -388,14 +418,10 @@ def _state_active_project_path(context: CommandContext) -> Path | None:
 
 
 def _remember_active_project(context: CommandContext, path: Path) -> None:
-    if context.callbacks.get("scope") != "global":
-        return
-    record_known_project(_agent_workspace(context), path)
+    record_seen_project(_agent_workspace(context), path)
 
 
 def _known_project_rows(context: CommandContext) -> list[str]:
-    if context.callbacks.get("scope") != "global":
-        return []
     content_root = _content_root(context)
     active_path = _explicit_active_project_path(context)
     seen_paths = {str(active_path)} if active_path is not None else set()
@@ -551,6 +577,20 @@ def _git_diff_stat(path: Path) -> str:
     return lines[-1].strip() if lines else ""
 
 
+def _git_current_branch(path: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "branch", "--show-current"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def _inside_git_repo(path: Path) -> bool:
     try:
         result = subprocess.run(
@@ -563,6 +603,45 @@ def _inside_git_repo(path: Path) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def _dev_branch_name(path: Path, seed: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", seed.lower()).strip("-")
+    if not slug:
+        slug = re.sub(r"[^a-z0-9]+", "-", path.name.lower()).strip("-")
+    if not slug:
+        slug = "work"
+    return f"maurice/{slug[:48].strip('-') or 'work'}"
+
+
+def _remember_dev_merge_target(
+    context: CommandContext,
+    path: Path,
+    open_tasks: list[str],
+    *,
+    focus: str = "",
+) -> str:
+    if not _inside_git_repo(path):
+        return ""
+    current_branch = _git_current_branch(path)
+    work_branch = _dev_branch_name(path, focus or (open_tasks[0] if open_tasks else path.name))
+    if current_branch and not current_branch.startswith("maurice/"):
+        _update_state(
+            context,
+            {
+                "dev_project_path": str(path),
+                "dev_work_branch": work_branch,
+                "dev_merge_target_branch": current_branch,
+            },
+        )
+        return current_branch
+    return _read_state(context).get("dev_merge_target_branch", "")
+
+
+def _merge_target_branch(context: CommandContext, current_branch: str) -> str:
+    if current_branch and not current_branch.startswith("maurice/"):
+        return current_branch
+    return _read_state(context).get("dev_merge_target_branch", "")
 
 
 def _review_advice(*, open_tasks: list[str], git_status: list[str]) -> str:
@@ -657,7 +736,13 @@ def _plan_agent_prompt(
     )
 
 
-def _dev_execution_prompt(project_path: Path, open_tasks: list[str], *, focus: str = "") -> str:
+def _dev_execution_prompt(
+    project_path: Path,
+    open_tasks: list[str],
+    *,
+    focus: str = "",
+    merge_target_branch: str = "",
+) -> str:
     meta = _meta_root(project_path)
     plan_path = meta / "PLAN.md"
     decisions_path = meta / "DECISIONS.md"
@@ -665,6 +750,17 @@ def _dev_execution_prompt(project_path: Path, open_tasks: list[str], *, focus: s
     dreams_path = meta / "dreams.md"
     task_lines = "\n".join(f"- [ ] {task}" for task in open_tasks)
     focus_block = f"Demande utilisateur prioritaire pour ce passage : {focus}\n\n" if focus else ""
+    branch_name = _dev_branch_name(project_path, focus or (open_tasks[0] if open_tasks else project_path.name))
+    current_branch = _git_current_branch(project_path) if _inside_git_repo(project_path) else ""
+    git_block = (
+        "Depot Git detecte : oui\n"
+        f"Branche actuelle : {current_branch or 'inconnue'}\n"
+        f"Branche de travail Maurice suggeree : {branch_name}\n"
+        f"Branche cible du merge apres approbation : {merge_target_branch or 'branche de depart a capturer avant switch'}\n"
+    ) if _inside_git_repo(project_path) else (
+        "Depot Git detecte : non\n"
+        "Branche de travail Maurice suggeree : indisponible tant que le projet n'est pas un depot Git\n"
+    )
     return (
         "Commande interne `/dev` : execute le plan de developpement en autonomie maximale.\n\n"
         f"Projet actif : {project_path}\n"
@@ -680,6 +776,9 @@ def _dev_execution_prompt(project_path: Path, open_tasks: list[str], *, focus: s
         f"{task_lines}\n\n"
         "Regles d'execution :\n"
         "- Tu es en mode developpement : avance concretement, pas seulement en commentaire.\n"
+        "- Workflow Git obligatoire quand le projet est un depot Git : avant toute modification de code, verifie la branche avec `shell.exec`, considere cette branche comme la branche de depart/cible de merge, puis travaille sur une branche dediee `maurice/...`.\n"
+        f"- Si tu es sur `main`, `master`, `develop` ou une branche utilisateur non-Maurice, cree ou bascule d'abord sur `{branch_name}` avec `git -C {project_path} switch -c {branch_name}`. Si elle existe deja, utilise `git switch` vers cette branche ou ajoute un suffixe clair.\n"
+        "- Ne lance jamais `git merge`, `git push`, suppression de branche ou rebase pendant `/dev`.\n"
         "- Les taches ouvertes representent la demande utilisateur. Ne les ecarte pas comme `deja fait` ou `plan depasse` sans preuve verifiee et sans rendre le plan coherent.\n"
         "- Si une tache parait deja partiellement presente, verifie l'acceptance reelle dans le code, termine l'integration manquante, puis coche seulement ce qui est effectivement fait.\n"
         "- Si le plan est ancien mais l'intention reste claire, corrige `.maurice/PLAN.md`/`.maurice/DECISIONS.md` toi-meme et continue. Ne demande une decision que si plusieurs choix produit/techniques incompatibles restent possibles.\n"
@@ -687,12 +786,26 @@ def _dev_execution_prompt(project_path: Path, open_tasks: list[str], *, focus: s
         "- Sois concis dans tes messages : pendant l'execution, evite les plans narratifs et les details de routine.\n"
         "- En fin de boucle, reponds en 3-5 lignes : changements faits, verification, blocage/prochaine decision si besoin.\n"
         "- Commence par les taches `[ non parallellisable ]`, dans l'ordre.\n"
-        "- Pour les taches `[ parallellisable ]`, si un outil de spawn/worker est disponible, delegue avec un contexte autonome et continue; sinon execute sequentiellement.\n"
-        "- Chaque worker doit recevoir le contexte minimal complet : projet, fichiers pertinents, objectifs, contraintes, sortie attendue.\n"
+        "- Pour les taches `[ parallellisable ]`, utilise `dev.spawn_workers` quand plusieurs missions peuvent avancer sans se bloquer; sinon execute sequentiellement.\n"
+        "- Tu peux aussi utiliser `dev.spawn_workers` hors plan pour une enquete, verification ou tranche d'implementation vraiment independante.\n"
+        "- Chaque worker doit recevoir le contexte minimal complet : projet, fichiers pertinents, objectifs, contraintes, sortie attendue, chemins d'ecriture quand ils sont connus.\n"
+        "- Limites workers : 2-3 par defaut, 5 maximum par appel, 10 actifs maximum; fixe un budget temps raisonnable et ne cree jamais de boucle de workers.\n"
+        "- Tu restes l'orchestrateur : un worker execute une mission, puis remonte `completed`, `blocked`, `needs_arbitration` ou `obsolete`.\n"
+        "- Si un worker remonte un blocage, une contradiction, un conflit de fichiers, une permission requise, ou un impact sur d'autres workers, revise le plan toi-meme avant de continuer.\n"
+        "- Si le plan change, considere les autres workers affectes comme obsoletes et relance seulement des workers frais avec un contexte corrige.\n"
+        "- Integre les resultats des workers toi-meme avant de cocher une tache.\n"
         "- Apres chaque tache : verifie le code, cherche les impacts, nettoie le code mort, puis coche la tache dans `.maurice/PLAN.md`.\n"
         "- Note toute decision structurante dans `.maurice/DECISIONS.md`.\n"
         "- Mets a jour `.maurice/dreams.md` si tu decouvres des signaux utiles au dreaming.\n"
+        "- Avant le commit final, fais une passe de finition proportionnee au changement : relis le diff complet, supprime le code mort/imports inutiles/fichiers temporaires, verifie qu'aucun hardcode ou chemin local personnel n'a ete introduit, et garde le commit coherent et revertable.\n"
+        "- Mets a jour la documentation quand l'usage, la configuration, les commandes, les permissions, l'architecture ou un contrat de skill changent. Ne cree pas de doc ceremonielle pour un micro-fix purement interne.\n"
+        "- Ajoute ou adapte les tests quand le comportement change, lance les tests pertinents, et mentionne clairement toute verification manuelle ou risque restant.\n"
+        "- Si tu touches credentials, permissions, shell, reseau, rappels, Telegram ou filesystem, fais une passe de risque explicite avant commit et evite toute migration molle/cachee sauf demande utilisateur.\n"
+        "- Quand toutes les taches du plan sont terminees et verifiees, prepare un commit sur la branche Maurice : `git add -A`, `git commit -m \"<message>\"`, puis arrete-toi et demande explicitement l'approbation utilisateur avant tout merge.\n"
+        "- Si l'utilisateur approuve ensuite le merge, verifie que le working tree est propre, puis merge la branche `maurice/...` vers la branche de depart indiquee dans le contexte Git. Demande une precision seulement si cette branche de depart est inconnue. Ne push jamais sans approbation separee.\n"
         "- Stoppe et demande a l'utilisateur uniquement si une information manque, une autorisation est necessaire, ou un test manuel est indispensable.\n\n"
+        "Contexte Git :\n"
+        f"```text\n{git_block}```\n\n"
         "Contexte AGENTS.md :\n"
         f"```markdown\n{_read_excerpt(agents_path, limit=1800)}\n```\n\n"
         "Contexte DECISIONS.md :\n"
@@ -708,46 +821,119 @@ def _result(text: str, *, metadata: dict[str, object] | None = None) -> CommandR
 
 def build_dream_input(context: PermissionContext, *, limit: int = 12) -> DreamInput:
     now = datetime.now(UTC)
-    content_root = Path(context.variables()["$agent_content"])
     signals = []
-    if content_root.exists():
-        for project in sorted(path for path in content_root.iterdir() if path.is_dir() and not path.name.startswith(".")):
-            meta = _meta_root(project)
-            plan_path = meta / "PLAN.md"
-            decisions_path = meta / "DECISIONS.md"
-            if not plan_path.exists() and not decisions_path.exists():
-                continue
-            open_tasks = _open_tasks(plan_path)
-            done_tasks = _done_tasks(plan_path)
-            recent_decisions = _recent_decisions(decisions_path, limit=3)
-            summary_parts = [
-                f"Project {project.name}: {len(open_tasks)} open task(s), {len(done_tasks)} done task(s)."
-            ]
-            if open_tasks:
-                summary_parts.append(f"Next: {open_tasks[0]}")
-            if recent_decisions:
-                summary_parts.append(f"Recent decisions: {'; '.join(recent_decisions)}")
+    for project in _dream_project_paths(context):
+        if not project.exists():
             signals.append(
                 {
-                    "id": f"sig_dev_{project.name}",
-                    "type": "dev_project_review",
-                    "summary": " ".join(summary_parts),
-                    "data": {
-                        "project": project.name,
-                        "plan_path": str(plan_path),
-                        "decisions_path": str(decisions_path),
-                        "open_tasks": open_tasks[:5],
-                        "done_count": len(done_tasks),
-                        "recent_decisions": recent_decisions,
-                    },
+                    "id": f"sig_dev_missing_{_signal_slug(project)}",
+                    "type": "dev_project_missing",
+                    "summary": f"Known project is missing: {project}",
+                    "data": {"project": project.name, "path": str(project)},
                 }
             )
             if len(signals) >= limit:
                 break
+            continue
+
+        meta = _meta_root(project)
+        files = {name: meta / name for name in DREAM_PROJECT_FILES}
+        if not any(path.exists() for path in files.values()):
+            continue
+        plan_path = files["PLAN.md"]
+        decisions_path = files["DECISIONS.md"]
+        open_tasks = _open_tasks(plan_path)
+        done_tasks = _done_tasks(plan_path)
+        recent_decisions = _recent_decisions(decisions_path, limit=3)
+        excerpts = {
+            name: _read_excerpt(path, limit=1200)
+            for name, path in files.items()
+            if path.exists()
+        }
+        summary_parts = [
+            f"Project {project.name}: {len(open_tasks)} open task(s), {len(done_tasks)} done task(s)."
+        ]
+        if open_tasks:
+            summary_parts.append(f"Next: {open_tasks[0]}")
+        if recent_decisions:
+            summary_parts.append(f"Recent decisions: {'; '.join(recent_decisions)}")
+        if excerpts.get("dreams.md"):
+            summary_parts.append("Project dreams.md is present.")
+        signals.append(
+            {
+                "id": f"sig_dev_{_signal_slug(project)}",
+                "type": "dev_project_review",
+                "summary": " ".join(summary_parts),
+                "data": {
+                    "project": project.name,
+                    "path": str(project),
+                    "meta_path": str(meta),
+                    "files": {name: str(path) for name, path in files.items()},
+                    "open_tasks": open_tasks[:5],
+                    "done_count": len(done_tasks),
+                    "recent_decisions": recent_decisions,
+                    "excerpts": excerpts,
+                },
+            }
+        )
+        if len(signals) >= limit:
+            break
     return DreamInput(
         skill="dev",
         trust="local_mutable",
         freshness={"generated_at": now, "expires_at": None},
         signals=signals,
-        limits=["Includes project `.maurice/PLAN.md` and `.maurice/DECISIONS.md` summaries only."],
+        limits=[
+            "Uses only the active project, the agent project registry, and the machine project registry.",
+            "Includes `.maurice/AGENTS.md`, `PLAN.md`, `DECISIONS.md`, and `dreams.md` excerpts.",
+        ],
     )
+
+
+def _dream_project_paths(context: PermissionContext) -> list[Path]:
+    variables = context.variables()
+    agent_workspace = Path(variables["$agent_workspace"]).expanduser().resolve()
+    agent_content = Path(variables["$agent_content"]).expanduser().resolve()
+    active_project = Path(variables["$project"]).expanduser().resolve()
+    paths: list[Path] = []
+    if active_project != agent_content and _meta_root(active_project).exists():
+        paths.append(active_project)
+    for project in _read_known_project_paths(agent_workspace / "projects.json"):
+        paths.append(project)
+    for project in list_machine_projects():
+        path = project.get("path")
+        if isinstance(path, str) and path.strip():
+            paths.append(Path(path).expanduser().resolve())
+    return _dedupe_paths(paths)
+
+
+def _read_known_project_paths(path: Path) -> list[Path]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    projects = payload.get("projects") if isinstance(payload, dict) else None
+    if not isinstance(projects, list):
+        return []
+    paths = []
+    for project in projects:
+        if not isinstance(project, dict) or not isinstance(project.get("path"), str):
+            continue
+        paths.append(Path(project["path"]).expanduser().resolve())
+    return paths
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    result = []
+    for path in paths:
+        key = str(path.expanduser().resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path.expanduser().resolve())
+    return result
+
+
+def _signal_slug(path: Path) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(path).strip()).strip("._-")[:80] or "project"

@@ -11,7 +11,6 @@ from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.config import load_workspace_config
 from maurice.kernel.contracts import Event, MauriceModel
 from maurice.kernel.events import EventStore
-from maurice.kernel.runs import RunStore
 from maurice.kernel.scheduler import JobStore
 from maurice.kernel.skills import SkillLoader
 
@@ -52,7 +51,6 @@ class MonitoringSnapshot(MauriceModel):
     skills: list[SkillHealthSnapshot]
     approvals: CountSnapshot
     jobs: CountSnapshot
-    runs: CountSnapshot
     events: list[Event]
 
 
@@ -77,11 +75,6 @@ def build_monitoring_snapshot(
 
     approvals = ApprovalStore(workspace / "agents" / agent.id / "approvals.json").list()
     jobs = JobStore(workspace / "agents" / agent.id / "jobs.json").list()
-    runs = RunStore(
-        workspace / "agents" / agent.id / "runs.json",
-        workspace_root=workspace,
-    ).list()
-
     return MonitoringSnapshot(
         runtime=RuntimeSnapshot(
             workspace_root=bundle.host.workspace_root,
@@ -113,7 +106,6 @@ def build_monitoring_snapshot(
         ],
         approvals=_count_by_status([approval.status for approval in approvals]),
         jobs=_count_by_status([job.status for job in jobs]),
-        runs=_count_by_status([run.state for run in runs]),
         events=event_store.read_all()[-event_limit:],
     )
 

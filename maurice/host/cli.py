@@ -34,17 +34,7 @@ from maurice.host.commands.models import (
     _models_assign,
     _models_default,
     _models_list,
-)
-from maurice.host.commands.runs import (
-    _runs_list, _runs_create, _base_agent_profile, _resolve_run_profile,
-    _runs_start, _runs_resume, _runs_execute, _runs_checkpoint,
-    _runs_complete, _verification_records, _runs_review,
-    _runs_fail, _runs_cancel, _runs_coordinate,
-    _runs_coordination_list, _runs_coordination_ack, _runs_coordination_resolve,
-    _runs_request_approval, _runs_approvals_list,
-    _runs_approvals_approve, _runs_approvals_deny,
-    _runs_templates_list, _runs_templates_add,
-    _scope_items, _run_store_for, _coordination_store_for, _run_approval_store_for,
+    _models_worker,
 )
 from maurice.host.commands.auth import _auth_login, _auth_status, _auth_logout
 from maurice.host.commands.approvals import _approvals_list, _approvals_resolve, _approval_store_for
@@ -74,7 +64,7 @@ from maurice.host.commands.dashboard import (
     _dashboard, _dashboard_textual, _dashboard_rich,
     _rich_table, _cluster_rows, _log_level_text,
     _model_rows, _security_rows, _event_rows, _render_dashboard,
-    _dashboard_status_line, _dashboard_table, _job_rows, _run_rows,
+    _dashboard_status_line, _dashboard_table, _job_rows,
     _skill_rows, _active_agents, _compact_counts, _agent_model_name,
 )
 from maurice.host.commands.service import (
@@ -82,7 +72,7 @@ from maurice.host.commands.service import (
     _start_services, _start_services_daemon,
     _stop_services, _restart_services_daemon,
     _wait_for_stop, _pid_path, _write_pid, _read_pid,
-    _remove_pid, _pid_is_running, _doctor_workspace,
+    _remove_pid, _pid_is_running, _doctor,
 )
 from maurice.host.commands.onboard import (
     _onboarding_existing_values, _onboarding_provider_choice,
@@ -166,6 +156,7 @@ from maurice.host.paths import (
     workspace_skills_config_path,
 )
 from maurice.host.project import global_config_path, resolve_project_root
+from maurice.host.project_registry import record_seen_project
 from maurice.host.secret_capture import capture_pending_secret
 from maurice.host.self_update import (
     apply_runtime_proposal,
@@ -189,7 +180,6 @@ from maurice.kernel.providers import (
     OpenAICompatibleProvider,
     UnsupportedProvider,
 )
-from maurice.kernel.runs import RunApprovalStore, RunCoordinationStore, RunExecutor, RunStore
 from maurice.kernel.scheduler import JobRunner, JobStatus, JobStore, SchedulerService, utc_now
 from maurice.kernel.session import SessionStore
 from maurice.kernel.skills import SkillContext, SkillLoader
@@ -201,7 +191,6 @@ PROVIDER_HELP = {
     "openai_api": ("API compatible OpenAI", "URL + cle API, pour OpenAI ou un provider compatible"),
     "ollama": ("Ollama", "modele local ou serveur Ollama"),
 }
-DEFAULT_SEARXNG_URL = "http://localhost:8080"
 DEFAULT_WORKSPACE = Path.home() / "Documents" / "workspace_maurice"
 
 
@@ -263,6 +252,8 @@ def _web_chat(
     ctx = _resolve_web_context(dir_arg=dir_arg, workspace_arg=workspace_arg)
     if ctx.scope == "local" and agent_id not in {None, "main"}:
         raise SystemExit("Le contexte local expose seulement l'agent `main`.")
+    if ctx.active_project_root is not None:
+        record_seen_project(ctx.agent_workspace_root, ctx.active_project_root)
     token = secrets.token_urlsafe(24)
     telegram_pollers = _web_telegram_pollers_for_context(ctx, agent_id=agent_id)
     if telegram_pollers is not None:
@@ -499,6 +490,10 @@ def build_parser() -> argparse.ArgumentParser:
     models_assign.add_argument("agent_id", help="Agent id to update.")
     models_assign.add_argument("model_chain", nargs="+", help="Ordered model profile ids.")
     models_assign.add_argument("--workspace", default=str(DEFAULT_WORKSPACE), help="Workspace root to use.")
+    models_worker = models_subparsers.add_parser("worker", help="Assign the dev worker model chain for an agent.")
+    models_worker.add_argument("agent_id", help="Agent id to update.")
+    models_worker.add_argument("model_chain", nargs="*", help="Worker model profile ids. Empty = use the parent agent model chain.")
+    models_worker.add_argument("--workspace", default=str(DEFAULT_WORKSPACE), help="Workspace root to use.")
 
     agents_disable = agents_subparsers.add_parser("disable", help="Disable a permanent agent.")
     agents_disable.add_argument("agent_id", help="Agent id to disable.")
@@ -514,135 +509,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Confirm destructive deletion of the agent config and workspace.",
     )
-
-    runs_parser = subparsers.add_parser("runs", help="Manage disposable subagent runs.")
-    runs_subparsers = runs_parser.add_subparsers(dest="runs_command")
-    runs_list = runs_subparsers.add_parser("list", help="List subagent runs.")
-    runs_list.add_argument("--workspace", required=True, help="Workspace root to use.")
-    runs_list.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_list.add_argument("--state", choices=["created", "running", "checkpointing", "paused", "completed", "failed", "cancelled"])
-    runs_create = runs_subparsers.add_parser("create", help="Create a subagent run.")
-    runs_create.add_argument("--workspace", required=True, help="Workspace root to use.")
-    runs_create.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_create.add_argument("--task", required=True, help="Task assigned to the run.")
-    runs_create.add_argument("--base-agent", help="Base permanent agent/profile for the run.")
-    runs_create.add_argument("--template", help="Reusable subagent template id for the run.")
-    runs_create.add_argument("--inline-profile", help="Inline JSON profile for this temporary run.")
-    runs_create.add_argument("--context-summary", default="", help="Short standalone context summary.")
-    runs_create.add_argument("--relevant-file", action="append", dest="relevant_files", help="Relevant file path. May repeat.")
-    runs_create.add_argument("--constraint", action="append", dest="constraints", help="Run constraint. May repeat.")
-    runs_create.add_argument("--plan-step", action="append", dest="plan_steps", help="Planned step. May repeat.")
-    runs_create.add_argument("--requires-self-check", action="store_true", help="Require self-check evidence in the final output.")
-    runs_create.add_argument("--can-request-install", action="store_true", help="Allow the run to request dependency installation through parent approval.")
-    runs_create.add_argument("--package-manager", action="append", dest="package_managers", help="Allowed package manager for install requests. May repeat.")
-    runs_create.add_argument("--autonomy-mode", default="continue_until_blocked", help="Run autonomy mode.")
-    runs_create.add_argument("--max-steps", type=int, default=20, help="Maximum autonomous steps before stopping.")
-    runs_create.add_argument("--checkpoint-every-steps", type=int, default=5, help="Checkpoint interval for autonomous runs.")
-    runs_create.add_argument("--stop-condition", action="append", dest="stop_conditions", help="Autonomous stop condition. May repeat.")
-    runs_create.add_argument(
-        "--context-inheritance",
-        choices=["none", "current_task", "linked_session"],
-        default="current_task",
-    )
-    runs_create.add_argument("--write-path", action="append", dest="write_paths", help="Allowed write path. May repeat.")
-    runs_create.add_argument("--permission-class", action="append", dest="permission_classes", help="Allowed permission class. May repeat.")
-    runs_template_list = runs_subparsers.add_parser("template-list", help="List reusable subagent templates.")
-    runs_template_list.add_argument("--workspace", required=True)
-    runs_template_add = runs_subparsers.add_parser("template-add", help="Create a reusable subagent template.")
-    runs_template_add.add_argument("template_id")
-    runs_template_add.add_argument("--workspace", required=True)
-    runs_template_add.add_argument("--description", default="")
-    runs_template_add.add_argument("--permission-profile", choices=["safe", "limited", "power"], default="safe")
-    runs_template_add.add_argument("--skill", action="append", dest="skills", help="Template skill. May repeat.")
-    runs_template_add.add_argument("--credential", action="append", dest="credentials", help="Credential allowed for this template. May repeat.")
-    runs_template_add.add_argument("--model", action="append", dest="model_chain", help="Model profile id. May repeat; order is fallback order.")
-    runs_start = runs_subparsers.add_parser("start", help="Mark a run as running.")
-    runs_start.add_argument("run_id")
-    runs_start.add_argument("--workspace", required=True)
-    runs_start.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_resume = runs_subparsers.add_parser("resume", help="Resume a paused or cancelled run if safe.")
-    runs_resume.add_argument("run_id")
-    runs_resume.add_argument("--workspace", required=True)
-    runs_resume.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_execute = runs_subparsers.add_parser("execute", help="Execute a run until blocked by its autonomy policy.")
-    runs_execute.add_argument("run_id")
-    runs_execute.add_argument("--workspace", required=True)
-    runs_execute.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_execute.add_argument("--prepare-only", action="store_true", help="Only prepare the run session and checkpoint.")
-    runs_checkpoint = runs_subparsers.add_parser("checkpoint", help="Pause a run with a checkpoint.")
-    runs_checkpoint.add_argument("run_id")
-    runs_checkpoint.add_argument("--workspace", required=True)
-    runs_checkpoint.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_checkpoint.add_argument("--summary", required=True)
-    runs_checkpoint.add_argument("--unsafe-to-resume", action="store_true")
-    runs_complete = runs_subparsers.add_parser("complete", help="Complete a run.")
-    runs_complete.add_argument("run_id")
-    runs_complete.add_argument("--workspace", required=True)
-    runs_complete.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_complete.add_argument("--summary", required=True)
-    runs_complete.add_argument("--changed-file", action="append", dest="changed_files", help="Changed file path. May repeat.")
-    runs_complete.add_argument("--risk", action="append", dest="risks", help="Known residual risk. May repeat.")
-    runs_complete.add_argument("--verification-command", action="append", dest="verification_commands", help="Verification command. May repeat.")
-    runs_complete.add_argument("--verification-status", action="append", dest="verification_statuses", help="Verification status matching --verification-command. May repeat.")
-    runs_complete.add_argument("--verification-summary", action="append", dest="verification_summaries", help="Verification output summary. May repeat.")
-    runs_review = runs_subparsers.add_parser("review", help="Record parent review for a completed run.")
-    runs_review.add_argument("run_id")
-    runs_review.add_argument("--workspace", required=True)
-    runs_review.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_review.add_argument("--status", choices=["accepted", "needs_changes"], required=True)
-    runs_review.add_argument("--summary", required=True)
-    runs_review.add_argument("--followup", action="append", dest="followups")
-    runs_fail = runs_subparsers.add_parser("fail", help="Fail a run.")
-    runs_fail.add_argument("run_id")
-    runs_fail.add_argument("--workspace", required=True)
-    runs_fail.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_fail.add_argument("--summary", required=True)
-    runs_fail.add_argument("--error", action="append", dest="errors", required=True)
-    runs_cancel = runs_subparsers.add_parser("cancel", help="Cancel a run with a checkpoint.")
-    runs_cancel.add_argument("run_id")
-    runs_cancel.add_argument("--workspace", required=True)
-    runs_cancel.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_cancel.add_argument("--summary", default="Run cancellation requested.")
-    runs_cancel.add_argument("--unsafe-to-resume", action="store_true")
-    runs_coordinate = runs_subparsers.add_parser("coordinate", help="Request parent-owned coordination between runs.")
-    runs_coordinate.add_argument("run_id", help="Source run id.")
-    runs_coordinate.add_argument("--workspace", required=True)
-    runs_coordinate.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_coordinate.add_argument("--affects", action="append", dest="affected_run_ids", required=True, help="Affected run id. May repeat.")
-    runs_coordinate.add_argument("--impact", required=True, help="Impact summary.")
-    runs_coordinate.add_argument("--requested-action", required=True, help="Action requested from the parent.")
-    runs_coordination_list = runs_subparsers.add_parser("coordination-list", help="List run coordination events.")
-    runs_coordination_list.add_argument("--workspace", required=True)
-    runs_coordination_list.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_coordination_list.add_argument("--status", choices=["pending", "acknowledged", "resolved"])
-    runs_coordination_ack = runs_subparsers.add_parser("coordination-ack", help="Acknowledge a coordination event.")
-    runs_coordination_ack.add_argument("coordination_id")
-    runs_coordination_ack.add_argument("--workspace", required=True)
-    runs_coordination_ack.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_coordination_resolve = runs_subparsers.add_parser("coordination-resolve", help="Resolve a coordination event.")
-    runs_coordination_resolve.add_argument("coordination_id")
-    runs_coordination_resolve.add_argument("--workspace", required=True)
-    runs_coordination_resolve.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_request_approval = runs_subparsers.add_parser("request-approval", help="Request parent approval for a blocked run.")
-    runs_request_approval.add_argument("run_id")
-    runs_request_approval.add_argument("--workspace", required=True)
-    runs_request_approval.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_request_approval.add_argument("--type", choices=["permission", "dependency"], required=True)
-    runs_request_approval.add_argument("--reason", required=True)
-    runs_request_approval.add_argument("--scope", action="append", dest="scope_items", help="Requested scope key=value. May repeat.")
-    runs_request_approval.add_argument("--unsafe-to-resume", action="store_true")
-    runs_approvals_list = runs_subparsers.add_parser("approvals-list", help="List run approval requests.")
-    runs_approvals_list.add_argument("--workspace", required=True)
-    runs_approvals_list.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_approvals_list.add_argument("--status", choices=["pending", "approved", "denied"])
-    runs_approvals_approve = runs_subparsers.add_parser("approvals-approve", help="Approve a run approval request.")
-    runs_approvals_approve.add_argument("approval_id")
-    runs_approvals_approve.add_argument("--workspace", required=True)
-    runs_approvals_approve.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
-    runs_approvals_deny = runs_subparsers.add_parser("approvals-deny", help="Deny a run approval request.")
-    runs_approvals_deny.add_argument("approval_id")
-    runs_approvals_deny.add_argument("--workspace", required=True)
-    runs_approvals_deny.add_argument("--agent", help="Parent agent id. Defaults to the configured default agent.")
 
     auth_parser = subparsers.add_parser("auth", help="Manage login/session provider credentials.")
     auth_subparsers = auth_parser.add_subparsers(dest="auth_command")
@@ -856,10 +722,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(raw_argv)
 
     if args.command == "doctor":
-        if args.workspace:
-            _doctor_workspace(Path(args.workspace))
-        else:
-            print("Maurice doctor: basic package import OK")
+        _doctor(workspace_root=Path(args.workspace) if args.workspace else None)
         return 0
 
     if args.command == "install":
@@ -876,11 +739,17 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     if args.command == "run":
+        active_project = resolve_project_root(Path.cwd(), confirm=False)
         result = run_one_turn(
             workspace_root=Path(args.workspace),
             message=args.message,
             session_id=args.session,
             agent_id=args.agent,
+            source_metadata=(
+                {"active_project_root": str(active_project)}
+                if active_project is not None
+                else None
+            ),
         )
         if result.assistant_text:
             print(result.assistant_text)
@@ -1025,151 +894,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.models_command == "assign":
             _models_assign(Path(args.workspace), agent_id=args.agent_id, model_chain=args.model_chain)
             return 0
-
-    if args.command == "runs":
-        if args.runs_command == "list":
-            _runs_list(Path(args.workspace), agent_id=args.agent, state=args.state)
-            return 0
-        if args.runs_command == "create":
-            _runs_create(
-                Path(args.workspace),
-                agent_id=args.agent,
-                task=args.task,
-                base_agent=args.base_agent,
-                template=args.template,
-                inline_profile=args.inline_profile,
-                context_summary=args.context_summary,
-                context_inheritance=args.context_inheritance,
-                relevant_files=args.relevant_files,
-                constraints=args.constraints,
-                plan_steps=args.plan_steps,
-                write_paths=args.write_paths,
-                permission_classes=args.permission_classes,
-                requires_self_check=args.requires_self_check,
-                can_request_install=args.can_request_install,
-                package_managers=args.package_managers,
-                autonomy_mode=args.autonomy_mode,
-                max_steps=args.max_steps,
-                checkpoint_every_steps=args.checkpoint_every_steps,
-                stop_conditions=args.stop_conditions,
-            )
-            return 0
-        if args.runs_command == "template-list":
-            _runs_templates_list(Path(args.workspace))
-            return 0
-        if args.runs_command == "template-add":
-            _runs_templates_add(
-                Path(args.workspace),
-                template_id=args.template_id,
-                description=args.description,
-                permission_profile=args.permission_profile,
-                skills=args.skills,
-                credentials=args.credentials,
-                model_chain=args.model_chain,
-            )
-            return 0
-        if args.runs_command == "start":
-            _runs_start(Path(args.workspace), args.run_id, agent_id=args.agent)
-            return 0
-        if args.runs_command == "resume":
-            _runs_resume(Path(args.workspace), args.run_id, agent_id=args.agent)
-            return 0
-        if args.runs_command == "execute":
-            _runs_execute(
-                Path(args.workspace),
-                args.run_id,
-                agent_id=args.agent,
-                prepare_only=args.prepare_only,
-            )
-            return 0
-        if args.runs_command == "checkpoint":
-            _runs_checkpoint(
-                Path(args.workspace),
-                args.run_id,
-                agent_id=args.agent,
-                summary=args.summary,
-                safe_to_resume=not args.unsafe_to_resume,
-            )
-            return 0
-        if args.runs_command == "complete":
-            _runs_complete(
-                Path(args.workspace),
-                args.run_id,
-                agent_id=args.agent,
-                summary=args.summary,
-                changed_files=args.changed_files,
-                risks=args.risks,
-                verification_commands=args.verification_commands,
-                verification_statuses=args.verification_statuses,
-                verification_summaries=args.verification_summaries,
-            )
-            return 0
-        if args.runs_command == "review":
-            _runs_review(
-                Path(args.workspace),
-                args.run_id,
-                agent_id=args.agent,
-                status=args.status,
-                summary=args.summary,
-                followups=args.followups,
-            )
-            return 0
-        if args.runs_command == "fail":
-            _runs_fail(
-                Path(args.workspace),
-                args.run_id,
-                agent_id=args.agent,
-                summary=args.summary,
-                errors=args.errors,
-            )
-            return 0
-        if args.runs_command == "cancel":
-            _runs_cancel(
-                Path(args.workspace),
-                args.run_id,
-                agent_id=args.agent,
-                summary=args.summary,
-                safe_to_resume=not args.unsafe_to_resume,
-            )
-            return 0
-        if args.runs_command == "coordinate":
-            _runs_coordinate(
-                Path(args.workspace),
-                source_run_id=args.run_id,
-                agent_id=args.agent,
-                affected_run_ids=args.affected_run_ids,
-                impact=args.impact,
-                requested_action=args.requested_action,
-            )
-            return 0
-        if args.runs_command == "coordination-list":
-            _runs_coordination_list(Path(args.workspace), agent_id=args.agent, status=args.status)
-            return 0
-        if args.runs_command == "coordination-ack":
-            _runs_coordination_ack(Path(args.workspace), args.coordination_id, agent_id=args.agent)
-            return 0
-        if args.runs_command == "coordination-resolve":
-            _runs_coordination_resolve(Path(args.workspace), args.coordination_id, agent_id=args.agent)
-            return 0
-        if args.runs_command == "request-approval":
-            _runs_request_approval(
-                Path(args.workspace),
-                run_id=args.run_id,
-                agent_id=args.agent,
-                type=args.type,
-                reason=args.reason,
-                scope_items=args.scope_items,
-                safe_to_resume=not args.unsafe_to_resume,
-            )
-            return 0
-        if args.runs_command == "approvals-list":
-            _runs_approvals_list(Path(args.workspace), agent_id=args.agent, status=args.status)
-            return 0
-        if args.runs_command == "approvals-approve":
-            _runs_approvals_approve(Path(args.workspace), args.approval_id, agent_id=args.agent)
-            return 0
-        if args.runs_command == "approvals-deny":
-            _runs_approvals_deny(Path(args.workspace), args.approval_id, agent_id=args.agent)
+        if args.models_command == "worker":
+            _models_worker(Path(args.workspace), agent_id=args.agent_id, model_chain=args.model_chain)
             return 0
 
     if args.command == "auth":

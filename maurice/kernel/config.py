@@ -87,27 +87,12 @@ class KernelSessionsConfig(ConfigModel):
     keep_recent_turns: int = Field(default=10, ge=1)
 
 
-class SubagentTemplateConfig(ConfigModel):
-    id: str
-    description: str = ""
-    skills: list[str] = Field(default_factory=list)
-    credentials: list[str] = Field(default_factory=list)
-    permission_profile: Literal["safe", "limited", "power"] = "safe"
-    channels: list[str] = Field(default_factory=list)
-    model_chain: list[str] = Field(default_factory=list)
-
-
-class KernelSubagentsConfig(ConfigModel):
-    templates: dict[str, SubagentTemplateConfig] = Field(default_factory=dict)
-
-
 class KernelConfig(ConfigModel):
     models: KernelModelsConfig = Field(default_factory=KernelModelsConfig)
     permissions: KernelPermissionsConfig = Field(default_factory=KernelPermissionsConfig)
     approvals: KernelApprovalsConfig = Field(default_factory=KernelApprovalsConfig)
     skills: list[str] = Field(default_factory=list)
     scheduler: KernelSchedulerConfig = Field(default_factory=KernelSchedulerConfig)
-    subagents: KernelSubagentsConfig = Field(default_factory=KernelSubagentsConfig)
     events: KernelEventsConfig = Field(default_factory=KernelEventsConfig)
     sessions: KernelSessionsConfig = Field(default_factory=KernelSessionsConfig)
 

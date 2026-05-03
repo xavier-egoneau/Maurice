@@ -22,7 +22,7 @@ permissions:
         - "$workspace/skills/**"
 tools:
   - name: skills.create
-    description: Create a new user skill skeleton under the workspace skill root.
+    description: Create a lightweight user skill skeleton under the workspace skill root.
     input_schema:
       type: object
       properties:
@@ -30,6 +30,9 @@ tools:
           type: string
         description:
           type: string
+        with_code:
+          type: boolean
+          description: Add an optional tools.py scaffold for coded dream inputs, callable tool declarations, or executors.
       required: ["name"]
     permission_class: fs.write
     permission_scope:

@@ -63,7 +63,7 @@ from maurice.host.self_update import (
     apply_runtime_proposal, list_runtime_proposals, run_proposal_tests, validate_runtime_proposal,
 )
 from maurice.host.server import MauriceServer
-from maurice.host.service import check_install, inspect_service_status, read_service_logs
+from maurice.host.service import check_install, inspect_doctor, inspect_service_status, read_service_logs
 from maurice.host.telegram import (
     _credential_value, _telegram_channel_configs,
     _telegram_channel_for_agent, _telegram_offset_path, _validate_telegram_first_message,
@@ -87,7 +87,6 @@ from maurice.kernel.providers import (
     ApiProvider, ChatGPTCodexProvider, MockProvider,
     OllamaCompatibleProvider, OpenAICompatibleProvider, UnsupportedProvider,
 )
-from maurice.kernel.runs import RunApprovalStore, RunCoordinationStore, RunExecutor, RunStore
 from maurice.kernel.scheduler import JobRunner, JobStatus, JobStore, SchedulerService, utc_now
 from maurice.kernel.session import SessionStore
 from maurice.kernel.skills import SkillContext, SkillLoader
@@ -545,32 +544,12 @@ def _pid_is_running(pid: int) -> bool:
 
 
 def _doctor_workspace(workspace_root: Path) -> None:
-    bundle = load_workspace_config(workspace_root)
-    workspace = Path(bundle.host.workspace_root)
-    ensure_workspace_credentials_migrated(workspace)
-    ensure_workspace_config_migrated(workspace)
-    ensure_workspace_content_migrated(workspace)
-    ensure_workspace_memory_migrated(workspace)
-    required_dirs = [
-        "agents",
-        "agents/main/content",
-        "agents/main/memory",
-        "agents/main/dreams",
-        "agents/main/reminders",
-        "skills",
-        "sessions",
-    ]
-    missing = [name for name in required_dirs if not (workspace / name).is_dir()]
-    if missing:
-        raise SystemExit(f"Maurice doctor: missing workspace dirs: {', '.join(missing)}")
-    if not workspace_skills_config_path(workspace).is_file():
-        raise SystemExit("Maurice doctor: missing workspace skills.yaml")
-    print(f"Maurice doctor: workspace OK ({workspace})")
-    print(f"Maurice credentials: {credentials_path()}")
-    default_agent = _default_agent(bundle)
-    print(f"Maurice model: {_effective_model_label(bundle, default_agent)}")
-    if default_agent is not None and default_agent.model_chain:
-        print(
-            f"Maurice model note: {default_agent.id} uses an agent model override; "
-            "kernel.models.default is only the fallback default."
-        )
+    _doctor(workspace_root=workspace_root)
+
+
+def _doctor(*, workspace_root: Path | None = None) -> None:
+    runtime_root = Path(__file__).resolve().parents[2]
+    report = inspect_doctor(runtime_root=runtime_root, workspace_root=workspace_root)
+    _print_host_checks("Maurice doctor", report.ok, report.checks)
+    if not report.ok:
+        raise SystemExit("Maurice doctor: failed")

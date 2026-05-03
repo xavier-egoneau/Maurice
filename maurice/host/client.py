@@ -282,6 +282,7 @@ class MauriceClient:
         limits: dict[str, Any] | None = None,
         message_metadata: dict[str, Any] | None = None,
         approval_callback: Any = None,   # callable(tool, args, class, reason) -> bool
+        approval_mode: str | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Stream events from a turn. Yields dicts with type field.
 
@@ -311,6 +312,8 @@ class MauriceClient:
             payload["limits"] = limits
         if message_metadata is not None:
             payload["message_metadata"] = message_metadata
+        if approval_mode is not None:
+            payload["approval_mode"] = approval_mode
         _send(self._sock, payload)
         while True:
             msg = _recv_line(self._sock, self._buf)

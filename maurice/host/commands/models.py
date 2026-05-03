@@ -84,6 +84,23 @@ def _models_assign(workspace_root: Path, *, agent_id: str, model_chain: list[str
     print(f"Agent model chain updated: {agent.id} -> {', '.join(model_chain)}")
 
 
+def _models_worker(workspace_root: Path, *, agent_id: str, model_chain: list[str]) -> None:
+    bundle = load_workspace_config(workspace_root)
+    missing = [profile_id for profile_id in model_chain if profile_id not in bundle.kernel.models.entries]
+    if missing:
+        raise SystemExit(f"Unknown model profile(s): {', '.join(missing)}")
+    try:
+        agent = update_agent(
+            workspace_root,
+            agent_id=agent_id,
+            worker_model_chain=model_chain,
+        )
+    except KeyError as exc:
+        raise SystemExit(str(exc)) from exc
+    configured = ", ".join(model_chain) if model_chain else "parent model chain"
+    print(f"Agent worker model chain updated: {agent.id} -> {configured}")
+
+
 def _write_model_profile(
     workspace_root: Path,
     model: dict[str, Any],

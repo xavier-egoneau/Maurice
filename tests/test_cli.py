@@ -20,7 +20,7 @@ from maurice.host.cli import (
 from maurice.host.credentials import load_workspace_credentials
 from maurice.host.paths import host_config_path, kernel_config_path
 from maurice.host.project import global_config_path
-from maurice.host.project_registry import list_known_projects
+from maurice.host.project_registry import list_known_projects, list_machine_projects
 from maurice.host.secret_capture import request_secret_capture
 from maurice.kernel.config import default_model_config, load_workspace_config, read_yaml_file, write_yaml_file
 from maurice.kernel.scheduler import JobStatus, JobStore
@@ -42,6 +42,7 @@ def test_cli_help_exposes_setup_not_onboard(capsys) -> None:
 
     output = capsys.readouterr().out
     assert "setup" in output
+    assert "runs" not in output
     assert "Dossier : cd /chemin/du/projet && maurice" in output
     assert "Bureau : maurice setup" in output
     assert "onboard" not in output
@@ -59,10 +60,15 @@ def test_cli_onboard_doctor_and_run(tmp_path, capsys) -> None:
     assert bundle.agents.agents["main"].credentials == []
     assert bundle.kernel.scheduler.dreaming_time == "09:00"
     assert bundle.kernel.scheduler.daily_time == "09:30"
+    assert bundle.skills.skills["web"]["search_provider"] == "searxng"
+    assert bundle.skills.skills["web"]["base_url"] == "http://localhost:18080"
 
     assert main(["doctor", "--workspace", str(workspace)]) == 0
     doctor_output = capsys.readouterr().out
-    assert "workspace OK" in doctor_output
+    assert "Maurice doctor: ok" in doctor_output
+    assert "- workspace_dirs: ok" in doctor_output
+    assert "- model_profiles: ok" in doctor_output
+    assert "- skills: ok" in doctor_output
 
     assert main(["run", "--workspace", str(workspace), "--message", "bonjour"]) == 0
     run_output = capsys.readouterr().out
@@ -70,6 +76,15 @@ def test_cli_onboard_doctor_and_run(tmp_path, capsys) -> None:
 
     assert (workspace / "sessions" / "main" / "default.json").is_file()
     assert (workspace / "agents" / "main" / "events.jsonl").is_file()
+
+
+def test_cli_doctor_without_workspace_runs_basic_checks(capsys) -> None:
+    assert main(["doctor"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Maurice doctor: ok" in output
+    assert "- python: ok" in output
+    assert "- package: ok" in output
 
 
 def test_cli_interactive_onboard_configures_basics(tmp_path, capsys, monkeypatch) -> None:
@@ -102,7 +117,7 @@ def test_cli_interactive_onboard_configures_basics(tmp_path, capsys, monkeypatch
     assert model["protocol"] == "ollama_chat"
     assert model["name"] == "gemma4"
     assert bundle.skills.skills["web"]["search_provider"] == "searxng"
-    assert bundle.skills.skills["web"]["base_url"] == "http://localhost:8080"
+    assert bundle.skills.skills["web"]["base_url"] == "http://localhost:18080"
 
 
 def test_cli_interactive_onboard_keeps_existing_values_on_enter(tmp_path, capsys, monkeypatch) -> None:
@@ -139,7 +154,7 @@ def test_cli_interactive_onboard_keeps_existing_values_on_enter(tmp_path, capsys
     assert model["name"] == "gemma4"
     assert model["base_url"] == "http://localhost:11434"
     assert bundle.skills.skills["web"]["search_provider"] == "searxng"
-    assert bundle.skills.skills["web"]["base_url"] == "http://localhost:8080"
+    assert bundle.skills.skills["web"]["base_url"] == "http://localhost:18080"
 
 
 def test_cli_onboard_agent_model_updates_only_agent_model(tmp_path, capsys, monkeypatch) -> None:
@@ -241,10 +256,19 @@ def test_cli_models_add_and_assign_fallback_chain(tmp_path, capsys) -> None:
         "--workspace",
         str(workspace),
     ]) == 0
+    assert main([
+        "models",
+        "worker",
+        "coding",
+        "cloud_backup",
+        "--workspace",
+        str(workspace),
+    ]) == 0
 
     bundle = load_workspace_config(workspace)
     agent = bundle.agents.agents["coding"]
     assert agent.model_chain == ["ollama_gemma4", "cloud_backup"]
+    assert agent.worker_model_chain == ["cloud_backup"]
     assert bundle.kernel.models.entries["ollama_gemma4"].tier == "middle"
     assert bundle.kernel.models.entries["cloud_backup"].name == "gpt-4o-mini"
 
@@ -387,6 +411,7 @@ def test_run_one_turn_uses_agent_model_name(tmp_path, capsys, monkeypatch) -> No
 
 
 def test_run_one_turn_records_seen_active_project(tmp_path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("MAURICE_HOME", str(tmp_path / ".maurice"))
     workspace = tmp_path / "workspace"
     project = tmp_path / "outside-project"
     project.mkdir()
@@ -413,6 +438,38 @@ def test_run_one_turn_records_seen_active_project(tmp_path, capsys, monkeypatch)
     projects = list_known_projects(workspace / "agents" / "main")
     assert projects[0]["name"] == "outside-project"
     assert projects[0]["path"] == str(project.resolve())
+    machine_projects = list_machine_projects()
+    assert machine_projects[0]["name"] == "outside-project"
+    assert machine_projects[0]["path"] == str(project.resolve())
+
+
+def test_cli_run_records_cwd_project_for_global_workspace(tmp_path, capsys, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "outside-project"
+    project.mkdir()
+    main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
+    capsys.readouterr()
+
+    class FakeAgentLoop:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def run_turn(self, **_kwargs):
+            class Result:
+                assistant_text = ""
+                tool_results = []
+                status = "completed"
+                error = None
+
+            return Result()
+
+    monkeypatch.setattr("maurice.host.runtime.AgentLoop", FakeAgentLoop)
+    monkeypatch.chdir(project)
+
+    assert main(["run", "--workspace", str(workspace), "--message", "salut"]) == 0
+
+    assert list_known_projects(workspace / "agents" / "main")[0]["path"] == str(project.resolve())
+    assert list_machine_projects()[0]["path"] == str(project.resolve())
 
 
 def test_cli_interactive_onboard_configures_telegram_bot(tmp_path, capsys, monkeypatch) -> None:
@@ -443,7 +500,7 @@ def test_cli_interactive_onboard_configures_telegram_bot(tmp_path, capsys, monke
     assert telegram["agent"] == "main"
     assert telegram["credential"] == "telegram_bot"
     assert telegram["allowed_users"] == [111, 222]
-    assert telegram["allowed_chats"] == []
+    assert telegram["allowed_chats"] == [111, 222]
     assert telegram["status"] == "configured_pending_adapter"
     assert bundle.agents.agents["main"].channels == ["telegram"]
     assert "telegram_bot" not in bundle.agents.agents["main"].credentials
@@ -514,7 +571,7 @@ credentials:
                 "message": {
                     "message_id": 1,
                     "from": {"id": 111},
-                    "chat": {"id": 222},
+                    "chat": {"id": 111, "type": "private"},
                     "text": "salut",
                 },
             }
@@ -541,7 +598,7 @@ credentials:
     # chat action fires in a background thread — verify message was sent
     assert any(c[0] == "message" for c in calls)
     messages = [call for call in calls if call[0] == "message"]
-    assert messages[-1][:3] == ("message", "test-token", 222)
+    assert messages[-1][:3] == ("message", "test-token", 111)
     assert messages[-1][3].startswith("Mock response: salut")
     assert "context" in messages[-1][3]
     command_sync = [call for call in calls if call[0] == "commands"]
@@ -592,7 +649,7 @@ credentials:
                 "message": {
                     "message_id": 1,
                     "from": {"id": 111},
-                    "chat": {"id": 222},
+                    "chat": {"id": 111, "type": "private"},
                     "text": "123456:SECRET",
                 },
             }
@@ -612,7 +669,7 @@ credentials:
 
     credentials = load_workspace_credentials(workspace)
     assert credentials.credentials["telegram_coding"].value == "123456:SECRET"
-    assert calls == [("message", "test-token", 222, "Secret enregistre sous `telegram_coding`. Tu peux continuer.")]
+    assert calls == [("message", "test-token", 111, "Secret enregistre sous `telegram_coding`. Tu peux continuer.")]
     events = (workspace / "agents" / "main" / "events.jsonl").read_text(encoding="utf-8")
     assert "123456:SECRET" not in events
 
@@ -997,6 +1054,8 @@ def test_cli_web_uses_configured_global_workspace(tmp_path, capsys, monkeypatch)
     assert captured["kwargs"]["web_token"]
     assert captured["served"] is True
     assert captured["shutdown"] is True
+    assert list_known_projects(workspace / "agents" / "main")[0]["path"] == str(project.resolve())
+    assert list_machine_projects()[0]["path"] == str(project.resolve())
     assert (
         "Maurice web chat (global) listening on "
         f"http://127.0.0.1:43211?token={captured['kwargs']['web_token']}"
@@ -1534,453 +1593,6 @@ def test_cli_agents_cannot_remove_default_or_last_active_agent(tmp_path) -> None
     main(["agents", "create", "coding", "--workspace", str(workspace)])
     with pytest.raises(SystemExit, match="default agent"):
         main(["agents", "archive", "main", "--workspace", str(workspace)])
-
-
-def test_cli_runs_lifecycle(tmp_path, capsys) -> None:
-    workspace = tmp_path / "workspace"
-    main(["onboard", "--workspace", str(workspace)])
-    capsys.readouterr()
-
-    assert (
-        main(
-            [
-                "runs",
-                "create",
-                "--workspace",
-                str(workspace),
-                "--task",
-                "Run tests.",
-                "--write-path",
-                "$workspace/runs/**",
-                "--write-path",
-                "maurice/kernel/**",
-                "--permission-class",
-                "fs.read",
-                "--base-agent",
-                "main",
-                "--context-summary",
-                "Maurice run lifecycle work.",
-                "--relevant-file",
-                "maurice/kernel/runs.py",
-                "--constraint",
-                "Keep scope tight.",
-                "--plan-step",
-                "Add mission packet.",
-                "--requires-self-check",
-                "--can-request-install",
-                "--package-manager",
-                "pip",
-            ]
-        )
-        == 0
-    )
-    created_output = capsys.readouterr().out
-    assert "Run created: run_" in created_output
-    run_id = created_output.strip().split(": ")[1]
-
-    assert main(["runs", "list", "--workspace", str(workspace)]) == 0
-    list_output = capsys.readouterr().out
-    assert run_id in list_output
-    assert "created" in list_output
-    mission = (workspace / "runs" / run_id / "mission.json").read_text(encoding="utf-8")
-    assert "Maurice run lifecycle work." in mission
-    assert "maurice/kernel/runs.py" in mission
-    assert "requires_self_check" in mission
-    assert '"base_agent": "main"' in mission
-    assert '"permission_profile": "safe"' in mission
-
-    assert main(["runs", "start", run_id, "--workspace", str(workspace)]) == 0
-    assert f"Run started: {run_id}" in capsys.readouterr().out
-
-    assert main(["runs", "execute", run_id, "--workspace", str(workspace)]) == 0
-    assert f"Run autonomy stopped: {run_id}" in capsys.readouterr().out
-    session = (workspace / "runs" / run_id / "session.json").read_text(encoding="utf-8")
-    assert "Subagent mission packet loaded." in session
-    assert (workspace / "runs" / run_id / "autonomy_report.json").is_file()
-
-    assert (
-        main(
-            [
-                "runs",
-                "checkpoint",
-                run_id,
-                "--workspace",
-                str(workspace),
-                "--summary",
-                "Half done.",
-            ]
-        )
-        == 0
-    )
-    assert f"Run checkpointed: {run_id}" in capsys.readouterr().out
-    assert (workspace / "runs" / run_id / "checkpoint.json").is_file()
-
-    assert main(["runs", "resume", run_id, "--workspace", str(workspace)]) == 0
-    assert f"Run resumed: {run_id}" in capsys.readouterr().out
-
-    assert (
-        main(
-            [
-                "runs",
-                "checkpoint",
-                run_id,
-                "--workspace",
-                str(workspace),
-                "--summary",
-                "Unsafe pause.",
-                "--unsafe-to-resume",
-            ]
-        )
-        == 0
-    )
-    capsys.readouterr()
-    with pytest.raises(SystemExit, match="safe to resume"):
-        main(["runs", "resume", run_id, "--workspace", str(workspace)])
-
-    assert (
-        main(
-            [
-                "runs",
-                "complete",
-                run_id,
-                "--workspace",
-                str(workspace),
-                "--summary",
-                "Done.",
-                "--changed-file",
-                "maurice/kernel/runs.py",
-                "--verification-command",
-                "pytest tests/test_runs.py",
-                "--verification-status",
-                "passed",
-                "--verification-summary",
-                "117 passed",
-                "--risk",
-                "Executor integration is pending.",
-            ]
-        )
-        == 0
-    )
-    assert f"Run completed: {run_id}" in capsys.readouterr().out
-    final = (workspace / "runs" / run_id / "final.json").read_text(encoding="utf-8")
-    assert "maurice/kernel/runs.py" in final
-    assert "pytest tests/test_runs.py" in final
-    assert "Executor integration is pending." in final
-
-    assert (
-        main(
-            [
-                "runs",
-                "review",
-                run_id,
-                "--workspace",
-                str(workspace),
-                "--status",
-                "accepted",
-                "--summary",
-                "Parent accepted the run.",
-            ]
-        )
-        == 0
-    )
-    assert f"Run reviewed: {run_id} accepted" in capsys.readouterr().out
-    review = (workspace / "runs" / run_id / "parent_review.json").read_text(encoding="utf-8")
-    assert "Parent accepted the run." in review
-
-
-def test_cli_runs_create_rejects_unknown_base_agent(tmp_path) -> None:
-    workspace = tmp_path / "workspace"
-    main(["onboard", "--workspace", str(workspace)])
-
-    with pytest.raises(SystemExit, match="Unknown base agent"):
-        main(
-            [
-                "runs",
-                "create",
-                "--workspace",
-                str(workspace),
-                "--task",
-                "Run tests.",
-                "--base-agent",
-                "missing",
-            ]
-        )
-
-
-def test_cli_runs_create_accepts_inline_profile(tmp_path, capsys) -> None:
-    workspace = tmp_path / "workspace"
-    main(["onboard", "--workspace", str(workspace)])
-    capsys.readouterr()
-
-    assert (
-        main(
-            [
-                "runs",
-                "create",
-                "--workspace",
-                str(workspace),
-                "--task",
-                "Inline task.",
-                "--inline-profile",
-                '{"id":"inline_coder","skills":["filesystem"],"permission_profile":"safe"}',
-            ]
-        )
-        == 0
-    )
-    run_id = capsys.readouterr().out.strip().split(": ")[1]
-    mission = (workspace / "runs" / run_id / "mission.json").read_text(encoding="utf-8")
-    assert '"base_agent": "inline_coder"' in mission
-    assert '"inline": true' in mission
-    assert '"filesystem"' in mission
-
-
-def test_cli_runs_create_can_use_subagent_template_model_chain(tmp_path, capsys) -> None:
-    workspace = tmp_path / "workspace"
-    main(["onboard", "--workspace", str(workspace)])
-    capsys.readouterr()
-
-    assert (
-        main(
-            [
-                "models",
-                "add",
-                "--workspace",
-                str(workspace),
-                "--provider",
-                "ollama",
-                "--protocol",
-                "ollama_chat",
-                "--name",
-                "gemma4",
-                "--base-url",
-                "http://localhost:11434",
-            ]
-        )
-        == 0
-    )
-    assert (
-        main(
-            [
-                "runs",
-                "template-add",
-                "coder",
-                "--workspace",
-                str(workspace),
-                "--description",
-                "Coding worker",
-                "--permission-profile",
-                "safe",
-                "--skill",
-                "filesystem",
-                "--credential",
-                "ollama",
-                "--model",
-                "ollama_gemma4",
-            ]
-        )
-        == 0
-    )
-    assert "Subagent template created: coder" in capsys.readouterr().out
-
-    assert main(["runs", "template-list", "--workspace", str(workspace)]) == 0
-    assert "coder profile=safe models=ollama_gemma4 Coding worker" in capsys.readouterr().out
-
-    assert (
-        main(
-            [
-                "runs",
-                "create",
-                "--workspace",
-                str(workspace),
-                "--task",
-                "Template task.",
-                "--template",
-                "coder",
-            ]
-        )
-        == 0
-    )
-    run_id = capsys.readouterr().out.strip().split(": ")[1]
-    mission = (workspace / "runs" / run_id / "mission.json").read_text(encoding="utf-8")
-    assert '"base_agent": "coder"' in mission
-    assert '"template": true' in mission
-    assert '"model_chain": [' in mission
-    assert '"ollama_gemma4"' in mission
-
-
-def test_cli_runs_create_rejects_inline_profile_with_base_agent(tmp_path) -> None:
-    workspace = tmp_path / "workspace"
-    main(["onboard", "--workspace", str(workspace)])
-
-    with pytest.raises(SystemExit, match="cannot be combined"):
-        main(
-            [
-                "runs",
-                "create",
-                "--workspace",
-                str(workspace),
-                "--task",
-                "Inline task.",
-                "--base-agent",
-                "main",
-                "--inline-profile",
-                '{"id":"inline_coder"}',
-            ]
-        )
-
-
-def test_cli_runs_complete_enforces_self_check(tmp_path, capsys) -> None:
-    workspace = tmp_path / "workspace"
-    main(["onboard", "--workspace", str(workspace)])
-    capsys.readouterr()
-    main(
-        [
-            "runs",
-            "create",
-            "--workspace",
-            str(workspace),
-            "--task",
-            "Implement.",
-            "--requires-self-check",
-        ]
-    )
-    run_id = capsys.readouterr().out.strip().split(": ")[1]
-
-    with pytest.raises(SystemExit, match="self-check"):
-        main(
-            [
-                "runs",
-                "complete",
-                run_id,
-                "--workspace",
-                str(workspace),
-                "--summary",
-                "Done.",
-            ]
-        )
-
-
-def test_cli_runs_coordination_flow(tmp_path, capsys) -> None:
-    workspace = tmp_path / "workspace"
-    main(["onboard", "--workspace", str(workspace)])
-    capsys.readouterr()
-    main(["runs", "create", "--workspace", str(workspace), "--task", "A"])
-    run_a = capsys.readouterr().out.strip().split(": ")[1]
-    main(["runs", "create", "--workspace", str(workspace), "--task", "B"])
-    run_b = capsys.readouterr().out.strip().split(": ")[1]
-
-    assert (
-        main(
-            [
-                "runs",
-                "coordinate",
-                run_a,
-                "--workspace",
-                str(workspace),
-                "--affects",
-                run_b,
-                "--impact",
-                "Schema changed.",
-                "--requested-action",
-                "Update run B mission.",
-            ]
-        )
-        == 0
-    )
-    output = capsys.readouterr().out
-    assert "Coordination requested: coord_" in output
-    coordination_id = output.strip().split(": ")[1]
-
-    assert main(["runs", "coordination-list", "--workspace", str(workspace)]) == 0
-    list_output = capsys.readouterr().out
-    assert coordination_id in list_output
-    assert run_a in list_output
-    assert run_b in list_output
-
-    assert main(["runs", "coordination-ack", coordination_id, "--workspace", str(workspace)]) == 0
-    assert "Coordination acknowledged" in capsys.readouterr().out
-
-    assert main(["runs", "coordination-resolve", coordination_id, "--workspace", str(workspace)]) == 0
-    assert "Coordination resolved" in capsys.readouterr().out
-
-
-def test_cli_runs_approval_bridge_pauses_run_and_resolves(tmp_path, capsys) -> None:
-    workspace = tmp_path / "workspace"
-    main(["onboard", "--workspace", str(workspace)])
-    capsys.readouterr()
-    main(
-        [
-            "runs",
-            "create",
-            "--workspace",
-            str(workspace),
-            "--task",
-            "Needs dependency",
-            "--can-request-install",
-            "--package-manager",
-            "pip",
-        ]
-    )
-    run_id = capsys.readouterr().out.strip().split(": ")[1]
-
-    assert (
-        main(
-            [
-                "runs",
-                "request-approval",
-                run_id,
-                "--workspace",
-                str(workspace),
-                "--type",
-                "dependency",
-                "--reason",
-                "Need pytest-httpserver.",
-                "--scope",
-                "package_manager=pip",
-            ]
-        )
-        == 0
-    )
-    output = capsys.readouterr().out
-    assert "Run approval requested: runappr_" in output
-    approval_id = output.strip().split(": ")[1]
-
-    assert (workspace / "runs" / run_id / "checkpoint.json").is_file()
-    assert main(["runs", "list", "--workspace", str(workspace), "--state", "paused"]) == 0
-    assert run_id in capsys.readouterr().out
-
-    assert main(["runs", "approvals-list", "--workspace", str(workspace)]) == 0
-    approvals_output = capsys.readouterr().out
-    assert approval_id in approvals_output
-    assert "dependency" in approvals_output
-
-    assert main(["runs", "approvals-approve", approval_id, "--workspace", str(workspace)]) == 0
-    assert "Run approval approved" in capsys.readouterr().out
-
-
-def test_cli_runs_dependency_approval_respects_policy(tmp_path, capsys) -> None:
-    workspace = tmp_path / "workspace"
-    main(["onboard", "--workspace", str(workspace)])
-    capsys.readouterr()
-    main(["runs", "create", "--workspace", str(workspace), "--task", "No installs"])
-    run_id = capsys.readouterr().out.strip().split(": ")[1]
-
-    with pytest.raises(SystemExit, match="does not allow"):
-        main(
-            [
-                "runs",
-                "request-approval",
-                run_id,
-                "--workspace",
-                str(workspace),
-                "--type",
-                "dependency",
-                "--reason",
-                "Need pytest-httpserver.",
-                "--scope",
-                "package_manager=pip",
-            ]
-        )
 
 
 def test_cli_auth_status_and_logout(tmp_path, capsys) -> None:

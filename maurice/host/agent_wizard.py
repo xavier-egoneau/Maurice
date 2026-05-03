@@ -14,12 +14,15 @@ from maurice.host.model_catalog import chatgpt_model_choices, ollama_model_choic
 from maurice.host.paths import host_config_path, kernel_config_path
 from maurice.host.runtime import _effective_model_config
 from maurice.host.secret_capture import request_secret_capture
+from maurice.host.telegram import _telegram_allowed_chats_with_private_users
 from maurice.kernel.config import load_workspace_config, model_profile_id, model_profile_payload, read_yaml_file, write_yaml_file
-from maurice.kernel.contracts import MauriceModel, SkillManifest
+from maurice.kernel.contracts import MauriceModel
+from maurice.kernel.skills import SkillLoader, SkillRoot
 
 
 DEFAULT_SKILL_DESCRIPTIONS: dict[str, str] = {
     "filesystem": "lire et écrire des fichiers dans son espace",
+    "exec": "lancer des commandes shell dans le projet ou le workspace",
     "memory": "retenir des informations utiles",
     "web": "chercher et lire des informations web",
     "explore": "explorer un projet, son arbre et son contenu",
@@ -103,6 +106,18 @@ def handle_agent_creation_wizard(
     state = store.sessions.get(_key(agent_id, session_id))
     normalized = _normalize(text)
 
+    if agent_id != "main":
+        if state is not None:
+            _clear(workspace, agent_id, session_id)
+            return "Configuration d'agent annulée : seules les conversations de l'agent `main` peuvent gérer les agents."
+        if (
+            _starts_agent_creation(normalized)
+            or _starts_agent_edit(normalized)
+            or _starts_telegram_edit(normalized)
+        ):
+            return "Cette commande d'administration est disponible uniquement depuis l'agent `main`."
+        return None
+
     if state is None:
         if _starts_agent_creation(normalized):
             state = AgentCreationState()
@@ -175,8 +190,8 @@ def clear_agent_creation_wizard(
     *,
     agent_id: str,
     session_id: str,
-) -> None:
-    _clear(Path(workspace_root).expanduser().resolve(), agent_id, session_id)
+) -> bool:
+    return _clear(Path(workspace_root).expanduser().resolve(), agent_id, session_id)
 
 
 class _Response(MauriceModel):
@@ -1105,18 +1120,23 @@ def _telegram_edit_users_question(data: dict[str, Any]) -> str:
 
 def _telegram_edit_chats_question(data: dict[str, Any]) -> str:
     chats = _csv_ints(data.get("allowed_chats") or [])
-    return f"IDs groupes/chats autorises : {chats}.\n\nChanger cette liste ? Reponds `oui` ou `non`."
+    return f"IDs chats prives/groupes autorises : {chats}.\n\nChanger cette liste ? Reponds `oui` ou `non`."
 
 
 def _telegram_edit_summary(data: dict[str, Any], workspace: Path) -> str:
     credential = str(data.get("credential") or _telegram_credential_for_agent(str(data.get("agent") or "main")))
     token_state = "configure" if credential in load_workspace_credentials(workspace).credentials else "manquant"
+    allowed_users = _int_values(data.get("allowed_users") or [])
+    allowed_chats = _telegram_allowed_chats_with_private_users(
+        allowed_users,
+        _int_values(data.get("allowed_chats") or []),
+    )
     return (
         "Resume de la modification Telegram :\n\n"
         f"- Agent : `{data.get('agent')}`\n"
         f"- Token : `{credential}` ({token_state})\n"
-        f"- IDs utilisateurs : {_csv_ints(data.get('allowed_users') or [])}\n"
-        f"- IDs groupes/chats : {_csv_ints(data.get('allowed_chats') or [])}\n\n"
+        f"- IDs utilisateurs : {_csv_ints(allowed_users)}\n"
+        f"- IDs chats prives/groupes : {_csv_ints(allowed_chats)}\n\n"
         "Appliquer cette configuration ? Reponds `oui` ou `non`."
     )
 
@@ -1124,6 +1144,11 @@ def _telegram_edit_summary(data: dict[str, Any], workspace: Path) -> str:
 def _apply_telegram_edit(workspace: Path, data: dict[str, Any]) -> None:
     agent_id = str(data.get("agent") or "main")
     credential = str(data.get("credential") or _telegram_credential_for_agent(agent_id))
+    allowed_users = _int_values(data.get("allowed_users") or [])
+    allowed_chats = _telegram_allowed_chats_with_private_users(
+        allowed_users,
+        _int_values(data.get("allowed_chats") or []),
+    )
     host_path = host_config_path(workspace)
     host_data = read_yaml_file(host_path)
     host = host_data.setdefault("host", {})
@@ -1134,8 +1159,8 @@ def _apply_telegram_edit(workspace: Path, data: dict[str, Any]) -> None:
         "enabled": True,
         "agent": agent_id,
         "credential": credential,
-        "allowed_users": _int_values(data.get("allowed_users") or []),
-        "allowed_chats": _int_values(data.get("allowed_chats") or []),
+        "allowed_users": allowed_users,
+        "allowed_chats": allowed_chats,
         "status": "configured_pending_restart" if token_exists else "missing_credential",
     }
     write_yaml_file(host_path, host_data)
@@ -1209,28 +1234,25 @@ def _suggest_skills(role: str) -> list[str]:
 
 def _available_skills(workspace: Path) -> dict[str, str]:
     discovered: dict[str, str] = dict(DEFAULT_SKILL_DESCRIPTIONS)
-    roots: list[Path] = [_system_skills_root()]
     try:
         bundle = load_workspace_config(workspace)
-        roots.extend(Path(root.path).expanduser() for root in bundle.host.skill_roots)
+        roots = [SkillRoot.from_config(root) for root in bundle.host.skill_roots]
     except Exception:
-        pass
+        roots = [SkillRoot(path=str(_system_skills_root()), origin="system", mutable=False)]
 
-    for root in roots:
-        if not root.exists():
-            continue
-        for manifest_path in sorted(root.glob("*/skill.yaml")):
-            try:
-                manifest = SkillManifest.model_validate(read_yaml_file(manifest_path))
-            except Exception:
-                continue
-            if "global" not in manifest.available_in:
+    try:
+        registry = SkillLoader(roots, scope="global").load()
+    except Exception:
+        registry = None
+    if registry is not None:
+        for name, skill in registry.skills.items():
+            if skill.manifest is None or skill.state == "unavailable":
                 continue
             discovered.setdefault(
-                manifest.name,
+                name,
                 DEFAULT_SKILL_DESCRIPTIONS.get(
-                    manifest.name,
-                    _compact_skill_description(manifest.description),
+                    name,
+                    _compact_skill_description(skill.manifest.description),
                 ),
             )
 
@@ -1376,13 +1398,17 @@ def _bind_telegram(workspace: Path, *, agent_id: str, credential: str, allowed_u
     channel_key = _telegram_channel_key(agent_id)
     previous = channels.get(channel_key) if isinstance(channels.get(channel_key), dict) else {}
     allowed_chats = previous.get("allowed_chats") if isinstance(previous, dict) else []
+    allowed_chats = _telegram_allowed_chats_with_private_users(
+        allowed_users,
+        _int_values(allowed_chats if isinstance(allowed_chats, list) else []),
+    )
     channels[channel_key] = {
         "adapter": "telegram",
         "enabled": True,
         "agent": agent_id,
         "credential": credential,
         "allowed_users": allowed_users,
-        "allowed_chats": allowed_chats if isinstance(allowed_chats, list) else [],
+        "allowed_chats": allowed_chats,
         "status": "configured_pending_adapter",
     }
     write_yaml_file(host_path, data)
@@ -1424,7 +1450,9 @@ def _write_store(workspace: Path, store: AgentWizardStore) -> None:
     path.chmod(0o600)
 
 
-def _clear(workspace: Path, agent_id: str, session_id: str) -> None:
+def _clear(workspace: Path, agent_id: str, session_id: str) -> bool:
     store = _load_store(workspace)
-    store.sessions.pop(_key(agent_id, session_id), None)
-    _write_store(workspace, store)
+    removed = store.sessions.pop(_key(agent_id, session_id), None) is not None
+    if removed:
+        _write_store(workspace, store)
+    return removed

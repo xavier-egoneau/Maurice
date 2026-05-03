@@ -1,21 +1,148 @@
 # Skills
 
-A skill is a directory containing a `skill.yaml` manifest and optional Python modules.
-Skills are the only way to add capabilities to the agent.
+A skill is a directory that teaches Maurice a capability. User skills are
+lightweight by default: `skill.md`, `dreams.md`, and `daily.md` are enough.
+Advanced skills can still use `skill.yaml` when they need explicit tool or
+command declarations.
+
+Skills should be autonomous and shareable. Maurice is expected to grow toward a
+skill store, so a skill must not rely on undocumented local setup from the
+author's machine. If the skill needs binaries, credentials, config files,
+services, caches, or setup commands, the skill folder must explain or provide
+that setup path.
 
 ## Directory layout
 
 ```
 my_skill/
-  skill.yaml       — manifest (required)
-  tools.py         — tool executors (if the skill declares tools)
-  commands.py      — slash command handlers (if the skill declares commands)
-  prompt.md        — prompt fragment injected each turn (optional)
-  dreams.md        — dream context injected during dreaming sessions (optional)
-  daily.md         — daily digest contribution instructions (optional)
+  skill.md         — main instructions with name/description frontmatter
+  dreams.md        — what dreaming should notice or propose
+  daily.md         — what the morning digest should include or ignore
+  tools.py         — optional code hooks for deterministic dream inputs
 ```
 
-## skill.yaml
+`skills.create` writes this lightweight layout. It does not create `skill.yaml`
+unless you write an advanced skill by hand.
+
+## skill.md
+
+Minimal example:
+
+```markdown
+---
+name: calendar_notes
+description: Read local calendar notes and help prepare the day.
+---
+
+# Calendar Notes
+
+Use this skill when the user asks about agenda, preparation, or upcoming events.
+Read the configured calendar sources cautiously and never invent availability.
+```
+
+Maurice infers the runtime manifest from the folder name and `skill.md`
+frontmatter. If `tools.py` exists and `dreams.md` exists, Maurice automatically
+wires `tools.build_dream_input` as the skill's dreaming input builder. If
+`tools.py` also defines `tool_declarations()`, those tools are registered for
+chat use and must be backed by `build_executors(ctx)`.
+
+For shareability, `skill.md` should include:
+
+- required binaries and install commands for common systems
+- expected Maurice credentials and how to capture them
+- generated config locations and whether files may be overwritten
+- validation commands that prove the skill is ready
+- privacy and secret-handling rules
+
+Do not assume the user's machine already has hidden config from the skill
+author's environment.
+
+## dreams.md And daily.md
+
+`dreams.md` tells the background dreaming pass what this skill can notice,
+connect, or propose. It should describe signals and boundaries, not user-facing
+digest prose.
+
+`daily.md` tells the morning digest what to include from that skill and when the
+skill should stay silent. This is where you say things like "surface today's
+calendar events first, then important events in the next 7 days only when useful."
+
+## Optional Code
+
+When the skill needs deterministic reads, parsing, API calls, or other code, put
+the code inside the skill folder:
+
+```text
+my_skill/
+  skill.md
+  dreams.md
+  daily.md
+  tools.py
+```
+
+For dreaming, expose:
+
+```python
+from datetime import UTC, datetime
+from maurice.kernel.contracts import DreamInput
+from maurice.kernel.permissions import PermissionContext
+
+def build_dream_input(
+    context: PermissionContext,
+    *,
+    config=None,
+    all_skill_configs=None,
+) -> DreamInput:
+    return DreamInput(
+        skill="my_skill",
+        trust="skill_generated",
+        freshness={"generated_at": datetime.now(UTC), "expires_at": None},
+        signals=[],
+        limits=[],
+    )
+```
+
+For callable chat tools in a lightweight skill, expose declarations and
+executors from the same `tools.py`:
+
+```python
+def tool_declarations():
+    return [
+        {
+            "name": "my_skill.check",
+            "description": "Check whether the integration is ready.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+            "permission_class": "integration.read",
+            "permission_scope": {"integrations": ["calendar"]},
+            "trust": {"input": "local_mutable", "output": "skill_generated"},
+            "executor": "my_skill.check",
+        }
+    ]
+
+
+def build_executors(ctx):
+    return {"my_skill.check": lambda args: _check(args, ctx)}
+```
+
+Use `integration.read` for read-only local integrations. Use
+`integration.write` for maintenance or sync actions that update local caches,
+configuration, or remote integration state.
+
+Keep `tools.py` as the entry point. If the code grows, add helper modules or
+small packages under the same skill folder and import them from `tools.py`.
+
+For autonomous skills, prefer adding a local diagnostic/setup CLI to `tools.py`
+when setup can fail:
+
+```bash
+python3 tools.py doctor
+python3 tools.py write-config ...
+```
+
+Generated config should reference Maurice credentials or OS keyrings instead of
+copying raw secrets into config files.
+
+## Advanced skill.yaml
 
 Minimal example:
 
@@ -55,6 +182,9 @@ events:
   state_publisher: null
 ```
 
+Use `skill.yaml` only when you need explicit tools, slash commands, runtime
+dependencies, permissions, or non-default attachment names.
+
 ## Tool declarations
 
 Each entry under `tools:` is a `ToolDeclaration`:
@@ -78,8 +208,14 @@ tools:
     executor: my_package.my_skill.tools.do_something  # dotted path (legacy) or use tools_module
 ```
 
-**Permission classes:** `fs.read`, `fs.write`, `network.outbound`, `shell.exec`,
-`secret.read`, `agent.spawn`, `host.control`, `runtime.write`.
+**Permission classes:** `fs.read`, `fs.write`, `network.outbound`,
+`integration.read`, `integration.write`, `shell.exec`, `secret.read`,
+`agent.spawn`, `host.control`, `runtime.write`.
+
+The system `host` skill exposes Maurice administration diagnostics to agents.
+Use `host.doctor` as the tool equivalent of `maurice doctor`, `host.logs` as the
+tool equivalent of `maurice logs`, and `host.status` for live service status.
+These are admin actions and remain gated by `host.control`.
 
 ## Tool executors
 
@@ -140,9 +276,10 @@ workspace data.
 
 There is only one active project for a command or turn. Project-scoped skills
 should treat `active_project_path` / `project_root` as the current target and
-should not scan for additional projects. A global agent can remember projects it
-has explicitly seen in its own `<workspace>/agents/<agent-id>/projects.json`,
-but remembered projects are history until the user opens or selects one.
+should not scan for additional projects. Maurice records explicitly seen
+projects in `~/.maurice/projects.json` and in the current agent's
+`projects.json`, but remembered projects are history until the user opens or
+selects one.
 
 ## Command declarations
 
@@ -150,6 +287,10 @@ Commands are slash commands dispatched by the host (not by the model).
 `available_in` uses the same `local`/`global` scope vocabulary as skills: on a
 skill it controls whether the skill is loaded, and on a command it controls
 whether the command appears in `/help` and UI autocomplete for that scope.
+Use `project_required: true` for commands that need a currently opened project.
+Those commands are hidden from `/help` and the UI command list when no active
+project exists, and direct invocation is refused with a clear message instead
+of falling back to an arbitrary folder.
 
 ```yaml
 commands:
@@ -158,6 +299,7 @@ commands:
     handler: my_package.my_skill.commands.my_command
     renderer: markdown    # "markdown" | "plain"
     available_in: [local, global]  # optional; hide from /help outside these scopes
+    project_required: true          # optional; requires active_project_path/project_root
 ```
 
 Handler signature:
@@ -218,6 +360,7 @@ local project writes under its own `./skills` when that root exists.
 | Name | Key capability |
 |---|---|
 | `filesystem` | read/write/list/move files in the current context |
+| `exec` | scoped shell command execution in the active project or workspace |
 | `memory` | semantic notes persisted across sessions |
 | `web` | HTTP fetch + search |
 | `vision` | image description |
@@ -232,8 +375,9 @@ local project writes under its own `./skills` when that root exists.
 | `dev` | project-scoped development workflow (`/plan`, `/dev`, `/commit`, …) |
 
 `self_update` also exposes channel-neutral commands:
-`/auto_update_list`, `/auto_update_show <id>`, `/auto_update_validate <id>`,
-and `/auto_update_apply <id> confirm`.
+`/auto_update_list` and `/auto_update_apply <id> confirm`. The list command is
+the review surface: it prints each pending proposal with its id, compact diff,
+and exact apply command so Telegram/CLI users do not need to guess ids.
 
 ## Dream And Daily Contributions
 
@@ -248,7 +392,8 @@ skills, consumes the latest agent-scoped dream report from
 `<workspace>/agents/<agent-id>/dreams/`, and renders the digest through the
 scheduler. Because `daily` is a normal optional system skill, disabling it for an
 agent also prevents that agent's scheduled `daily.digest` job from being
-created.
+created. Scheduler timing, storage, delivery, and CLI configuration are covered
+in [automations](automations.md).
 
 Two optional dreaming-oriented skills are shipped as concrete examples of this
 pattern:
@@ -257,6 +402,7 @@ pattern:
   contributes a multi-agent recap to dreaming and daily
 - `veille` stores watch topics under
   `<workspace>/agents/<agent-id>/veille/topics.json`, researches them through
-  the configured SearxNG endpoint when available, and contributes signals such
+  the configured SearxNG endpoint (`skills.web.base_url`, default
+  `http://localhost:18080`), and contributes signals such
   as useful new technology, security issues in known dependencies, or news
   connected to active projects

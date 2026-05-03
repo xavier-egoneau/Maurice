@@ -13,12 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from maurice.host.context import (
+    LocalConfig,
     MauriceContext,
     build_command_callbacks,
     resolve_global_context,
     resolve_local_context,
 )
 from maurice.host.runtime import build_global_agent_loop
+from maurice.host.paths import maurice_home
 from maurice.kernel.config import load_workspace_config
 from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.config import KernelSessionsConfig
@@ -30,6 +32,7 @@ from maurice.kernel.session import SessionStore
 from maurice.kernel.skills import SkillContext, SkillHooks, SkillLoader
 from maurice.kernel.tool_labels import tool_action_label
 from maurice.host.vision_backend import build_vision_backend
+from maurice.host.project_registry import list_known_projects, record_seen_project
 
 
 # --- protocol helpers --------------------------------------------------------
@@ -167,7 +170,8 @@ class MauriceServer:
             if isinstance(context, MauriceContext)
             else resolve_local_context(context)
         )
-        self.cfg = self.ctx.config if isinstance(self.ctx.config, dict) else {}
+        self._record_local_active_project(self.ctx)
+        self.cfg = self.ctx.config.data if isinstance(self.ctx.config, LocalConfig) else {}
         self._last_activity = time.monotonic()
         self._lock = threading.Lock()
         self._active_connections = 0
@@ -189,8 +193,9 @@ class MauriceServer:
             PermissionContext(
                 workspace_root=str(self.ctx.content_root),
                 runtime_root=str(self.ctx.runtime_root),
-                agent_workspace_root=str(self.ctx.content_root),
-                active_project_root=str(self.ctx.content_root),
+                maurice_home_root=str(maurice_home()),
+                agent_workspace_root=str(self.ctx.agent_workspace_root),
+                active_project_root=str(self.ctx.active_project_root or self.ctx.content_root),
             )
             if self.ctx.scope == "local"
             else None
@@ -198,7 +203,7 @@ class MauriceServer:
         self.permission_profile = self.ctx.permission_profile
         sessions_cfg = (
             KernelSessionsConfig()
-            if isinstance(self.ctx.config, dict)
+            if isinstance(self.ctx.config, LocalConfig)
             else self.ctx.config.kernel.sessions
         )
         self.compaction_config = CompactionConfig(
@@ -209,7 +214,14 @@ class MauriceServer:
             keep_recent_turns=sessions_cfg.keep_recent_turns,
         )
 
-    def _make_loop(self, provider: Any, conn: socket.socket, buf: bytearray) -> AgentLoop:
+    def _make_loop(
+        self,
+        provider: Any,
+        conn: socket.socket,
+        buf: bytearray,
+        *,
+        approval_mode: str = "interactive",
+    ) -> AgentLoop:
         event_store = EventStore(self.ctx.events_path)
         skill_ctx = SkillContext(
             permission_context=self.permission_context,
@@ -247,6 +259,8 @@ class MauriceServer:
                 "scope": msg.get("remember_scope") or msg.get("scope") or "exact",
             }
 
+        approval_handler = None if approval_mode == "store" else approval_callback
+
         def text_delta_callback(delta: str) -> None:
             _send(conn, {"type": "text_delta", "delta": delta})
 
@@ -256,8 +270,9 @@ class MauriceServer:
         from maurice.kernel.system_prompt import build_base_prompt
         system_prompt = build_base_prompt(
             workspace=self.ctx.content_root,
-            agent_content=self.ctx.content_root,
-            active_project=self.ctx.content_root,
+            agent_content=self.ctx.agent_workspace_root / "content",
+            active_project=self.ctx.active_project_root or self.ctx.content_root,
+            known_projects=list_known_projects(self.ctx.agent_workspace_root),
         )
 
         return AgentLoop(
@@ -275,7 +290,7 @@ class MauriceServer:
             model=self.cfg.get("provider", {}).get("model", "mock"),
             system_prompt=system_prompt,
             compaction_config=self.compaction_config,
-            approval_callback=approval_callback,
+            approval_callback=approval_handler,
             text_delta_callback=text_delta_callback,
             tool_started_callback=tool_started_callback,
         )
@@ -328,7 +343,11 @@ class MauriceServer:
                 buf,
                 message,
                 session_id,
+                agent_id=agent_id,
+                source_channel=msg.get("source_channel"),
+                source_peer_id=msg.get("source_peer_id"),
                 source_metadata=msg.get("source_metadata"),
+                approval_mode=str(msg.get("approval_mode") or "interactive"),
             )
             return
 
@@ -343,6 +362,7 @@ class MauriceServer:
             source_peer_id=msg.get("source_peer_id"),
             source_metadata=msg.get("source_metadata"),
             message_metadata=msg.get("message_metadata"),
+            approval_mode=str(msg.get("approval_mode") or "interactive"),
         )
 
     def _handle_command(
@@ -352,7 +372,11 @@ class MauriceServer:
         message: str,
         session_id: str,
         *,
+        agent_id: str | None = None,
+        source_channel: str | None = None,
+        source_peer_id: str | None = None,
         source_metadata: dict | None = None,
+        approval_mode: str = "interactive",
     ) -> None:
         from maurice.host.command_registry import CommandContext
 
@@ -363,6 +387,7 @@ class MauriceServer:
             return f"{kind}:{model or 'mock'}"
 
         resolved_ctx = self._ctx_with_active_project(source_metadata)
+        self._record_local_active_project(resolved_ctx)
         ctx = CommandContext(
             message_text=message,
             channel="cli",
@@ -402,8 +427,12 @@ class MauriceServer:
                 buf,
                 agent_prompt,
                 session_id,
+                agent_id=agent_id,
                 limits=limits,
+                source_channel=source_channel,
+                source_peer_id=source_peer_id,
                 source_metadata=source_metadata,
+                approval_mode=approval_mode,
             )
             return
 
@@ -422,6 +451,7 @@ class MauriceServer:
         source_peer_id: str | None = None,
         source_metadata: dict | None = None,
         message_metadata: dict | None = None,
+        approval_mode: str = "interactive",
     ) -> None:
         cancel_event = self._register_turn(agent_id=agent_id or "main", session_id=session_id)
         if self.ctx.scope == "global":
@@ -437,13 +467,15 @@ class MauriceServer:
                     source_peer_id=source_peer_id,
                     source_metadata=source_metadata,
                     message_metadata=message_metadata,
+                    approval_mode=approval_mode,
                     cancel_event=cancel_event,
                 )
             finally:
                 self._unregister_turn(agent_id=agent_id or "main", session_id=session_id, event=cancel_event)
             return
         provider = _build_provider(self.cfg, message)
-        loop = self._make_loop(provider, conn, buf)
+        self._record_local_active_project(self._ctx_with_active_project(source_metadata))
+        loop = self._make_loop(provider, conn, buf, approval_mode=approval_mode)
         try:
             result = loop.run_turn(
                 agent_id="main",
@@ -485,10 +517,15 @@ class MauriceServer:
             return self.ctx
         return resolve_global_context(
             self.ctx.context_root,
-            bundle=self.ctx.config if not isinstance(self.ctx.config, dict) else None,
+            bundle=self.ctx.config if not isinstance(self.ctx.config, LocalConfig) else None,
             lifecycle=self.ctx.lifecycle,
             active_project=Path(active_project),
         )
+
+    def _record_local_active_project(self, ctx: MauriceContext) -> None:
+        if ctx.scope != "local" or ctx.active_project_root is None:
+            return
+        record_seen_project(ctx.agent_workspace_root, ctx.active_project_root)
 
     def _run_global_agent_turn(
         self,
@@ -503,6 +540,7 @@ class MauriceServer:
         source_peer_id: str | None = None,
         source_metadata: dict | None = None,
         message_metadata: dict | None = None,
+        approval_mode: str = "interactive",
         cancel_event: threading.Event | None = None,
     ) -> None:
         def approval_callback(tool_name: str, arguments: dict, permission_class: str, reason: str) -> bool:
@@ -522,6 +560,8 @@ class MauriceServer:
                 "scope": msg.get("remember_scope") or msg.get("scope") or "exact",
             }
 
+        approval_handler = None if approval_mode == "store" else approval_callback
+
         def text_delta_callback(delta: str) -> None:
             _send(conn, {"type": "text_delta", "delta": delta})
 
@@ -537,7 +577,7 @@ class MauriceServer:
                 source_channel=source_channel,
                 source_peer_id=source_peer_id,
                 source_metadata=source_metadata,
-                approval_callback=approval_callback,
+                approval_callback=approval_handler,
                 text_delta_callback=text_delta_callback,
                 tool_started_callback=tool_started_callback,
             )

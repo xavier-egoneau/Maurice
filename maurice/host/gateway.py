@@ -61,9 +61,21 @@ RecordExchange = Callable[[InboundMessage, OutboundMessage, bool], None]
 WebUploads = Callable[[str, str, list[dict[str, Any]]], list[dict[str, Any]]]
 WebAttachment = Callable[[str], tuple[str, bytes] | None]
 WebTurnCancel = Callable[[str, str], bool]
+WebSecretCapture = Callable[[str, str, str, str], str | None]
 
 
-APPROVAL_ACCEPT_WORDS = {"ok", "oui", "yes", "y", "go", "vas-y", "vasy", "approve", "approuve"}
+APPROVAL_ACCEPT_WORDS = {
+    "ok",
+    "ok go",
+    "oui",
+    "yes",
+    "y",
+    "go",
+    "vas-y",
+    "vasy",
+    "approve",
+    "approuve",
+}
 APPROVAL_SESSION_WORDS = {
     "session",
     "ok session",
@@ -157,7 +169,8 @@ class MessageRouter:
             )
         )
         if command_result is not None:
-            if command_result.metadata.get("command") == "/new":
+            command_name = str(command_result.metadata.get("command") or "")
+            if command_name == "/new":
                 self._emit(
                     "gateway.session.reset",
                     message,
@@ -174,7 +187,6 @@ class MessageRouter:
                 autonomy = command_result.metadata.get("autonomy")
                 if not isinstance(autonomy, dict):
                     autonomy = {}
-                command_name = command_result.metadata.get("command") or ""
                 cancel_event = self._begin_turn(agent_id, session_id)
                 try:
                     initial_turn = self.run_turn(
@@ -280,7 +292,8 @@ class MessageRouter:
                     "format": command_result.format,
                 },
             )
-            self._record_exchange(message, outbound, include_user=True)
+            if command_name != "/new":
+                self._record_exchange(message, outbound, include_user=True)
             return GatewayResult(inbound=message, outbound=outbound, status="completed")
 
         if self.intercept_message is not None:
@@ -518,6 +531,7 @@ class GatewayHttpServer:
         web_uploads: WebUploads | None = None,
         web_attachment: WebAttachment | None = None,
         web_turn_cancel: WebTurnCancel | None = None,
+        web_secret_capture: WebSecretCapture | None = None,
         web_token: str | None = None,
     ) -> None:
         self.host = host
@@ -542,6 +556,7 @@ class GatewayHttpServer:
             web_uploads=web_uploads,
             web_attachment=web_attachment,
             web_turn_cancel=web_turn_cancel,
+            web_secret_capture=web_secret_capture,
             web_token=web_token,
         )
         self.server = ThreadingHTTPServer((host, port), handler)
@@ -577,6 +592,7 @@ class GatewayHttpServer:
         web_uploads: WebUploads | None,
         web_attachment: WebAttachment | None,
         web_turn_cancel: WebTurnCancel | None,
+        web_secret_capture: WebSecretCapture | None,
         web_token: str | None,
     ):
         class Handler(BaseHTTPRequestHandler):
@@ -740,6 +756,41 @@ class GatewayHttpServer:
                         session_id = payload.get("session_id")
                         session_id = str(session_id) if session_id else ""
                         message_text = str(payload.get("message") or payload.get("text") or "")
+                        peer_id = str(payload.get("peer_id") or payload.get("session_id") or "browser")
+                        if web_secret_capture is not None:
+                            captured_text = web_secret_capture(
+                                agent_id,
+                                session_id,
+                                peer_id,
+                                message_text,
+                            )
+                            if captured_text is not None:
+                                correlation_id = new_correlation_id()
+                                inbound = InboundMessage(
+                                    channel="web",
+                                    peer_id=peer_id,
+                                    text="",
+                                    agent_id=agent_id,
+                                    session_id=session_id or None,
+                                    correlation_id=correlation_id,
+                                    metadata={"secret_capture": True, "persist": False},
+                                )
+                                outbound = OutboundMessage(
+                                    channel="web",
+                                    peer_id=peer_id,
+                                    agent_id=agent_id,
+                                    session_id=session_id,
+                                    correlation_id=correlation_id,
+                                    text=captured_text,
+                                    metadata={"secret_capture": "completed"},
+                                )
+                                result = GatewayResult(
+                                    inbound=inbound,
+                                    outbound=outbound,
+                                    status="completed",
+                                )
+                                self._write_json(200, {"ok": True, "result": result.model_dump(mode="json")})
+                                return
                         attachments = payload.get("attachments")
                         uploaded: list[dict[str, Any]] = []
                         if isinstance(attachments, list) and attachments:
@@ -758,7 +809,7 @@ class GatewayHttpServer:
                         result = router.handle(
                             {
                                 "channel": "web",
-                                "peer_id": str(payload.get("peer_id") or payload.get("session_id") or "browser"),
+                                "peer_id": peer_id,
                                 "text": message_text,
                                 "agent_id": agent_id,
                                 "session_id": session_id or None,

@@ -25,7 +25,7 @@ For every tool call the model requests, in order:
 
 ```
 1. Lookup tool in SkillRegistry          — unknown tool → error
-2. evaluate_permission (profile rules)   — deny → error
+2. evaluate_permission (profile rules)   — allow/ask/deny, with low-friction scoped background actions
 3. shell_parser.parse (shell.exec only)  — critical/elevated → requires new approval
 4. _run_classifier (if mode=auto)        — block → classifier_blocked error
 5. Check approval_store                  — missing approval → approval_required error
@@ -51,6 +51,15 @@ level, Maurice leaves a visible notice in the session so the user knows the
 history was compacted.
 Can be disabled with `kernel.sessions.compaction: false`.
 
+Manual session commands keep a clear split between product state and the visible
+chat surface:
+
+- `/new` resets the session context and clears the visible chat. The `/new`
+  exchange itself is not written back into the freshly reset session.
+- `/compact` compacts the agent context for the current session while preserving
+  the current chat view. A later reload will show the compacted persisted
+  history, but the active surface is not wiped.
+
 ## Permission profiles
 
 Three built-in profiles, set per agent in `agents.yaml`:
@@ -60,11 +69,11 @@ Three built-in profiles, set per agent in `agents.yaml`:
 | `fs.read` | allow ($workspace + $project) | allow ($workspace + $project) | allow ($workspace + $project + $home, protected paths excluded) |
 | `fs.write` | ask ($workspace + $project) | allow ($workspace + $project) | allow ($workspace + $project) |
 | `network.outbound` | ask | ask | allow |
-| `shell.exec` | deny | ask | ask |
+| `shell.exec` | deny | allow in scope; risky commands ask | allow in scope; risky commands ask |
 | `secret.read` | ask | ask | ask |
-| `agent.spawn` | deny | deny | ask |
-| `host.control` | deny | deny | ask |
-| `runtime.write` | deny | deny | ask |
+| `agent.spawn` | deny | allow bounded dev workers | allow in tool scope |
+| `host.control` | deny | allow common diagnostics/config, ask destructive host actions | allow scoped |
+| `runtime.write` | ask proposal-only | allow proposal-only | allow proposal-only |
 
 ## Approval modes
 

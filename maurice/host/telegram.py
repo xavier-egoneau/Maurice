@@ -180,9 +180,9 @@ def _telegram_update_to_inbound(
     chat_id = chat.get("id")
     if not isinstance(user_id, int) or not isinstance(chat_id, int):
         return None
-    if allowed_users and user_id not in allowed_users:
+    if not _telegram_sender_allowed(user_id, allowed_users):
         return None
-    if allowed_chats and chat_id not in allowed_chats:
+    if not _telegram_chat_allowed(chat, user_id=user_id, chat_id=chat_id, allowed_chats=allowed_chats):
         return None
     return {
         "channel": "telegram",
@@ -195,6 +195,32 @@ def _telegram_update_to_inbound(
             "message_id": message.get("message_id"),
         },
     }
+
+
+def _telegram_sender_allowed(user_id: int, allowed_users: list[int]) -> bool:
+    return not allowed_users or user_id in allowed_users
+
+
+def _telegram_chat_allowed(
+    chat: dict[str, Any],
+    *,
+    user_id: int,
+    chat_id: int,
+    allowed_chats: list[int],
+) -> bool:
+    chat_type = str(chat.get("type") or "")
+    if chat_type in {"group", "supergroup", "channel"} or chat_id < 0:
+        return chat_id in allowed_chats
+    if allowed_chats:
+        return chat_id in allowed_chats or chat_id == user_id
+    return chat_id == user_id
+
+
+def _telegram_allowed_chats_with_private_users(
+    allowed_users: list[int],
+    allowed_chats: list[int],
+) -> list[int]:
+    return list(dict.fromkeys([*allowed_chats, *allowed_users]))
 
 
 def _int_list(value: object) -> list[int]:

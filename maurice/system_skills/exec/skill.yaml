@@ -1,0 +1,53 @@
+name: exec
+version: 0.1.0
+origin: system
+mutable: false
+required: false
+description: Run scoped shell commands inside the active project or workspace.
+config_namespace: skills.exec
+requires:
+  binaries: []
+  credentials: []
+dependencies:
+  skills: []
+  optional_skills: []
+permissions:
+  - class: shell.exec
+    scope:
+      commands:
+        - "*"
+      cwd:
+        - "$workspace/**"
+        - "$project/**"
+      timeout_seconds_max: 300
+tools:
+  - name: shell.exec
+    description: Execute a shell command in the active project or workspace. Simple scoped commands can run directly; risky commands require explicit approval or are blocked by policy.
+    input_schema:
+      type: object
+      properties:
+        command:
+          type: string
+        cwd:
+          type: string
+        timeout_seconds:
+          type: integer
+          minimum: 1
+      required: ["command"]
+    permission_class: shell.exec
+    permission_scope:
+      commands:
+        - "*"
+      cwd:
+        - "$workspace/**"
+        - "$project/**"
+      timeout_seconds_max: 300
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.exec.tools.run_shell
+backend: null
+storage: null
+events:
+  state_publisher: null
+tools_module: maurice.system_skills.exec.tools

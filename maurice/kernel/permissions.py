@@ -88,6 +88,16 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "scope": {
                     "paths": ["$workspace/**", "$project/**"],
                     "exclude": ["$workspace/secrets/**", "$project/secrets/**"],
+                    "sensitive": [
+                        "$workspace/.env",
+                        "$workspace/.env.*",
+                        "$workspace/**/.env",
+                        "$workspace/**/.env.*",
+                        "$project/.env",
+                        "$project/.env.*",
+                        "$project/**/.env",
+                        "$project/**/.env.*",
+                    ],
                 },
                 "rememberable": False,
                 "reason": "Safe profile allows workspace reads.",
@@ -100,6 +110,16 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "scope": {
                     "paths": ["$workspace/**", "$project/**"],
                     "exclude": ["$workspace/secrets/**", "$project/secrets/**"],
+                    "sensitive": [
+                        "$workspace/.env",
+                        "$workspace/.env.*",
+                        "$workspace/**/.env",
+                        "$workspace/**/.env.*",
+                        "$project/.env",
+                        "$project/.env.*",
+                        "$project/**/.env",
+                        "$project/**/.env.*",
+                    ],
                 },
                 "rememberable": True,
                 "reason": "Safe profile asks before workspace writes.",
@@ -112,6 +132,24 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "scope": {"hosts": ["*"]},
                 "rememberable": True,
                 "reason": "Safe profile asks before network access.",
+            }
+        ),
+        PermissionClass.INTEGRATION_READ: PermissionRule.model_validate(
+            {
+                "class": "integration.read",
+                "decision": "ask",
+                "scope": {"integrations": ["calendar"]},
+                "rememberable": True,
+                "reason": "Safe profile asks before reading local integrations.",
+            }
+        ),
+        PermissionClass.INTEGRATION_WRITE: PermissionRule.model_validate(
+            {
+                "class": "integration.write",
+                "decision": "ask",
+                "scope": {"integrations": ["calendar"]},
+                "rememberable": True,
+                "reason": "Safe profile asks before changing local integrations.",
             }
         ),
         PermissionClass.SHELL_EXEC: PermissionRule.model_validate(
@@ -171,6 +209,16 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "scope": {
                     "paths": ["$workspace/**", "$project/**"],
                     "exclude": ["$workspace/secrets/**", "$project/secrets/**", "$runtime/**"],
+                    "sensitive": [
+                        "$workspace/.env",
+                        "$workspace/.env.*",
+                        "$workspace/**/.env",
+                        "$workspace/**/.env.*",
+                        "$project/.env",
+                        "$project/.env.*",
+                        "$project/**/.env",
+                        "$project/**/.env.*",
+                    ],
                 },
                 "rememberable": False,
                 "reason": "Limited profile allows workspace reads.",
@@ -183,6 +231,16 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "scope": {
                     "paths": ["$workspace/**", "$project/**"],
                     "exclude": ["$workspace/secrets/**", "$project/secrets/**", "$runtime/**"],
+                    "sensitive": [
+                        "$workspace/.env",
+                        "$workspace/.env.*",
+                        "$workspace/**/.env",
+                        "$workspace/**/.env.*",
+                        "$project/.env",
+                        "$project/.env.*",
+                        "$project/**/.env",
+                        "$project/**/.env.*",
+                    ],
                 },
                 "rememberable": False,
                 "reason": "Limited profile allows workspace writes.",
@@ -197,17 +255,35 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "reason": "Limited profile asks before network access.",
             }
         ),
+        PermissionClass.INTEGRATION_READ: PermissionRule.model_validate(
+            {
+                "class": "integration.read",
+                "decision": "allow",
+                "scope": {"integrations": ["calendar"]},
+                "rememberable": False,
+                "reason": "Limited profile allows enabled local integration reads.",
+            }
+        ),
+        PermissionClass.INTEGRATION_WRITE: PermissionRule.model_validate(
+            {
+                "class": "integration.write",
+                "decision": "ask",
+                "scope": {"integrations": ["calendar"]},
+                "rememberable": True,
+                "reason": "Limited profile asks before changing local integrations.",
+            }
+        ),
         PermissionClass.SHELL_EXEC: PermissionRule.model_validate(
             {
                 "class": "shell.exec",
-                "decision": "ask",
+                "decision": "allow",
                 "scope": {
-                    "commands": ["git", "pytest", "ruff"],
+                    "commands": ["*"],
                     "cwd": ["$workspace/**", "$project/**"],
                     "timeout_seconds_max": 300,
                 },
-                "rememberable": True,
-                "reason": "Limited profile asks before scoped shell execution.",
+                "rememberable": False,
+                "reason": "Limited profile allows scoped shell execution; risky commands still require explicit approval.",
             }
         ),
         PermissionClass.SECRET_READ: PermissionRule.model_validate(
@@ -222,10 +298,10 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
         PermissionClass.AGENT_SPAWN: PermissionRule.model_validate(
             {
                 "class": "agent.spawn",
-                "decision": "ask",
-                "scope": {"agents": [], "max_parallel": 3, "max_depth": 2},
-                "rememberable": True,
-                "reason": "Limited profile asks before spawning agents.",
+                "decision": "allow",
+                "scope": {"agents": ["dev_worker"], "max_parallel": 5, "max_depth": 1},
+                "rememberable": False,
+                "reason": "Limited profile allows bounded scoped dev workers.",
             }
         ),
         PermissionClass.HOST_CONTROL: PermissionRule.model_validate(
@@ -235,6 +311,7 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "scope": {
                     "actions": [
                         "logs.read",
+                        "diagnostics.run",
                         "service.status",
                         "credentials.list",
                         "credentials.capture",
@@ -242,6 +319,7 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                         "agents.create",
                         "agents.update",
                         "agents.delete",
+                        "dev_workers.configure",
                         "telegram.configure",
                     ]
                 },
@@ -276,6 +354,20 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                         "$home/.ssh/**",
                         "$home/.gnupg/**",
                     ],
+                    "sensitive": [
+                        "$workspace/.env",
+                        "$workspace/.env.*",
+                        "$workspace/**/.env",
+                        "$workspace/**/.env.*",
+                        "$project/.env",
+                        "$project/.env.*",
+                        "$project/**/.env",
+                        "$project/**/.env.*",
+                        "$home/.env",
+                        "$home/.env.*",
+                        "$home/**/.env",
+                        "$home/**/.env.*",
+                    ],
                 },
                 "rememberable": False,
                 "reason": "Power profile allows broad reads outside protected paths.",
@@ -288,6 +380,16 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "scope": {
                     "paths": ["$workspace/**", "$project/**"],
                     "exclude": ["$runtime/**", "$workspace/secrets/**", "$project/secrets/**"],
+                    "sensitive": [
+                        "$workspace/.env",
+                        "$workspace/.env.*",
+                        "$workspace/**/.env",
+                        "$workspace/**/.env.*",
+                        "$project/.env",
+                        "$project/.env.*",
+                        "$project/**/.env",
+                        "$project/**/.env.*",
+                    ],
                 },
                 "rememberable": False,
                 "reason": "Power profile allows workspace writes.",
@@ -302,17 +404,35 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "reason": "Power profile allows network access.",
             }
         ),
+        PermissionClass.INTEGRATION_READ: PermissionRule.model_validate(
+            {
+                "class": "integration.read",
+                "decision": "allow",
+                "scope": {"integrations": ["*"]},
+                "rememberable": False,
+                "reason": "Power profile allows local integration reads.",
+            }
+        ),
+        PermissionClass.INTEGRATION_WRITE: PermissionRule.model_validate(
+            {
+                "class": "integration.write",
+                "decision": "allow",
+                "scope": {"integrations": ["*"]},
+                "rememberable": False,
+                "reason": "Power profile allows local integration changes.",
+            }
+        ),
         PermissionClass.SHELL_EXEC: PermissionRule.model_validate(
             {
                 "class": "shell.exec",
-                "decision": "ask",
+                "decision": "allow",
                 "scope": {
                     "commands": ["*"],
                     "cwd": ["$workspace/**", "$project/**"],
                     "timeout_seconds_max": 900,
                 },
-                "rememberable": True,
-                "reason": "Power profile asks before shell execution.",
+                "rememberable": False,
+                "reason": "Power profile allows scoped shell execution; risky commands still require explicit approval.",
             }
         ),
         PermissionClass.SECRET_READ: PermissionRule.model_validate(
@@ -340,6 +460,7 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                 "scope": {
                     "actions": [
                         "logs.read",
+                        "diagnostics.run",
                         "service.status",
                         "service.restart",
                         "credentials.list",
@@ -348,6 +469,7 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
                         "agents.create",
                         "agents.update",
                         "agents.delete",
+                        "dev_workers.configure",
                         "telegram.configure",
                     ]
                 },
@@ -368,6 +490,24 @@ PROFILE_RULES: dict[PermissionProfileName, dict[PermissionClass, PermissionRule]
             }
         ),
     },
+}
+
+
+LOW_FRICTION_HOST_ACTIONS: dict[PermissionProfileName, set[str]] = {
+    "safe": set(),
+    "limited": {
+        "logs.read",
+        "diagnostics.run",
+        "service.status",
+        "credentials.list",
+        "credentials.capture",
+        "agents.list",
+        "agents.create",
+        "agents.update",
+        "dev_workers.configure",
+        "telegram.configure",
+    },
+    "power": {"*"},
 }
 
 
@@ -397,6 +537,38 @@ def evaluate_permission(
     permission_class_value = PermissionClass(permission_class)
     in_scope = scope_contains(rule.scope, requested_scope, context, permission_class_value)
     if in_scope:
+        if _low_friction_override(profile, permission_class_value, requested_scope):
+            return PermissionEvaluation(
+                decision=PermissionDecision.ALLOW,
+                permission_class=permission_class_value,
+                scope=rule.scope,
+                rememberable=False,
+                reason="Allowed by scoped low-friction host policy.",
+            )
+        if (
+            permission_class_value == PermissionClass.RUNTIME_WRITE
+            and requested_scope.get("mode", "proposal_only") == "proposal_only"
+            and profile in {"limited", "power"}
+        ):
+            return PermissionEvaluation(
+                decision=PermissionDecision.ALLOW,
+                permission_class=permission_class_value,
+                scope=rule.scope,
+                rememberable=False,
+                reason="Allowed to create runtime update proposals in the background.",
+            )
+        if (
+            permission_class_value in (PermissionClass.FS_READ, PermissionClass.FS_WRITE)
+            and rule.decision == PermissionDecision.ALLOW
+            and _requested_paths_match(requested_scope, rule.scope.get("sensitive", []), context)
+        ):
+            return PermissionEvaluation(
+                decision=PermissionDecision.ASK,
+                permission_class=permission_class_value,
+                scope=rule.scope,
+                rememberable=True,
+                reason="Requested path is sensitive and requires explicit approval.",
+            )
         return PermissionEvaluation(
             decision=rule.decision,
             permission_class=permission_class_value,
@@ -413,6 +585,22 @@ def evaluate_permission(
     )
 
 
+def _low_friction_override(
+    profile: PermissionProfileName,
+    permission_class: PermissionClass,
+    requested_scope: dict[str, Any],
+) -> bool:
+    if permission_class != PermissionClass.HOST_CONTROL:
+        return False
+    actions = requested_scope.get("actions", [])
+    if isinstance(actions, str):
+        actions = [actions]
+    if not actions:
+        return False
+    allowed = LOW_FRICTION_HOST_ACTIONS.get(profile, set())
+    return "*" in allowed or all(str(action) in allowed for action in actions)
+
+
 def scope_contains(
     allowed: dict[str, Any],
     requested: dict[str, Any],
@@ -423,6 +611,10 @@ def scope_contains(
         return _paths_allowed(allowed, requested, context)
     if permission_class == PermissionClass.NETWORK_OUTBOUND:
         return _values_allowed(allowed.get("hosts", []), requested.get("hosts", []))
+    if permission_class in (PermissionClass.INTEGRATION_READ, PermissionClass.INTEGRATION_WRITE):
+        return _values_allowed(
+            allowed.get("integrations", []), requested.get("integrations", [])
+        )
     if permission_class == PermissionClass.SHELL_EXEC:
         return _shell_allowed(allowed, requested, context)
     if permission_class == PermissionClass.SECRET_READ:
@@ -453,6 +645,22 @@ def _paths_allowed(
         if not any(_matches(resolved, pattern) for pattern in allowed_patterns):
             return False
     return True
+
+
+def _requested_paths_match(
+    requested: dict[str, Any], patterns: list[str], context: PermissionContext
+) -> bool:
+    if not patterns:
+        return False
+    requested_paths = requested.get("paths", [])
+    if not requested_paths:
+        return False
+    expanded_patterns = [_expand_pattern(pattern, context) for pattern in patterns]
+    for requested_path in requested_paths:
+        resolved = _resolve_requested_path(str(requested_path), context)
+        if any(_matches(resolved, pattern) for pattern in expanded_patterns):
+            return True
+    return False
 
 
 def _shell_allowed(

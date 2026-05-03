@@ -14,8 +14,10 @@ from rich.text import Text
 from rich.theme import Theme
 
 from maurice.host.client import MauriceClient
+from maurice.host.context import resolve_local_context
 from maurice.host.context_meter import context_bar, context_summary, context_usage
 from maurice.host.project import ensure_maurice_dir, resolve_project_root, sessions_dir
+from maurice.host.project_registry import record_seen_project
 from maurice.kernel.session import SessionRecord, SessionStore
 from maurice.kernel.tool_labels import tool_short_label, tool_target
 
@@ -76,7 +78,6 @@ _TIPS = [
     ("/dev",    "exécuter le plan en autonomie"),
     ("/commit", "préparer un commit"),
     ("/check",  "vérifier l'état du projet"),
-    ("/setup",  "configurer ou passer en assistant de bureau"),
     ("/help",   "toutes les commandes"),
 ]
 
@@ -145,7 +146,9 @@ def _welcome(project_root: Path, session_id: str) -> None:
 
 
 def run_repl(project_root: Path, *, session_id: str = "default") -> None:
+    ctx = resolve_local_context(project_root)
     ensure_maurice_dir(project_root)
+    record_seen_project(ctx.agent_workspace_root, ctx.active_project_root or project_root)
     client = MauriceClient(project_root)
     client.ensure_running()
     client.connect()

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import shutil
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field as dc_field
 from enum import StrEnum
@@ -123,7 +125,7 @@ class SkillRegistry(MauriceModel):
             if not skill.manifest or not skill.manifest.tools_module:
                 continue
             try:
-                mod = importlib.import_module(skill.manifest.tools_module)
+                mod = import_skill_module(skill, skill.manifest.tools_module)
             except ImportError:
                 continue
             builder = getattr(mod, "build_executors", None)
@@ -138,6 +140,47 @@ class SkillRegistry(MauriceModel):
             except Exception:
                 pass
         return executors
+
+
+def import_skill_module(skill: LoadedSkill, module_path: str) -> Any:
+    """Import a skill module by package path or relative to a user skill folder."""
+    try:
+        return importlib.import_module(module_path)
+    except ImportError as exc:
+        module_file = _relative_skill_module_path(skill, module_path)
+        if module_file is None:
+            raise exc
+        return _import_module_from_path(skill, module_path, module_file)
+
+
+def _relative_skill_module_path(skill: LoadedSkill, module_path: str) -> Path | None:
+    if not skill.mutable or skill.origin != "user":
+        return None
+    relative = Path(*module_path.split(".")).with_suffix(".py")
+    module_file = Path(skill.path).expanduser().resolve() / relative
+    if not module_file.is_file():
+        return None
+    return module_file
+
+
+def _import_module_from_path(skill: LoadedSkill, module_path: str, module_file: Path) -> Any:
+    module_name = (
+        "maurice_user_skill_"
+        + skill.name.replace("-", "_")
+        + "_"
+        + str(abs(hash(str(module_file))))
+        + "_"
+        + module_path.replace(".", "_")
+    )
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+    spec = importlib.util.spec_from_file_location(module_name, module_file)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load user skill module: {module_file}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 class SkillLoader:
@@ -240,8 +283,9 @@ class SkillLoader:
             root_path = Path(root.path).expanduser()
             if not root_path.exists():
                 continue
-            for manifest_path in sorted(root_path.glob("*/skill.yaml")):
-                discovered.append((manifest_path.parent, root))
+            for skill_dir in sorted(path for path in root_path.iterdir() if path.is_dir()):
+                if _skill_manifest_path(skill_dir) is not None:
+                    discovered.append((skill_dir, root))
         return discovered
 
     def _find_collisions(
@@ -249,13 +293,14 @@ class SkillLoader:
     ) -> dict[str, list[Path]]:
         names: dict[str, list[Path]] = {}
         for skill_dir, _root in discovered:
-            name = self._manifest_name(skill_dir / "skill.yaml") or skill_dir.name
+            name = self._manifest_name(skill_dir) or skill_dir.name
             names.setdefault(name, []).append(skill_dir)
         return {name: paths for name, paths in names.items() if len(paths) > 1}
 
     def _load_one(self, skill_dir: Path, root: SkillRoot) -> LoadedSkill:
         try:
-            manifest = self._read_manifest(skill_dir / "skill.yaml")
+            manifest_path = _skill_manifest_path(skill_dir)
+            manifest = self._read_manifest(skill_dir, root)
             required = manifest.required or manifest.name in self.required_skills
             if self.enabled_skills is not None and manifest.name not in self.enabled_skills:
                 return LoadedSkill(
@@ -315,7 +360,7 @@ class SkillLoader:
                 mutable=root.mutable,
                 state=SkillState.LOADED,
                 manifest=manifest,
-                prompt=self._read_optional_text(skill_dir / "prompt.md"),
+                prompt=self._prompt_text(skill_dir, manifest_path),
                 dreams=self._read_optional_text(
                     skill_dir / manifest.dreams.attachment
                     if manifest.dreams and manifest.dreams.attachment
@@ -332,7 +377,7 @@ class SkillLoader:
         except RequiredSkillError:
             raise
         except Exception as exc:
-            fallback_name = self._manifest_name(skill_dir / "skill.yaml") or skill_dir.name
+            fallback_name = self._manifest_name(skill_dir) or skill_dir.name
             return LoadedSkill(
                 name=fallback_name,
                 path=str(skill_dir),
@@ -410,6 +455,7 @@ class SkillLoader:
                     renderer=exported.renderer,
                     aliases=exported.aliases,
                     available_in=exported.available_in,
+                    project_required=exported.project_required,
                 )
             )
         return declarations
@@ -433,12 +479,23 @@ class SkillLoader:
         )
 
     @staticmethod
-    def _read_manifest(path: Path) -> SkillManifest:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    def _read_manifest(skill_dir: Path, root: SkillRoot) -> SkillManifest:
+        path = _skill_manifest_path(skill_dir)
+        if path is None:
+            raise FileNotFoundError(f"No skill manifest found in {skill_dir}")
+        if path.name == "skill.yaml":
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        else:
+            data = _declarative_manifest(skill_dir, root, path)
         return SkillManifest.model_validate(data)
 
     @staticmethod
-    def _manifest_name(path: Path) -> str | None:
+    def _manifest_name(skill_dir: Path) -> str | None:
+        path = _skill_manifest_path(skill_dir)
+        if path is None:
+            return None
+        if path.name != "skill.yaml":
+            return _normalize_skill_name(skill_dir.name)
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError):
@@ -451,6 +508,15 @@ class SkillLoader:
         if not path.exists():
             return ""
         return path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _prompt_text(skill_dir: Path, manifest_path: Path | None) -> str:
+        prompt_path = skill_dir / "prompt.md"
+        if prompt_path.exists():
+            return prompt_path.read_text(encoding="utf-8")
+        if manifest_path is not None and manifest_path.name in {"skill.md", "SKILL.md"}:
+            return _skill_md_body(manifest_path)
+        return ""
 
 
 def _suggest_manifest_fixes(exc: Exception) -> list[str]:
@@ -471,6 +537,113 @@ def _suggest_manifest_fixes(exc: Exception) -> list[str]:
     if isinstance(exc, yaml.YAMLError):
         return ["Fix skill.yaml syntax so it is valid YAML."]
     return ["Review skill.yaml against the SkillManifest contract and reload skills."]
+
+
+def _skill_manifest_path(skill_dir: Path) -> Path | None:
+    yaml_manifest = skill_dir / "skill.yaml"
+    if yaml_manifest.is_file():
+        return yaml_manifest
+    for name in ("skill.md", "SKILL.md"):
+        path = skill_dir / name
+        if path.is_file():
+            return path
+    return None
+
+
+def _declarative_manifest(skill_dir: Path, root: SkillRoot, path: Path) -> dict[str, Any]:
+    name = _normalize_skill_name(skill_dir.name)
+    description = _skill_md_description(path) or f"User skill {name}."
+    dreams = {"attachment": "dreams.md"} if (skill_dir / "dreams.md").is_file() else None
+    daily = {"attachment": "daily.md"} if (skill_dir / "daily.md").is_file() else None
+    input_builder = skill_dir / "tools.py"
+    if dreams is not None and input_builder.is_file():
+        dreams["input_builder"] = "tools.build_dream_input"
+    tools = _declarative_tool_exports(skill_dir, name)
+    return {
+        "name": name,
+        "version": "0.1.0",
+        "origin": root.origin,
+        "mutable": root.mutable,
+        "required": False,
+        "description": description,
+        "config_namespace": f"skills.{name}",
+        "available_in": ["local", "global"],
+        "requires": {"binaries": [], "credentials": []},
+        "dependencies": {"skills": [], "optional_skills": []},
+        "permissions": [],
+        "tools": tools,
+        "tools_module": "tools" if tools else None,
+        "backend": None,
+        "storage": None,
+        "dreams": dreams,
+        "daily": daily,
+        "events": {"state_publisher": None},
+    }
+
+
+def _declarative_tool_exports(skill_dir: Path, skill_name: str) -> list[dict[str, Any]]:
+    tools_path = skill_dir / "tools.py"
+    if not tools_path.is_file():
+        return []
+    try:
+        module = _import_module_from_path(
+            LoadedSkill(
+                name=skill_name,
+                path=str(skill_dir),
+                root=str(skill_dir.parent),
+                origin=SkillOrigin.USER,
+                mutable=True,
+                state=SkillState.LOADED,
+            ),
+            "tools",
+            tools_path,
+        )
+    except Exception:
+        return []
+    declarations = getattr(module, "tool_declarations", None)
+    if callable(declarations):
+        try:
+            raw = declarations()
+        except Exception:
+            raw = []
+        if isinstance(raw, list):
+            return [item for item in raw if isinstance(item, dict)]
+    return []
+
+
+def _skill_md_description(path: Path) -> str:
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    if lines and lines[0].strip() == "---":
+        for line in lines[1:]:
+            stripped = line.strip()
+            if stripped == "---":
+                break
+            if stripped.startswith("description:"):
+                return stripped.split(":", 1)[1].strip().strip('"').strip("'")
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and stripped != "---":
+            return stripped[:200]
+    return ""
+
+
+def _skill_md_body(path: Path) -> str:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if lines and lines[0].strip() == "---":
+        for index, line in enumerate(lines[1:], start=1):
+            if line.strip() == "---":
+                return "\n".join(lines[index + 1:]).lstrip() + ("\n" if index + 1 < len(lines) else "")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _normalize_skill_name(name: str) -> str:
+    normalized = "".join(
+        character if character.isalnum() else "_"
+        for character in name.strip().lower()
+    )
+    normalized = "_".join(part for part in normalized.split("_") if part)
+    return normalized or "user_skill"
 
 
 def _unique(values: list[str]) -> list[str]:

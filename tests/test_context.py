@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from maurice.host.context import (
+    LocalConfig,
     build_command_callbacks,
     resolve_global_context,
     resolve_local_context,
@@ -36,6 +37,7 @@ def test_resolve_local_context_centers_state_on_project(tmp_path, monkeypatch) -
     ctx = resolve_local_context(project)
 
     assert ctx.scope == "local"
+    assert isinstance(ctx.config, LocalConfig)
     assert ctx.lifecycle == "transient"
     assert ctx.context_root == project.resolve()
     assert ctx.content_root == project.resolve()
@@ -44,7 +46,8 @@ def test_resolve_local_context_centers_state_on_project(tmp_path, monkeypatch) -
     assert ctx.sessions_path == project / ".maurice" / "sessions"
     assert ctx.events_path == project / ".maurice" / "events.jsonl"
     assert ctx.approvals_path == project / ".maurice" / "approvals.json"
-    assert ctx.memory_path == project / ".maurice" / "memory.sqlite"
+    assert ctx.agent_workspace_root == home / ".maurice" / "agents" / "main"
+    assert ctx.memory_path == home / ".maurice" / "agents" / "main" / "memory" / "memory.sqlite"
     assert ctx.run_root == project / ".maurice" / "run"
     assert ctx.server_meta_path == project / ".maurice" / "run" / "server.meta"
     assert ctx.permission_profile == "limited"
@@ -149,7 +152,8 @@ def test_resolve_global_context_scopes_memory_to_selected_agent(tmp_path) -> Non
     assert ctx.memory_path == workspace / "agents" / "paul" / "memory" / "memory.sqlite"
 
 
-def test_command_callbacks_reset_and_compact_context_session(tmp_path) -> None:
+def test_command_callbacks_reset_and_compact_context_session(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MAURICE_HOME", str(tmp_path / ".maurice"))
     project = tmp_path / "project"
     project.mkdir()
     ctx = resolve_local_context(project)
@@ -167,7 +171,8 @@ def test_command_callbacks_reset_and_compact_context_session(tmp_path) -> None:
     assert callbacks["workspace"] == project.resolve()
     assert callbacks["project_root"] == project.resolve()
     assert callbacks["active_project_path"] == project.resolve()
-    assert callbacks["memory_path"] == project / ".maurice" / "memory.sqlite"
+    assert callbacks["agent_workspace"] == tmp_path / ".maurice" / "agents" / "main"
+    assert callbacks["memory_path"] == tmp_path / ".maurice" / "agents" / "main" / "memory" / "memory.sqlite"
     assert store.load("main", "default").messages == []
 
 

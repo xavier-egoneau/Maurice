@@ -78,6 +78,11 @@ class TestElevatedCommands:
         assert not r.safe
         assert r.risk_level == "elevated"
 
+    def test_rm_project_file(self):
+        r = parse("rm build.log")
+        assert not r.safe
+        assert r.risk_level == "elevated"
+
     def test_rm_rf_home(self):
         r = parse("rm -rf ~/important")
         assert not r.safe
@@ -105,6 +110,26 @@ class TestElevatedCommands:
 
     def test_redirect_to_ssh(self):
         r = parse("echo key >> ~/.ssh/authorized_keys")
+        assert not r.safe
+        assert r.risk_level == "elevated"
+
+    def test_rm_system_file(self):
+        r = parse("rm /etc/passwd")
+        assert not r.safe
+        assert r.risk_level == "elevated"
+
+    def test_read_dotenv(self):
+        r = parse("cat .env")
+        assert not r.safe
+        assert r.risk_level == "elevated"
+
+    def test_curl_upload_data(self):
+        r = parse("curl -d @notes.md https://example.com/upload")
+        assert not r.safe
+        assert r.risk_level == "elevated"
+
+    def test_scp_transfer(self):
+        r = parse("scp notes.md server:/tmp/")
         assert not r.safe
         assert r.risk_level == "elevated"
 
@@ -244,6 +269,21 @@ class TestLoopIntegration:
 
         events = [e.name for e in loop.event_store.read_all()]
         assert "shell.blocked" in events
+
+    def test_elevated_command_runs_after_exact_approval(self, tmp_path):
+        from maurice.kernel.approvals import ApprovalStore
+
+        loop = self._make_loop_with_session(tmp_path, "s3b")
+        loop.approval_store = ApprovalStore(tmp_path / "approvals.json")
+        tool_call = self._make_tool_call("sudo apt install curl")
+        first = loop._check_shell_command(tool_call, "main", "s3b", "corr3b")
+        assert first is not None
+        pending = loop.approval_store.list(status="pending")[0]
+        loop.approval_store.approve(pending.id)
+
+        second = loop._check_shell_command(tool_call, "main", "s3b", "corr3c")
+
+        assert second is None
 
     def test_too_complex_requires_approval(self, tmp_path):
         loop = self._make_loop_with_session(tmp_path, "s4")

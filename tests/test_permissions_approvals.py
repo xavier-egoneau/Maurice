@@ -91,6 +91,78 @@ def test_limited_profile_allows_active_project_outside_workspace(tmp_path) -> No
     assert evaluation.allowed
 
 
+def test_limited_profile_allows_scoped_shell_inside_active_project(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    project = tmp_path / "project"
+    workspace.mkdir()
+    runtime.mkdir()
+    project.mkdir()
+    context = PermissionContext(
+        workspace_root=str(workspace),
+        runtime_root=str(runtime),
+        active_project_root=str(project),
+    )
+
+    evaluation = evaluate_permission(
+        "limited",
+        "shell.exec",
+        {"commands": ["python -m pytest"], "cwd": [str(project)], "timeout_seconds": 120},
+        context,
+    )
+
+    assert evaluation.allowed
+
+
+def test_limited_profile_denies_shell_outside_active_project_and_workspace(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    runtime.mkdir()
+    project.mkdir()
+    outside.mkdir()
+    context = PermissionContext(
+        workspace_root=str(workspace),
+        runtime_root=str(runtime),
+        active_project_root=str(project),
+    )
+
+    evaluation = evaluate_permission(
+        "limited",
+        "shell.exec",
+        {"commands": ["ls"], "cwd": [str(outside)], "timeout_seconds": 10},
+        context,
+    )
+
+    assert evaluation.denied
+
+
+def test_limited_profile_asks_before_reading_dotenv(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    project = tmp_path / "project"
+    workspace.mkdir()
+    runtime.mkdir()
+    project.mkdir()
+    context = PermissionContext(
+        workspace_root=str(workspace),
+        runtime_root=str(runtime),
+        active_project_root=str(project),
+    )
+
+    evaluation = evaluate_permission(
+        "limited",
+        "fs.read",
+        {"paths": [str(project / ".env")]},
+        context,
+    )
+
+    assert evaluation.requires_approval
+    assert evaluation.rememberable
+
+
 def test_limited_profile_resolves_relative_paths_under_active_project(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     runtime = tmp_path / "runtime"
@@ -121,7 +193,7 @@ def test_limited_profile_resolves_relative_paths_under_active_project(tmp_path) 
     assert denied.denied
 
 
-def test_runtime_write_defaults_to_proposal_flow_in_limited_profile(tmp_path) -> None:
+def test_runtime_write_proposals_run_in_background_for_limited_profile(tmp_path) -> None:
     context = PermissionContext(
         workspace_root=str(tmp_path / "workspace"),
         runtime_root=str(tmp_path / "runtime"),
@@ -140,11 +212,35 @@ def test_runtime_write_defaults_to_proposal_flow_in_limited_profile(tmp_path) ->
         context,
     )
 
-    assert evaluation.requires_approval
+    assert evaluation.allowed
     assert direct_apply.denied
 
 
-def test_limited_profile_allows_host_runtime_proposals_with_approval(tmp_path) -> None:
+def test_limited_profile_reads_calendar_but_asks_before_calendar_maintenance(tmp_path) -> None:
+    context = PermissionContext(
+        workspace_root=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "runtime"),
+    )
+
+    read = evaluate_permission(
+        "limited",
+        "integration.read",
+        {"integrations": ["calendar"]},
+        context,
+    )
+    write = evaluate_permission(
+        "limited",
+        "integration.write",
+        {"integrations": ["calendar"]},
+        context,
+    )
+
+    assert read.allowed
+    assert write.requires_approval
+    assert write.rememberable
+
+
+def test_limited_profile_allows_host_runtime_proposals_in_background(tmp_path) -> None:
     context = PermissionContext(
         workspace_root=str(tmp_path / "workspace"),
         runtime_root=str(tmp_path / "runtime"),
@@ -157,7 +253,7 @@ def test_limited_profile_allows_host_runtime_proposals_with_approval(tmp_path) -
         context,
     )
 
-    assert evaluation.requires_approval
+    assert evaluation.allowed
 
 
 def test_safe_profile_allows_runtime_proposals_with_approval(tmp_path) -> None:
@@ -201,6 +297,12 @@ def test_host_control_is_scoped_by_action(tmp_path) -> None:
         {"actions": ["service.status"]},
         context,
     )
+    doctor_eval = evaluate_permission(
+        "limited",
+        "host.control",
+        {"actions": ["diagnostics.run"]},
+        context,
+    )
     restart_eval = evaluate_permission(
         "limited",
         "host.control",
@@ -219,12 +321,34 @@ def test_host_control_is_scoped_by_action(tmp_path) -> None:
         {"actions": ["telegram.configure"]},
         context,
     )
+    delete_eval = evaluate_permission(
+        "limited",
+        "host.control",
+        {"actions": ["agents.delete"]},
+        context,
+    )
+    power_restart_eval = evaluate_permission(
+        "power",
+        "host.control",
+        {"actions": ["service.restart"]},
+        context,
+    )
+    power_delete_eval = evaluate_permission(
+        "power",
+        "host.control",
+        {"actions": ["agents.delete"]},
+        context,
+    )
 
     assert safe_eval.denied
-    assert limited_eval.requires_approval
-    assert agent_create_eval.requires_approval
-    assert telegram_eval.requires_approval
+    assert limited_eval.allowed
+    assert doctor_eval.allowed
+    assert agent_create_eval.allowed
+    assert telegram_eval.allowed
+    assert delete_eval.requires_approval
     assert restart_eval.denied
+    assert power_restart_eval.allowed
+    assert power_delete_eval.allowed
 
 
 def test_power_profile_denies_raw_maurice_home_reads(tmp_path) -> None:
@@ -345,4 +469,32 @@ def test_approval_tool_session_grant_replays_different_arguments_in_same_session
         arguments={"query": "autre recherche"},
         agent_id="main",
         session_id="sess_2",
+    ) is None
+
+
+def test_approval_tool_session_grant_replays_narrower_spawn_scope(tmp_path) -> None:
+    approvals = ApprovalStore(tmp_path / "approvals.json")
+    approvals.remember_tool_for_session(
+        agent_id="main",
+        session_id="sess_1",
+        tool_name="dev.spawn_workers",
+        permission_class="agent.spawn",
+        scope={"agents": ["dev_worker"], "max_parallel": 5, "max_depth": 1},
+    )
+
+    assert approvals.approved_for_replay(
+        permission_class="agent.spawn",
+        scope={"agents": ["dev_worker"], "max_parallel": 2, "max_depth": 1},
+        tool_name="dev.spawn_workers",
+        arguments={"max_workers": 2},
+        agent_id="main",
+        session_id="sess_1",
+    )
+    assert approvals.approved_for_replay(
+        permission_class="agent.spawn",
+        scope={"agents": ["dev_worker"], "max_parallel": 6, "max_depth": 1},
+        tool_name="dev.spawn_workers",
+        arguments={"max_workers": 6},
+        agent_id="main",
+        session_id="sess_1",
     ) is None

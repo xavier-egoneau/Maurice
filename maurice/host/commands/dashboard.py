@@ -77,7 +77,6 @@ from maurice.kernel.providers import (
     ApiProvider, ChatGPTCodexProvider, MockProvider,
     OllamaCompatibleProvider, OpenAICompatibleProvider, UnsupportedProvider,
 )
-from maurice.kernel.runs import RunApprovalStore, RunCoordinationStore, RunExecutor, RunStore
 from maurice.kernel.scheduler import JobRunner, JobStatus, JobStore, SchedulerService, utc_now
 from maurice.kernel.session import SessionStore
 from maurice.kernel.skills import SkillContext, SkillLoader
@@ -416,6 +415,8 @@ def _dashboard_rich(
             _rich_table(Table, "Cluster", ["Agent", "Modele", "Statut", "Permissions", "Acces"], [[row.label, row.model, row.status, row.permission, row.access] for row in dashboard.agents]),
             _rich_table(Table, "Automatismes", ["Automatisme", "Agent", "Etat", "Actif", "Prochaine fois", "Rythme", "Probleme"], [[row.name, row.owner_agent, row.status, _yes_no(row.enabled), row.next_run, row.recurrence, row.last_problem] for row in dashboard.automations]),
             _rich_table(Table, "Sessions", ["Session", "Agent", "Origine", "Etat", "Dernier signe", "Mis a jour"], [[row.session_id, row.agent_id, row.origin, row.status, row.last_event, row.updated_at] for row in dashboard.sessions]),
+            _rich_table(Table, "Modeles", ["Agent", "Provider", "Modele", "Connexion"], [[row.agent_id, row.provider, row.model, row.auth_state] for row in dashboard.models]),
+            _rich_table(Table, "Permissions", ["Agent", "Mode", "Maximum global", "Changement"], [[row.agent_id, row.current_profile, row.global_maximum, row.escalation] for row in dashboard.permissions]),
             _rich_table(Table, "Capacites", ["Agent", "Capacite", "Source", "Active", "Etat", "Problemes"], [[row.agent_id, row.name, row.source, _yes_no(row.enabled), row.state, row.issues] for row in dashboard.skills]),
             _rich_table(Table, "Journal", ["Heure", "Niveau", "Source", "Agent", "Session", "Message"], [[row.time, row.level, row.source, row.agent_id, row.session_id, row.message] for row in dashboard.logs]),
         )
@@ -553,6 +554,12 @@ def _render_dashboard(workspace_root: Path, *, agent_id: str | None, event_limit
     print(_color("Sessions", "1;38;5;208"))
     print(_dashboard_table(["Session", "Agent", "Origine", "Etat", "Dernier signe", "Mis a jour"], [[row.session_id, row.agent_id, row.origin, row.status, row.last_event, row.updated_at] for row in dashboard.sessions]))
     print("")
+    print(_color("Modeles", "1;38;5;208"))
+    print(_dashboard_table(["Agent", "Provider", "Modele", "Connexion"], [[row.agent_id, row.provider, row.model, row.auth_state] for row in dashboard.models]))
+    print("")
+    print(_color("Permissions", "1;38;5;208"))
+    print(_dashboard_table(["Agent", "Mode", "Maximum global", "Changement"], [[row.agent_id, row.current_profile, row.global_maximum, row.escalation] for row in dashboard.permissions]))
+    print("")
     print(_color("Capacites", "1;38;5;208"))
     print(_dashboard_table(["Agent", "Capacite", "Source", "Active", "Etat", "Problemes"], [[row.agent_id, row.name, row.source, _yes_no(row.enabled), row.state, row.issues] for row in dashboard.skills]))
     print("")
@@ -561,7 +568,7 @@ def _render_dashboard(workspace_root: Path, *, agent_id: str | None, event_limit
         print("- none")
         return
     for row in dashboard.logs:
-        print(f"  {row.time}  {row.level:<7} {row.agent_id:<10} {row.session_id:<22} {row.message}")
+        print(f"  {row.time}  {_colored_log_level(row.level):<16} {row.agent_id:<10} {row.session_id:<22} {row.message}")
 
 
 
@@ -594,6 +601,15 @@ def _dashboard_table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
+def _colored_log_level(level: str) -> str:
+    styles = {
+        "info": "38;5;71",
+        "warning": "38;5;214",
+        "error": "1;38;5;196",
+    }
+    return _color(level, styles.get(level, "0"))
+
+
 
 def _job_rows(jobs) -> list[list[str]]:
     rows = []
@@ -610,20 +626,6 @@ def _job_rows(jobs) -> list[list[str]]:
         )
     return rows
 
-
-
-def _run_rows(runs) -> list[list[str]]:
-    rows = []
-    for run in runs[:8]:
-        rows.append(
-            [
-                run.id[-8:],
-                str(run.state),
-                _short(run.task, 40),
-                run.updated_at.strftime("%H:%M:%S"),
-            ]
-        )
-    return rows
 
 
 
@@ -660,4 +662,3 @@ def _agent_model_name(bundle: ConfigBundle, agent_id: str) -> str:
     provider = model.get("provider") or "mock"
     name = model.get("name") or provider
     return f"{provider}/{name}"
-

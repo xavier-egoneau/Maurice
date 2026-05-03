@@ -267,19 +267,25 @@ class ApprovalStore:
             tool_name=tool_name,
             arguments_hash_value=hashed_arguments,
         )
-        session_fingerprint = replay_fingerprint(
-            permission_class=permission_class,
-            scope=scope,
-            tool_name=tool_name,
-            arguments_hash_value="tool_session:*",
-        )
         for envelope in self._load().approvals:
             approval = envelope.approval
-            if envelope.replay_fingerprint not in {fingerprint, session_fingerprint}:
-                continue
             if approval.status != PendingApprovalStatus.APPROVED:
                 continue
             if approval.expires_at <= checked_at:
+                continue
+            if approval.replay_scope == "tool_session":
+                if approval.tool_name != tool_name:
+                    continue
+                if PermissionClass(approval.permission_class) != PermissionClass(permission_class):
+                    continue
+                if agent_id is not None and approval.agent_id != agent_id:
+                    continue
+                if session_id is not None and approval.session_id != session_id:
+                    continue
+                if not _scope_covers(approval.scope, scope):
+                    continue
+                return approval
+            if envelope.replay_fingerprint != fingerprint:
                 continue
             if approval.replay_scope == "tool_session":
                 if agent_id is not None and approval.agent_id != agent_id:
@@ -316,3 +322,24 @@ class ApprovalStore:
                 "status": approval.status,
             },
         )
+
+
+def _scope_covers(approved: dict, requested: dict) -> bool:
+    for key, requested_value in requested.items():
+        if key not in approved:
+            return False
+        approved_value = approved[key]
+        if isinstance(requested_value, (int, float)) and isinstance(approved_value, (int, float)):
+            if requested_value > approved_value:
+                return False
+            continue
+        if isinstance(requested_value, list):
+            approved_values = approved_value if isinstance(approved_value, list) else [approved_value]
+            if "*" in approved_values:
+                continue
+            if not all(item in approved_values for item in requested_value):
+                return False
+            continue
+        if requested_value != approved_value:
+            return False
+    return True

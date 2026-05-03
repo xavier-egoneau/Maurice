@@ -16,12 +16,10 @@ permissions:
     scope:
       paths:
         - "$agent_workspace/memory/**"
-        - "$workspace/.maurice/memory.sqlite"
   - class: fs.write
     scope:
       paths:
         - "$agent_workspace/memory/**"
-        - "$workspace/.maurice/memory.sqlite"
 tools:
   - name: memory.remember
     description: Store a durable memory.
@@ -41,7 +39,6 @@ tools:
     permission_scope:
       paths:
         - "$agent_workspace/memory/**"
-        - "$workspace/.maurice/memory.sqlite"
     trust:
       input: local_mutable
       output: local_mutable
@@ -60,7 +57,6 @@ tools:
     permission_scope:
       paths:
         - "$agent_workspace/memory/**"
-        - "$workspace/.maurice/memory.sqlite"
     trust:
       input: local_mutable
       output: local_mutable
@@ -77,7 +73,6 @@ tools:
     permission_scope:
       paths:
         - "$agent_workspace/memory/**"
-        - "$workspace/.maurice/memory.sqlite"
     trust:
       input: local_mutable
       output: local_mutable

@@ -3,8 +3,10 @@ from __future__ import annotations
 import pytest
 
 from maurice.kernel.events import EventStore
+from maurice.kernel.permissions import PermissionContext
 from maurice.kernel.skills import (
     RequiredSkillError,
+    SkillContext,
     SkillLoadError,
     SkillLoader,
     SkillRoot,
@@ -72,6 +74,7 @@ commands:
     description: Prepare project plan.
     handler: tests.dev.plan
     renderer: markdown
+    project_required: true
     aliases:
       - /dev
 """,
@@ -87,7 +90,106 @@ commands:
     assert registry.commands["/plan"].owner_skill == "dev"
     assert registry.commands["/plan"].description == "Prepare project plan."
     assert registry.commands["/plan"].available_in == ["local", "global"]
+    assert registry.commands["/plan"].project_required is True
     assert registry.commands["/dev"].name == "/plan"
+
+
+def test_loader_registers_exec_system_skill() -> None:
+    registry = SkillLoader(
+        [SkillRoot(path="maurice/system_skills", origin="system", mutable=False)],
+        enabled_skills=["exec"],
+    ).load()
+
+    skill = registry.skills["exec"]
+    assert skill.state == SkillState.LOADED
+    assert registry.tools["shell.exec"].permission.permission_class == "shell.exec"
+
+
+def test_loader_accepts_declarative_user_skill_without_yaml_manifest(tmp_path) -> None:
+    skill_dir = tmp_path / "calendar"
+    skill_dir.mkdir()
+    (skill_dir / "skill.md").write_text(
+        "---\n"
+        "description: Read the local calendar.\n"
+        "---\n"
+        "\n"
+        "# Calendar\n",
+        encoding="utf-8",
+    )
+    (skill_dir / "dreams.md").write_text("Dream calendar events.\n", encoding="utf-8")
+    (skill_dir / "daily.md").write_text("Daily calendar events.\n", encoding="utf-8")
+
+    registry = SkillLoader([SkillRoot(path=str(tmp_path), origin="user", mutable=True)]).load()
+
+    skill = registry.skills["calendar"]
+    assert skill.state == SkillState.LOADED
+    assert skill.manifest.name == "calendar"
+    assert skill.manifest.description == "Read the local calendar."
+    assert skill.prompt == "# Calendar\n"
+    assert skill.dreams == "Dream calendar events.\n"
+    assert skill.daily == "Daily calendar events.\n"
+
+
+def test_declarative_user_skill_can_export_callable_tools(tmp_path) -> None:
+    skill_dir = tmp_path / "calendar"
+    skill_dir.mkdir()
+    (skill_dir / "skill.md").write_text(
+        "---\n"
+        "description: Read the local calendar.\n"
+        "---\n"
+        "\n"
+        "# Calendar\n",
+        encoding="utf-8",
+    )
+    (skill_dir / "tools.py").write_text(
+        """
+def tool_declarations():
+    return [
+        {
+            "name": "calendar.agenda",
+            "description": "Read agenda.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+            "permission_class": "integration.read",
+            "permission_scope": {"integrations": ["calendar"]},
+            "trust": {"input": "local_mutable", "output": "local_mutable"},
+            "executor": "calendar.agenda",
+        }
+    ]
+
+
+def build_executors(ctx):
+    from maurice.kernel.contracts import ToolResult
+
+    return {
+        "calendar.agenda": lambda arguments: ToolResult(
+            ok=True,
+            summary="agenda ok",
+            data={"arguments": arguments, "skill_config": ctx.skill_config},
+            trust="local_mutable",
+            artifacts=[],
+            events=[],
+            error=None,
+        )
+    }
+""",
+        encoding="utf-8",
+    )
+
+    registry = SkillLoader([SkillRoot(path=str(tmp_path), origin="user", mutable=True)]).load()
+
+    assert registry.tools["calendar.agenda"].permission.permission_class == "integration.read"
+    executors = registry.build_executor_map(
+        SkillContext(
+            permission_context=PermissionContext(
+                workspace_root=str(tmp_path),
+                runtime_root=str(tmp_path / "runtime"),
+            ),
+            all_skill_configs={"calendar": {"days": 7}},
+        )
+    )
+    result = executors["calendar.agenda"]({})
+    assert result.summary == "agenda ok"
+    assert result.data["skill_config"] == {"days": 7}
 
 
 def test_loader_marks_skill_unavailable_outside_scope(tmp_path) -> None:
@@ -230,16 +332,40 @@ def test_loader_loads_system_host_skill() -> None:
 
     assert skill.state == SkillState.LOADED
     assert "host.status" in registry.tools
+    assert "host.doctor" in registry.tools
     assert "runtime status" in skill.prompt
+    assert "maurice doctor" in skill.prompt
+    assert "maurice logs" in skill.prompt
     assert "Ask exactly one question at a time" in skill.prompt
     assert "`filesystem` : lire/ecrire des fichiers" in skill.prompt
+    assert "`admin` : diagnostiquer Maurice" in skill.prompt
     assert "`self_update` : signaler des bugs Maurice" in skill.prompt
     assert "Envoie-moi maintenant le token BotFather" in skill.prompt
     assert "Quels ids Telegram" in skill.prompt
     assert registry.tools["host.status"].permission.permission_class == "host.control"
+    assert registry.tools["host.doctor"].permission.scope["actions"] == ["diagnostics.run"]
     assert "/add_agent" in registry.commands
     assert "/edit_agent" in registry.commands
     assert registry.commands["/add_agent"].owner_skill == "host"
+
+
+def test_loader_loads_system_host_skill_in_local_scope_without_agent_commands() -> None:
+    registry = SkillLoader(
+        [
+            SkillRoot(
+                path="maurice/system_skills",
+                origin="system",
+                mutable=False,
+            )
+        ],
+        enabled_skills=["host"],
+        scope="local",
+    ).load()
+
+    assert registry.skills["host"].state == SkillState.LOADED
+    assert "host.dev_worker_model_update" in registry.tools
+    assert registry.commands["/add_agent"].available_in == ["global"]
+    assert registry.commands["/edit_agent"].available_in == ["global"]
 
 
 def test_loader_loads_system_reminders_skill() -> None:
@@ -320,8 +446,6 @@ def test_loader_loads_system_self_update_skill() -> None:
     assert "self_update.propose" in registry.tools
     assert "self_update.report_bug" in registry.tools
     assert "/auto_update_list" in registry.commands
-    assert "/auto_update_show" in registry.commands
-    assert "/auto_update_validate" in registry.commands
     assert "/auto_update_apply" in registry.commands
     assert "proposals" in skill.prompt
     assert "`self_update.report_bug`" in skill.prompt

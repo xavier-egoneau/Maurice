@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import json
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field
 
@@ -13,7 +14,6 @@ from maurice.host.runtime import _effective_model_config
 from maurice.kernel.config import ConfigBundle, load_workspace_config
 from maurice.kernel.contracts import Event, MauriceModel
 from maurice.kernel.events import EventStore
-from maurice.kernel.runs import RunStore
 from maurice.kernel.scheduler import JobStore
 from maurice.kernel.session import SessionRecord
 from maurice.kernel.skills import SkillLoader
@@ -156,7 +156,7 @@ def _automation_rows(workspace: Path, bundle: ConfigBundle) -> list[AutomationDa
     for agent in bundle.agents.agents.values():
         store = JobStore(workspace / "agents" / agent.id / "jobs.json")
         for job in store.list():
-            if str(job.status) == "completed" and not job.recurring:
+            if _hide_completed_one_shot_job(job):
                 continue
             rows.append(
                 AutomationDashboardRow(
@@ -206,6 +206,8 @@ def _session_rows(workspace: Path, events: list[Event]) -> list[SessionDashboard
             last_event=event.name,
             updated_at=_format_dt(event.time),
         )
+    for row in _worker_session_rows(workspace):
+        rows.setdefault((row.agent_id, row.session_id), row)
     return sorted(rows.values(), key=lambda row: row.updated_at, reverse=True)
 
 
@@ -269,7 +271,7 @@ def _log_rows(events: list[Event]) -> list[LogDashboardRow]:
             source=event.origin,
             agent_id=event.agent_id,
             session_id=event.session_id,
-            message=event.name,
+            message=_event_message(event),
         )
         for event in events
     ]
@@ -334,9 +336,6 @@ def _model_label(bundle: ConfigBundle, agent_id: str) -> str:
     model = _effective_model(bundle, agent_id)
     provider = model.get("provider") or "mock"
     name = model.get("name") or provider
-    protocol = model.get("protocol")
-    if protocol:
-        return f"{provider}/{protocol}"
     return f"{provider}/{name}"
 
 
@@ -385,12 +384,90 @@ def _event_level(event: Event) -> Literal["info", "warning", "error"]:
 
 
 def _telegram_configured(bundle: ConfigBundle) -> bool:
-    telegram = bundle.host.channels.get("telegram")
-    return isinstance(telegram, dict) and telegram.get("enabled", True) is not False
+    for config in bundle.host.channels.values():
+        if isinstance(config, dict) and config.get("adapter", "telegram") == "telegram" and config.get("enabled", True) is not False:
+            return True
+    return False
+
+
+def _hide_completed_one_shot_job(job: Any) -> bool:
+    status = str(job.status)
+    if job.recurring or status in {"scheduled", "running"}:
+        return False
+    return True
+
+
+def _worker_session_rows(workspace: Path) -> list[SessionDashboardRow]:
+    rows: list[SessionDashboardRow] = []
+    for status_path in sorted((workspace / "agents").glob("*/runs/dev_workers/*/status.json")):
+        agent_id = status_path.parts[-5]
+        run_id = status_path.parent.name
+        try:
+            data = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        status = str(data.get("status") or "recent")
+        task = str(data.get("task") or "dev worker").strip() or "dev worker"
+        updated_at = _parse_dt(str(data.get("updated_at") or "")) or _as_utc(datetime.fromtimestamp(status_path.stat().st_mtime))
+        rows.append(
+            SessionDashboardRow(
+                session_id=f"worker:{run_id}",
+                agent_id=agent_id,
+                origin="Worker dev",
+                status=_worker_status_label(status),
+                last_event=task,
+                updated_at=_format_dt(updated_at),
+            )
+        )
+    return rows
+
+
+def _worker_status_label(status: str) -> str:
+    if status == "running":
+        return "actif"
+    if status in {"failed", "blocked", "needs_arbitration"}:
+        return "attention"
+    return "recent"
+
+
+def _event_message(event: Event) -> str:
+    details = _event_details(event.payload)
+    return f"{event.name} - {details}" if details else event.name
+
+
+def _event_details(payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict) or not payload:
+        return ""
+    for key in ("error", "message", "summary", "reason"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return _compact(value.strip(), 120)
+    parts: list[str] = []
+    for key in ("tool_name", "action", "job_name", "status", "channel", "peer_id", "chat_id", "count", "completed"):
+        value = payload.get(key)
+        if value not in (None, "", [], {}):
+            parts.append(f"{key}={value}")
+    return _compact(", ".join(parts), 120)
+
+
+def _compact(value: str, limit: int) -> str:
+    text = " ".join(value.split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
 
 
 def _format_dt(value: datetime) -> str:
     return _as_utc(value).astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def _parse_dt(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _format_interval(seconds: int | None) -> str:

@@ -12,7 +12,6 @@ from maurice.kernel.contracts import (
     PermissionRule,
     ProviderChunk,
     SkillManifest,
-    SubagentRun,
     ToolDeclaration,
     ToolResult,
 )
@@ -175,7 +174,7 @@ def test_event_and_approval_contracts_validate_examples() -> None:
     assert approval.status == "pending"
 
 
-def test_skill_manifest_agent_subagent_and_dream_contracts_validate() -> None:
+def test_skill_manifest_agent_and_dream_contracts_validate() -> None:
     manifest = SkillManifest.model_validate(
         {
             "name": "memory",
@@ -189,10 +188,7 @@ def test_skill_manifest_agent_subagent_and_dream_contracts_validate() -> None:
                 {
                     "class": "fs.read",
                     "scope": {
-                        "paths": [
-                            "$agent_workspace/memory/**",
-                            "$workspace/.maurice/memory.sqlite",
-                        ]
+                        "paths": ["$agent_workspace/memory/**"]
                     },
                 }
             ],
@@ -227,16 +223,6 @@ def test_skill_manifest_agent_subagent_and_dream_contracts_validate() -> None:
             "permission_profile": "safe",
             "channels": ["telegram"],
             "event_stream": "$workspace/agents/main/events.jsonl",
-        }
-    )
-    run = SubagentRun.model_validate(
-        {
-            "id": "run_1",
-            "parent_agent_id": "main",
-            "task": "Run tests.",
-            "workspace": "$workspace/runs/run_1",
-            "write_scope": {"paths": ["$workspace/runs/run_1/**"]},
-            "permission_scope": {"classes": ["fs.read"]},
         }
     )
     dream_input = DreamInput.model_validate(
@@ -274,5 +260,4 @@ def test_skill_manifest_agent_subagent_and_dream_contracts_validate() -> None:
     assert manifest.daily.attachment == "daily.md"
     assert agent.id == "main"
     assert agent.credentials == []
-    assert run.state == "created"
     assert report.inputs[0].skill == "memory"

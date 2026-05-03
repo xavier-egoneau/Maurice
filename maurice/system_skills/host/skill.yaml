@@ -3,9 +3,8 @@ version: 0.1.0
 origin: system
 mutable: false
 required: false
-description: Inspect local Maurice host service state.
+description: Administer Maurice configuration and service state.
 config_namespace: skills.host
-available_in: [global]
 requires:
   binaries: []
   credentials: []
@@ -16,6 +15,7 @@ permissions:
   - class: host.control
     scope:
       actions:
+        - diagnostics.run
         - service.status
         - logs.read
         - credentials.list
@@ -24,9 +24,7 @@ permissions:
         - agents.create
         - agents.update
         - agents.delete
-        - subagent_templates.list
-        - subagent_templates.create
-        - subagent_runs.create
+        - dev_workers.configure
         - telegram.configure
 tools:
   - name: host.status
@@ -43,6 +41,20 @@ tools:
       input: local_mutable
       output: local_mutable
     executor: maurice.system_skills.host.tools.status
+  - name: host.doctor
+    description: Run the same workspace/runtime diagnostic report as `maurice doctor`.
+    input_schema:
+      type: object
+      properties: {}
+      required: []
+    permission_class: host.control
+    permission_scope:
+      actions:
+        - diagnostics.run
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.host.tools.doctor
   - name: host.logs
     description: Read recent Maurice event logs for an agent.
     input_schema:
@@ -206,95 +218,26 @@ tools:
       input: local_mutable
       output: local_mutable
     executor: maurice.system_skills.host.tools.agent_delete
-  - name: host.subagent_template_list
-    description: List reusable subagent templates and available central model profiles.
-    input_schema:
-      type: object
-      properties: {}
-      required: []
-    permission_class: host.control
-    permission_scope:
-      actions:
-        - subagent_templates.list
-    trust:
-      input: local_mutable
-      output: local_mutable
-    executor: maurice.system_skills.host.tools.subagent_template_list
-  - name: host.subagent_template_create
-    description: Create a reusable subagent template that references central model profile ids.
+  - name: host.dev_worker_model_update
+    description: Configure the model chain used by dev workers for an agent. Empty model_chain means workers inherit the parent agent model chain.
     input_schema:
       type: object
       properties:
-        template_id:
+        agent_id:
           type: string
-        description:
-          type: string
-        permission_profile:
-          type: string
-          enum: [safe, limited, power]
-          default: safe
-        skills:
-          type: array
-          items:
-            type: string
-        credentials:
-          type: array
-          items:
-            type: string
         model_chain:
           type: array
           items:
             type: string
-      required: [template_id]
+      required: [agent_id]
     permission_class: host.control
     permission_scope:
       actions:
-        - subagent_templates.create
+        - dev_workers.configure
     trust:
       input: local_mutable
       output: local_mutable
-    executor: maurice.system_skills.host.tools.subagent_template_create
-  - name: host.subagent_run_create
-    description: Create a disposable subagent run from a reusable template.
-    input_schema:
-      type: object
-      properties:
-        task:
-          type: string
-        template_id:
-          type: string
-        parent_agent_id:
-          type: string
-        context_summary:
-          type: string
-        write_paths:
-          type: array
-          items:
-            type: string
-        permission_classes:
-          type: array
-          items:
-            type: string
-        constraints:
-          type: array
-          items:
-            type: string
-        plan:
-          type: array
-          items:
-            type: string
-        requires_self_check:
-          type: boolean
-          default: false
-      required: [task, template_id]
-    permission_class: host.control
-    permission_scope:
-      actions:
-        - subagent_runs.create
-    trust:
-      input: local_mutable
-      output: local_mutable
-    executor: maurice.system_skills.host.tools.subagent_run_create
+    executor: maurice.system_skills.host.tools.dev_worker_model_update
   - name: host.telegram_bind
     description: Connect the configured Telegram bot to a durable agent. Secret values must be captured separately through host.request_secret if the bot token is missing.
     input_schema:
@@ -311,6 +254,7 @@ tools:
             type: integer
         allowed_chats:
           type: array
+          description: Chat ids autorises. Les ids utilisateurs fournis dans allowed_users sont automatiquement ajoutes comme chats prives.
           items:
             type: integer
       required: [agent_id]

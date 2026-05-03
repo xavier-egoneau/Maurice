@@ -35,7 +35,7 @@ from maurice.host.auth import (
 from maurice.host.channels import ChannelAdapterRegistry
 from maurice.host.command_registry import CommandRegistry, default_command_registry
 from maurice.host.client import MauriceClient
-from maurice.host.context import MauriceContext, build_command_callbacks, resolve_global_context
+from maurice.host.context import LocalConfig, MauriceContext, build_command_callbacks, resolve_global_context
 from maurice.host.context_meter import context_summary
 from maurice.host.credentials import (
     CredentialRecord, CredentialsStore, credentials_path,
@@ -61,12 +61,13 @@ from maurice.host.paths import (
     kernel_config_path, maurice_home, workspace_skills_config_path,
 )
 from maurice.host.project import config_path
+from maurice.host.project_registry import record_seen_project
 from maurice.host.runtime import (
     run_one_turn, _resolve_agent, _agent_system_prompt, _active_dev_project_path,
     _provider_for_config, _effective_model_config, _model_credential,
     _effective_model_label, _default_agent,
 )
-from maurice.host.secret_capture import capture_pending_secret
+from maurice.host.secret_capture import capture_pending_secret, clear_secret_capture
 from maurice.host.self_update import (
     apply_runtime_proposal, list_runtime_proposals, run_proposal_tests, validate_runtime_proposal,
 )
@@ -79,6 +80,7 @@ from maurice.host.telegram import (
     _telegram_set_my_commands,
     _int_list, _read_int_file, _write_int_file, _redact_secret,
     _telegram_sender_ids, _telegram_start_chat_action,
+    _telegram_allowed_chats_with_private_users,
 )
 from maurice.host.workspace import ensure_workspace_content_migrated, initialize_workspace
 from maurice.kernel.approvals import ApprovalStore
@@ -98,7 +100,6 @@ from maurice.kernel.providers import (
     ApiProvider, ChatGPTCodexProvider, MockProvider,
     OllamaCompatibleProvider, OpenAICompatibleProvider, UnsupportedProvider,
 )
-from maurice.kernel.runs import RunApprovalStore, RunCoordinationStore, RunExecutor, RunStore
 from maurice.kernel.scheduler import JobRunner, JobStatus, JobStore, SchedulerService, utc_now
 from maurice.kernel.session import SessionStore
 from maurice.kernel.contracts import ToolError, ToolResult
@@ -209,6 +210,8 @@ def _build_gateway_http_server(
         else Path(bundle.host.workspace_root) / "agents" / agent.id / "events.jsonl"
     )
     workspace = Path(bundle.host.workspace_root)
+    if active_project is not None:
+        record_seen_project(agent.workspace, active_project)
     work_root = active_project.expanduser().resolve() if active_project is not None else _gateway_git_root(workspace, agent.id)
     return GatewayHttpServer(
         host=host or bundle.host.gateway.host,
@@ -254,6 +257,13 @@ def _build_gateway_http_server(
             ),
             agent_id,
             session_id,
+        ),
+        web_secret_capture=lambda agent_id, session_id, _peer_id, text: _capture_web_secret(
+            workspace,
+            event_store=EventStore(event_stream),
+            agent_id=agent_id,
+            session_id=session_id,
+            text=text,
         ),
     )
 
@@ -311,6 +321,13 @@ def _build_gateway_http_server_for_context(
             agent_id,
             session_id,
         ),
+        web_secret_capture=lambda agent_id, session_id, _peer_id, text: _capture_web_secret(
+            ctx.context_root,
+            event_store=EventStore(ctx.events_path),
+            agent_id=agent_id,
+            session_id=session_id,
+            text=text,
+        ),
         web_token=web_token,
     )
 
@@ -364,6 +381,33 @@ def _gateway_telegram_poll(
         print("Maurice Telegram polling stopped")
 
 
+def _capture_web_secret(
+    workspace: Path,
+    *,
+    event_store: EventStore,
+    agent_id: str,
+    session_id: str,
+    text: str,
+) -> str | None:
+    captured = capture_pending_secret(
+        workspace,
+        agent_id=agent_id,
+        session_id=session_id,
+        value=text,
+    )
+    if captured is None:
+        return None
+    event_store.emit(
+        name="host.secret_capture.completed",
+        kind="audit",
+        origin="host.channel.web",
+        agent_id=agent_id,
+        session_id=session_id,
+        payload={"credential": captured.credential, "provider": captured.provider},
+    )
+    return f"Secret enregistre sous `{captured.credential}`. Tu peux continuer."
+
+
 
 def _gateway_web_agents(workspace: Path) -> list[dict[str, Any]]:
     bundle = load_workspace_config(workspace)
@@ -386,7 +430,7 @@ def _gateway_web_agents(workspace: Path) -> list[dict[str, Any]]:
 def _gateway_web_agents_for_context(ctx: MauriceContext) -> list[dict[str, Any]]:
     if ctx.scope == "global":
         return _gateway_web_agents(ctx.context_root)
-    provider = ctx.config.get("provider", {}) if isinstance(ctx.config, dict) else {}
+    provider = ctx.config.provider if isinstance(ctx.config, LocalConfig) else {}
     return [
         {
             "id": "main",
@@ -597,7 +641,11 @@ def _sync_telegram_commands(token: str, router: MessageRouter) -> None:
     try:
         _telegram_set_my_commands(
             token,
-            router.command_registry.telegram_bot_commands(scope="global"),
+            router.command_registry.telegram_bot_commands(
+                scope="global",
+                agent_id=router.default_agent_id,
+                has_active_project=False,
+            ),
         )
     except Exception as exc:
         print(f"Telegram command menu sync failed: {_redact_secret(str(exc), token)}")
@@ -852,7 +900,10 @@ def _gateway_router_for_local_context(ctx: MauriceContext) -> MessageRouter:
             agent_id=kwargs.get("agent_id") or "main",
             source_channel=kwargs.get("source_channel"),
             source_peer_id=kwargs.get("source_peer_id"),
-            source_metadata=kwargs.get("source_metadata"),
+            source_metadata=_source_metadata_with_active_project(
+                ctx,
+                kwargs.get("source_metadata"),
+            ),
             limits=kwargs.get("limits"),
             message_metadata=kwargs.get("message_metadata"),
             cancel_event=kwargs.get("cancel_event"),
@@ -1001,6 +1052,11 @@ def _gateway_router_for(
                         target_agent_id,
                         session_id,
                     ),
+                    "clear_conversation_state": lambda target_agent_id, session_id: _clear_gateway_conversation_state(
+                        workspace,
+                        target_agent_id,
+                        session_id,
+                    ),
                 },
             ),
         ),
@@ -1056,6 +1112,7 @@ def _run_turn_via_global_server(
             source_metadata=source_metadata,
             limits=limits,
             message_metadata=message_metadata,
+            approval_mode="store",
         ):
             if _cancel_requested(cancel_event):
                 MauriceClient(ctx).cancel_turn(agent_id=agent_id, session_id=session_id)
@@ -1155,6 +1212,7 @@ def _run_turn_via_local_server(
             source_metadata=source_metadata,
             limits=limits,
             message_metadata=message_metadata,
+            approval_mode="store",
         ):
             if _cancel_requested(cancel_event):
                 MauriceClient(ctx).cancel_turn(agent_id=agent_id, session_id=session_id)
@@ -1223,7 +1281,15 @@ def _reset_gateway_session(workspace: Path, agent_id: str, session_id: str) -> N
         store.reset(agent_id, session_id)
     except FileNotFoundError:
         store.create(agent_id, session_id=session_id)
-    clear_agent_creation_wizard(workspace, agent_id=agent_id, session_id=session_id)
+
+
+def _clear_gateway_conversation_state(workspace: Path, agent_id: str, session_id: str) -> list[str]:
+    cleared = []
+    if clear_agent_creation_wizard(workspace, agent_id=agent_id, session_id=session_id):
+        cleared.append("configuration d'agent")
+    if clear_secret_capture(workspace, agent_id=agent_id, session_id=session_id):
+        cleared.append("saisie de secret")
+    return cleared
 
 
 
@@ -1303,7 +1369,7 @@ def _compact_gateway_session_for_context(ctx: MauriceContext, agent_id: str, ses
 
 def _compact_gateway_session(workspace: Path, agent_id: str, session_id: str) -> str:
     summary = _compact_gateway_session_in_store(SessionStore(workspace / "sessions"), agent_id, session_id)
-    clear_agent_creation_wizard(workspace, agent_id=agent_id, session_id=session_id)
+    _clear_gateway_conversation_state(workspace, agent_id, session_id)
     return summary
 
 
@@ -1342,7 +1408,7 @@ def _compact_gateway_session_in_store(store: SessionStore, agent_id: str, sessio
 
 
 def _local_model_summary(ctx: MauriceContext) -> str:
-    provider = ctx.config.get("provider", {}) if isinstance(ctx.config, dict) else {}
+    provider = ctx.config.provider if isinstance(ctx.config, LocalConfig) else {}
     kind = provider.get("type", "mock")
     model = provider.get("model", "")
     return f"Modele courant : `{kind}:{model or 'mock'}`.\n\nChange-le depuis le bouton `Modele` du chat web."
@@ -1492,6 +1558,7 @@ def _gateway_agent_config_status(workspace: Path, agent_id: str) -> dict[str, An
             for item in model_chain
         ],
         "fallback": _gateway_fallback_status(model_chain),
+        "worker": _gateway_worker_status(bundle, agent),
         "provider": {
             "current": provider_key,
             "base_url": model.get("base_url"),
@@ -1500,6 +1567,7 @@ def _gateway_agent_config_status(workspace: Path, agent_id: str) -> dict[str, An
             "choices": _provider_choices_for_web(workspace, model),
         },
         "web_search": web_search,
+        "scheduler": _gateway_scheduler_status(bundle),
         "telegram": telegram_payload,
     }
 
@@ -1528,6 +1596,53 @@ def _gateway_fallback_status(model_chain: list[dict[str, Any]]) -> dict[str, Any
         "profile_id": model_chain[1]["id"],
         "provider": _provider_key_for_model(fallback),
         "model": fallback.get("name") or "mock",
+    }
+
+
+def _gateway_worker_status(bundle: ConfigBundle, agent) -> dict[str, Any]:
+    chain = _gateway_worker_model_chain(bundle, agent)
+    if not chain:
+        return {"enabled": False, "inherits_parent": True, "model_chain": []}
+    first = chain[0]["model"]
+    return {
+        "enabled": bool(agent.worker_model_chain),
+        "inherits_parent": not bool(agent.worker_model_chain),
+        "profile_id": chain[0]["id"],
+        "provider": _provider_key_for_model(first),
+        "model": first.get("name") or "mock",
+        "model_chain": [
+            {
+                "id": item["id"],
+                "provider": item["model"].get("provider") or "mock",
+                "provider_key": _provider_key_for_model(item["model"]),
+                "protocol": item["model"].get("protocol"),
+                "model": item["model"].get("name") or "mock",
+            }
+            for item in chain
+        ],
+    }
+
+
+def _gateway_worker_model_chain(bundle: ConfigBundle, agent) -> list[dict[str, Any]]:
+    if agent.worker_model_chain:
+        result = []
+        for model_id in agent.worker_model_chain:
+            profile = bundle.kernel.models.entries.get(model_id)
+            if profile is not None:
+                result.append({"id": model_id, "model": profile.model_dump(mode="json")})
+        if result:
+            return result
+    return _gateway_agent_model_chain(bundle, agent)
+
+
+def _gateway_scheduler_status(bundle: ConfigBundle) -> dict[str, Any]:
+    scheduler = bundle.kernel.scheduler
+    return {
+        "enabled": bool(scheduler.enabled),
+        "dreaming_enabled": bool(scheduler.dreaming_enabled),
+        "dreaming_time": scheduler.dreaming_time,
+        "daily_enabled": bool(scheduler.daily_enabled),
+        "daily_time": scheduler.daily_time,
     }
 
 
@@ -1569,6 +1684,11 @@ def _gateway_agent_config_update(workspace: Path, agent_id: str, payload: dict[s
             model,
             payload,
         )
+        worker_model, worker_credential_to_allow = _web_worker_model_from_agent_payload(
+            workspace,
+            model,
+            payload,
+        )
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     credentials = list(agent.credentials)
@@ -1576,13 +1696,20 @@ def _gateway_agent_config_update(workspace: Path, agent_id: str, payload: dict[s
         credentials.append(credential_to_allow)
     if fallback_credential_to_allow and fallback_credential_to_allow not in credentials:
         credentials.append(fallback_credential_to_allow)
+    if worker_credential_to_allow and worker_credential_to_allow not in credentials:
+        credentials.append(worker_credential_to_allow)
     try:
         _apply_web_search_config(workspace, payload)
+        _apply_gateway_scheduler_config(workspace, payload)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
 
     profile_id = _upsert_gateway_model_profile(workspace, model)
     fallback_profile_id = _upsert_gateway_model_profile(workspace, fallback_model) if fallback_model else None
+    worker_profile_id = _upsert_gateway_model_profile(workspace, worker_model) if worker_model else None
+    worker_model_chain = (
+        [worker_profile_id] if worker_profile_id else []
+    ) if "worker_enabled" in payload else None
     if agent.default and fallback_profile_id is None:
         _write_gateway_kernel_model(workspace, model)
         model_chain: list[str] = []
@@ -1599,6 +1726,7 @@ def _gateway_agent_config_update(workspace: Path, agent_id: str, payload: dict[s
         skills=skills,
         credentials=credentials,
         model_chain=model_chain,
+        worker_model_chain=worker_model_chain,
         confirmed_permission_elevation=True,
     )
     _apply_web_telegram_config(workspace, updated, payload)
@@ -1782,6 +1910,33 @@ def _web_fallback_model_from_agent_payload(
     return model, credential
 
 
+def _web_worker_model_from_agent_payload(
+    workspace: Path,
+    current_model: dict[str, Any],
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    if "worker_enabled" not in payload:
+        return None, None
+    if payload.get("worker_enabled") is not True:
+        return None, None
+    worker_provider = str(payload.get("worker_provider") or "").strip()
+    worker_model = str(payload.get("worker_model") or "").strip()
+    if not worker_provider:
+        raise ValueError("invalid_worker_provider")
+    model, credential = _web_model_from_payload(
+        workspace,
+        current_model,
+        payload,
+        provider_key="worker_provider",
+        model_key="worker_model",
+        base_url_key="worker_base_url",
+        api_key_key="worker_api_key",
+    )
+    if worker_model and str(model.get("name") or "") != worker_model:
+        raise ValueError("unknown_worker_model")
+    return model, credential
+
+
 def _web_model_from_payload(
     workspace: Path,
     current_model: dict[str, Any],
@@ -1916,6 +2071,51 @@ def _apply_web_search_config(workspace: Path, payload: dict[str, Any]) -> None:
     write_yaml_file(path, skills_data)
 
 
+def _apply_gateway_scheduler_config(workspace: Path, payload: dict[str, Any]) -> None:
+    scheduler_keys = {
+        "scheduler_enabled",
+        "dreaming_enabled",
+        "dreaming_time",
+        "daily_enabled",
+        "daily_time",
+    }
+    if not any(key in payload for key in scheduler_keys):
+        return
+    path = kernel_config_path(workspace)
+    data = read_yaml_file(path)
+    kernel = data.setdefault("kernel", {})
+    scheduler = kernel.setdefault("scheduler", {})
+    if "scheduler_enabled" in payload:
+        scheduler["enabled"] = bool(payload.get("scheduler_enabled"))
+    if "dreaming_enabled" in payload:
+        scheduler["dreaming_enabled"] = bool(payload.get("dreaming_enabled"))
+    if "daily_enabled" in payload:
+        scheduler["daily_enabled"] = bool(payload.get("daily_enabled"))
+    if "dreaming_time" in payload:
+        scheduler["dreaming_time"] = _web_local_time(payload.get("dreaming_time"), "dreaming_time")
+    if "daily_time" in payload:
+        scheduler["daily_time"] = _web_local_time(payload.get("daily_time"), "daily_time")
+    write_yaml_file(path, data)
+
+
+def _web_local_time(value: Any, name: str) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        raise ValueError(f"invalid_{name}")
+    raw = raw.replace("h", ":")
+    if ":" not in raw:
+        raw = f"{raw}:00"
+    hour_raw, minute_raw = raw.split(":", 1)
+    try:
+        hour = int(hour_raw)
+        minute = int(minute_raw)
+    except ValueError as exc:
+        raise ValueError(f"invalid_{name}") from exc
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError(f"invalid_{name}")
+    return f"{hour:02d}:{minute:02d}"
+
+
 def _apply_web_telegram_config(workspace: Path, agent, payload: dict[str, Any]) -> None:
     if "telegram_enabled" not in payload:
         return
@@ -1938,6 +2138,10 @@ def _apply_web_telegram_config(workspace: Path, agent, payload: dict[str, Any]) 
     allowed_users = _int_values_from_web(payload.get("telegram_allowed_users"))
     previous = channels.get(channel_key) if isinstance(channels.get(channel_key), dict) else {}
     allowed_chats = previous.get("allowed_chats") if isinstance(previous, dict) else []
+    allowed_chats = _telegram_allowed_chats_with_private_users(
+        allowed_users,
+        _int_list(allowed_chats),
+    )
     if enabled:
         channels[channel_key] = {
             "adapter": "telegram",
@@ -1945,7 +2149,7 @@ def _apply_web_telegram_config(workspace: Path, agent, payload: dict[str, Any]) 
             "agent": agent.id,
             "credential": credential,
             "allowed_users": allowed_users,
-            "allowed_chats": allowed_chats if isinstance(allowed_chats, list) else [],
+            "allowed_chats": allowed_chats,
             "status": "configured_pending_restart" if token or credential in load_workspace_credentials(workspace).credentials else "missing_credential",
         }
         if "telegram" not in agent.channels:
@@ -1982,7 +2186,7 @@ def _int_values_from_web(value: Any) -> list[int]:
 
 
 def _local_model_status(ctx: MauriceContext, agent_id: str) -> dict[str, Any]:
-    provider = ctx.config.get("provider", {}) if isinstance(ctx.config, dict) else {}
+    provider = ctx.config.provider if isinstance(ctx.config, LocalConfig) else {}
     if not isinstance(provider, dict):
         provider = {}
     current = str(provider.get("model") or "mock")
@@ -2014,7 +2218,7 @@ def _local_model_update(ctx: MauriceContext, agent_id: str, model_name: str) -> 
         data["provider"] = provider
     provider["model"] = model_name
     write_yaml_file(cfg_path, data)
-    if isinstance(ctx.config, dict):
+    if isinstance(ctx.config, LocalConfig):
         ctx.config.setdefault("provider", {})["model"] = model_name
     return _local_model_status(ctx, agent_id)
 

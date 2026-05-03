@@ -22,6 +22,9 @@ DEFAULT_MAX_RESULTS = 3
 DEFAULT_TIMEOUT_SECONDS = 20
 MAX_BYTES = 1_000_000
 USER_AGENT = "Maurice/0.1 veille-skill"
+DEFAULT_TIME_RANGE = "day"
+VALID_TIME_RANGES = {"day", "week", "month", "year"}
+MAX_SEEN_URLS = 200
 
 
 class WatchTopic(MauriceModel):
@@ -31,6 +34,7 @@ class WatchTopic(MauriceModel):
     tags: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     last_checked_at: datetime | None = None
+    seen_urls: list[str] = Field(default_factory=list)
 
 
 class WatchStoreFile(MauriceModel):
@@ -155,9 +159,14 @@ def run_watch(
         error=None,
     )
 
-
-def build_dream_input(context: PermissionContext, *, opener: Any = urlopen) -> DreamInput:
-    config = _load_workspace_config(context)
+def build_dream_input(
+    context: PermissionContext,
+    *,
+    opener: Any = urlopen,
+    config: dict[str, Any] | None = None,
+    all_skill_configs: dict[str, dict[str, Any]] | None = None,
+) -> DreamInput:
+    config = _merged_config(context, config or {}, all_skill_configs or {})
     collected = _collect_watch(
         context,
         config=config,
@@ -191,17 +200,39 @@ def _collect_watch(
         if topic_ids is None or topic.id in topic_ids
     ]
     base_url = _search_base_url(config or {})
+    time_range = _search_time_range(config or {})
+    fresh_only = _fresh_only(config or {})
     signals: list[dict[str, Any]] = []
     searched = False
     errors: list[str] = []
+    skipped: list[dict[str, str]] = []
+    seen_updates: dict[str, list[str]] = {}
     for topic in selected:
         if not base_url:
             signals.append(_topic_signal(topic, [], reason="search_not_configured"))
             continue
         searched = True
         try:
-            results = _search(base_url, topic.query, max_results=max_results, opener=opener)
-            signals.append(_topic_signal(topic, results))
+            results = _search(
+                base_url,
+                topic.query,
+                max_results=max_results,
+                opener=opener,
+                time_range=time_range,
+            )
+            seen_updates[topic.id] = [_result_key(result) for result in results if _result_key(result)]
+            selected_results = _fresh_results(topic, results) if fresh_only else results
+            if selected_results:
+                reason = "fresh_results" if fresh_only else "search_completed"
+                signals.append(_topic_signal(topic, selected_results, reason=reason))
+            else:
+                skipped.append(
+                    {
+                        "topic_id": topic.id,
+                        "topic": topic.topic,
+                        "reason": "no_new_results" if results else "no_results",
+                    }
+                )
         except Exception as exc:
             errors.append(f"{topic.topic}: {exc}")
             signals.append(_topic_signal(topic, [], reason="search_failed", error=str(exc)))
@@ -211,20 +242,29 @@ def _collect_watch(
         for topic in store.topics:
             if topic.id in selected_ids:
                 topic.last_checked_at = checked_at
+                if seen_updates.get(topic.id):
+                    topic.seen_urls = _merge_seen_urls(topic.seen_urls, seen_updates[topic.id])
         _save_store(context, store)
     limits = [
         f"At most {max_results} search results per watch topic.",
+        f"Search time range: {time_range}.",
+        "Only unseen result URLs are surfaced when fresh_only is enabled.",
         "Search results are external and must be verified before action.",
     ]
     if not base_url:
         limits.append("No SearxNG base URL configured; topics are surfaced without live search.")
     if errors:
         limits.append("Some watch searches failed: " + "; ".join(errors[:3]))
+    if skipped:
+        limits.append(f"{len(skipped)} watch topic(s) had no fresh result.")
     return {
         "topics": [topic.model_dump(mode="json") for topic in selected],
         "signals": signals,
         "searched": searched,
         "base_url": base_url,
+        "time_range": time_range,
+        "fresh_only": fresh_only,
+        "skipped": skipped,
         "limits": limits,
         "errors": errors,
     }
@@ -255,8 +295,15 @@ def _topic_signal(
     }
 
 
-def _search(base_url: str, query: str, *, max_results: int, opener: Any) -> list[dict[str, Any]]:
-    search_url = _searxng_search_url(base_url, query)
+def _search(
+    base_url: str,
+    query: str,
+    *,
+    max_results: int,
+    opener: Any,
+    time_range: str | None,
+) -> list[dict[str, Any]]:
+    search_url = _searxng_search_url(base_url, query, time_range=time_range)
     try:
         response = opener(_request(search_url), timeout=DEFAULT_TIMEOUT_SECONDS)
         with response:
@@ -341,16 +388,59 @@ def _search_base_url(config: dict[str, Any]) -> str:
     return value.strip()
 
 
+def _search_time_range(config: dict[str, Any]) -> str:
+    value = config.get("time_range") or config.get("freshness")
+    if not isinstance(value, str) or not value.strip():
+        return DEFAULT_TIME_RANGE
+    normalized = value.strip().lower()
+    return normalized if normalized in VALID_TIME_RANGES else DEFAULT_TIME_RANGE
+
+
+def _fresh_only(config: dict[str, Any]) -> bool:
+    value = config.get("fresh_only")
+    return True if value is None else bool(value)
+
+
 def _request(url: str) -> Request:
     return Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
 
 
-def _searxng_search_url(base_url: str, query: str) -> str:
+def _searxng_search_url(base_url: str, query: str, *, time_range: str | None = None) -> str:
     base = base_url if base_url.endswith("/") else base_url + "/"
     parsed = urlparse(urljoin(base, "search"))
     query_items = dict(parse_qsl(parsed.query, keep_blank_values=True))
     query_items.update({"q": query, "format": "json"})
+    if time_range:
+        query_items["time_range"] = time_range
     return urlunparse(parsed._replace(query=urlencode(query_items)))
+
+
+def _fresh_results(topic: WatchTopic, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen = {url for url in topic.seen_urls if url}
+    fresh = []
+    for result in results:
+        key = _result_key(result)
+        if key and key in seen:
+            continue
+        fresh.append(result)
+    return fresh
+
+
+def _result_key(result: dict[str, Any]) -> str:
+    url = result.get("url")
+    if isinstance(url, str) and url.strip():
+        return url.strip()
+    title = result.get("title")
+    return title.strip() if isinstance(title, str) else ""
+
+
+def _merge_seen_urls(existing: list[str], new: list[str]) -> list[str]:
+    merged: list[str] = []
+    for value in [*existing, *new]:
+        if not value or value in merged:
+            continue
+        merged.append(value)
+    return merged[-MAX_SEEN_URLS:]
 
 
 def _positive_int(value: Any, default: int, name: str) -> int:

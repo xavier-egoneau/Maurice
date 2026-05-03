@@ -27,8 +27,9 @@ skill_roots:
     mutable: true
 ```
 
-Folder-scoped state lives in `<project>/.maurice/`: sessions, events, approvals,
-memory, and server metadata.
+Folder-scoped project/server state lives in `<project>/.maurice/`: sessions,
+events, approvals, project notes, and server metadata. Durable `memory` skill
+storage stays agent-scoped under `$agent_workspace/memory/memory.sqlite`.
 
 `~/.maurice/config.yaml` also records the setup-level context preference:
 
@@ -142,17 +143,6 @@ kernel:
     daily_enabled: true
     daily_time: "09:30"
 
-  subagents:
-    templates:
-      coder:
-        id: coder
-        description: Coding worker
-        permission_profile: safe
-        skills: [filesystem, dev]
-        credentials: [ollama]
-        model_chain:
-          - ollama_gemma4
-
   events:
     retention_days: 30
 
@@ -165,6 +155,15 @@ kernel:
     reset_threshold: 0.90
     keep_recent_turns: 10
 ```
+
+The scheduler creates agent-scoped recurring jobs under
+`<workspace>/agents/<agent-id>/jobs.json`. `dreaming.run` is scheduled when
+`dreaming_enabled` is true and the agent has the `dreaming` skill enabled;
+`daily.digest` is scheduled when `daily_enabled` is true and the agent has the
+`daily` skill enabled. `maurice start` runs the scheduler by default in
+persistent assistant mode. Use the Maurice web **Agent > Automatismes** section
+or `maurice scheduler configure --workspace ...` to change times or
+enable/disable either job. See [automations](automations.md).
 
 ### agents.yaml
 
@@ -182,6 +181,8 @@ agents:
     model_chain:            # ordered model profile ids; first usable profile wins
       - anthropic_claude_opus_4_5
       - ollama_gemma4
+    worker_model_chain:     # optional dev-worker model ids; empty = inherit model_chain
+      - ollama_gemma4
     event_stream: /path/to/workspace/agents/main/events.jsonl
 ```
 
@@ -192,27 +193,29 @@ because its credential is not allowed or an auth token is missing. Older
 `kernel.model` and `agent.model` blocks are migrated into this structure and
 removed from the YAML; credentials themselves are not moved or rewritten.
 
+Development workers use `worker_model_chain` when it is configured on the
+parent agent. If it is empty, `/dev` workers inherit the parent agent
+`model_chain`. Users choose the worker provider/model from the agent config or
+with the CLI. Maurice may launch workers for parallelizable dev tasks, but the
+orchestration is bounded: at most 5 workers in one call, at most 10 active
+workers, and each worker receives a narrow standalone context plus a tool/time
+budget.
+
 The CLI exposes the same structure:
 
 ```bash
 maurice models list --workspace /path/to/workspace
 maurice models add --workspace /path/to/workspace --provider ollama --protocol ollama_chat --name gemma4 --base-url http://localhost:11434 --tier middle --capability text --capability vision
 maurice models assign coding ollama_gemma4 api_gpt_4o_mini --workspace /path/to/workspace
+maurice models worker coding ollama_gemma4 --workspace /path/to/workspace
 maurice models default ollama_gemma4 --workspace /path/to/workspace
-```
-
-Reusable subagent templates also reference central model profile ids through
-`model_chain`; they do not embed provider credentials or duplicate model config.
-Agents can create disposable runs from these templates:
-
-```bash
-maurice runs template-add coder --workspace /path/to/workspace --skill filesystem --model ollama_gemma4
-maurice runs create --workspace /path/to/workspace --task "Run tests" --template coder
 ```
 
 ### skills.yaml
 
-Per-skill config, keyed by `config_namespace` from each skill's `skill.yaml`:
+Per-skill config, keyed by skill name. Advanced `skill.yaml` manifests can
+override this with `config_namespace`, but lightweight user skills use
+`skills.<skill_name>` by convention:
 
 ```yaml
 skills:
@@ -220,6 +223,8 @@ skills:
   memory:
     backend: sqlite
   web:
+    search_provider: searxng
+    base_url: http://localhost:18080
     max_results: 10
   dev: {}
 ```

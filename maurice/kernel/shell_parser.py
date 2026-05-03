@@ -59,6 +59,7 @@ _ELEVATED: list[tuple[str, str]] = [
     (r"\bdd\b[^|]*\bof=/dev/", "dd writing to block device."),
     (r"\bdd\b[^|]*\bif=/dev/", "dd reading from block device."),
     # filesystem operations
+    (r"\b(rm|unlink)\b", "File deletion."),
     (r"\bmkfs\b", "Filesystem creation."),
     (r"\bfdisk\b", "Partition editor."),
     (r"\bparted\b", "Partition editor."),
@@ -67,11 +68,33 @@ _ELEVATED: list[tuple[str, str]] = [
     # redirects to sensitive directories
     (r">\s*/etc/", "Redirect to /etc/."),
     (r">>\s*/etc/", "Append to /etc/."),
+    (r">\s*/usr/", "Redirect to /usr/."),
+    (r">>\s*/usr/", "Append to /usr/."),
+    (r">\s*/bin/", "Redirect to /bin/."),
+    (r">>\s*/bin/", "Append to /bin/."),
+    (r">\s*/sbin/", "Redirect to /sbin/."),
+    (r">>\s*/sbin/", "Append to /sbin/."),
+    (r">\s*/lib(64)?/", "Redirect to /lib/."),
+    (r">>\s*/lib(64)?/", "Append to /lib/."),
     (r">\s*/boot/", "Redirect to /boot/."),
     (r">\s*/sys/", "Redirect to /sys/."),
     (r">\s*/proc/", "Redirect to /proc/."),
+    (r">\s*/dev/", "Redirect to /dev/."),
+    (r">>\s*/dev/", "Append to /dev/."),
+    (r">\s*/root/", "Redirect to /root/."),
+    (r">>\s*/root/", "Append to /root/."),
     (r">\s*~/\.ssh/", "Redirect to ~/.ssh/."),
     (r">\s*\$HOME/\.ssh/", "Redirect to ~/.ssh/."),
+    # mutations in operating system locations
+    (r"\b(rm|mv|cp|chmod|chown|touch|mkdir|tee)\b[^|;]*\s/(etc|usr|bin|sbin|lib|lib64|boot|sys|proc|dev|root)\b",
+     "Mutation of operating system location."),
+    # dotenv reads often expose credentials
+    (r"\b(cat|less|more|head|tail|grep|rg|sed|awk)\b[^|;]*(^|\s)(\.env(\.\S*)?|\S+/\.env(\.\S*)?)\b",
+     "Read of dotenv file."),
+    # data exfiltration or network upload tools
+    (r"\b(curl|wget)\b[^|;]*\s(-T|--upload-file|--post-file|-F|--form|-d|--data|--data-binary|--data-raw)\b",
+     "Network data submission."),
+    (r"\b(scp|sftp|ftp|rsync|rclone|nc|netcat|socat)\b", "Network transfer tool."),
     # dangerous permission changes
     (r"\bchmod\b[^|;]*\b(777|a\+w|o\+w|a\+x)\b", "World-writable or executable permission."),
     (r"\bchown\b[^|;]*\broot\b", "Ownership change to root."),
@@ -120,12 +143,12 @@ def parse(command: str) -> ParseResult:
         if re.search(pattern, cmd, re.IGNORECASE):
             return ParseResult(safe=False, risk_level="critical", reason=reason, too_complex=False)
 
-    for pattern, reason in _ELEVATED:
-        if re.search(pattern, cmd, re.IGNORECASE):
-            return ParseResult(safe=False, risk_level="elevated", reason=reason, too_complex=False)
-
     for pattern, reason in _COMPLEXITY:
         if re.search(pattern, cmd):
             return ParseResult(safe=False, risk_level="elevated", reason=reason, too_complex=True)
+
+    for pattern, reason in _ELEVATED:
+        if re.search(pattern, cmd, re.IGNORECASE):
+            return ParseResult(safe=False, risk_level="elevated", reason=reason, too_complex=False)
 
     return ParseResult(safe=True, risk_level="safe", reason="No hazard detected.", too_complex=False)

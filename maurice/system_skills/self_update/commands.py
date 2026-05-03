@@ -16,6 +16,7 @@ from maurice.host.self_update import (
 )
 
 MAX_DIFF_CHARS = 12000
+MAX_LIST_DIFF_CHARS = 1800
 
 
 def auto_update_list(context: CommandContext) -> CommandResult:
@@ -27,22 +28,28 @@ def auto_update_list(context: CommandContext) -> CommandResult:
             metadata={"command": "/auto_update_list"},
         )
 
-    lines = ["Propositions d'auto-update :"]
+    lines = ["Propositions d'auto-update :", ""]
     for proposal in proposals:
+        proposal_dir = _proposal_dir(workspace, proposal.id)
+        record = _read_record(proposal_dir) or {}
         target = _target_label(proposal.target)
+        risk = _read_text(proposal_dir / "risk.md").strip()
+        test_plan = _read_text(proposal_dir / "test_plan.md").strip()
+        diff = _read_text(proposal_dir / record.get("patch", "patch.diff"))
         lines.append(
-            f"- `{proposal.id}` [{proposal.status}] risk={proposal.risk} target={target}\n"
-            f"  {proposal.summary}"
+            f"## `{proposal.id}`\n"
+            f"- Statut : `{proposal.status}`\n"
+            f"- Risque : `{proposal.risk}`\n"
+            f"- Cible : {target}\n"
+            f"- Résumé : {proposal.summary}\n"
+            f"- Appliquer : `/auto_update_apply {proposal.id} confirm`"
         )
-    lines.extend(
-        [
-            "",
-            "Commandes :",
-            "- `/auto_update_show <id>` pour voir le diff et les checks",
-            "- `/auto_update_validate <id>` pour verifier sans appliquer",
-            "- `/auto_update_apply <id> confirm` pour appliquer apres revue",
-        ]
-    )
+        if risk:
+            lines.append(f"- Note risque : {risk}")
+        if test_plan:
+            lines.append(f"- Plan de test : {test_plan}")
+        lines.append(_diff_block(diff, max_chars=MAX_LIST_DIFF_CHARS))
+        lines.append("")
     return CommandResult(
         text="\n".join(lines),
         metadata={"command": "/auto_update_list", "count": len(proposals)},
@@ -135,8 +142,8 @@ def auto_update_apply(context: CommandContext) -> CommandResult:
     if not confirmed:
         return CommandResult(
             text=(
-                "Application non lancee. Relis d'abord le diff avec "
-                f"`/auto_update_show {proposal_id}`, puis applique avec "
+                "Application non lancee. Relis d'abord la proposition avec "
+                "`/auto_update_list`, puis applique avec "
                 f"`/auto_update_apply {proposal_id} confirm`."
             ),
             metadata={"command": "/auto_update_apply", "proposal_id": proposal_id, "confirmed": False},
@@ -224,11 +231,11 @@ def _check_lines(checks: list[Any]) -> list[str]:
     ]
 
 
-def _diff_block(diff: str) -> str:
+def _diff_block(diff: str, *, max_chars: int = MAX_DIFF_CHARS) -> str:
     if not diff:
         return "```diff\n# no diff\n```"
-    truncated = diff[:MAX_DIFF_CHARS]
-    suffix = "\n# diff truncated; open patch.diff for the full diff" if len(diff) > MAX_DIFF_CHARS else ""
+    truncated = diff[:max_chars]
+    suffix = "\n# diff truncated; open patch.diff for the full diff" if len(diff) > max_chars else ""
     return f"```diff\n{truncated.rstrip()}{suffix}\n```"
 
 

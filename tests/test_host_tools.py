@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from maurice.host.project import global_config_path
 from maurice.host.workspace import initialize_workspace
 from maurice.kernel.events import EventStore
 from maurice.kernel.permissions import PermissionContext
@@ -10,13 +13,29 @@ from maurice.system_skills.host.tools import (
     agent_delete,
     agent_list,
     agent_update,
+    dev_worker_model_update,
+    doctor,
     logs,
     status,
-    subagent_run_create,
-    subagent_template_create,
-    subagent_template_list,
     telegram_bind,
 )
+
+
+def test_host_tools_use_configured_workspace_from_local_context(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MAURICE_HOME", str(tmp_path / ".maurice"))
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    project = tmp_path / "project"
+    runtime.mkdir()
+    project.mkdir()
+    initialize_workspace(workspace, runtime)
+    write_yaml_file(global_config_path(), {"usage": {"mode": "global", "workspace": str(workspace)}})
+    context = PermissionContext(workspace_root=str(project), runtime_root=str(runtime))
+
+    result = agent_list({}, context)
+
+    assert result.ok is True
+    assert result.data["agents"][0]["workspace"] == str(workspace / "agents" / "main")
 
 
 def test_host_status_tool_reports_workspace_state(tmp_path) -> None:
@@ -31,6 +50,20 @@ def test_host_status_tool_reports_workspace_state(tmp_path) -> None:
     assert result.ok is True
     assert result.data["ok"] is True
     assert {"name": "default_agent", "state": "ok", "summary": "main"} in result.data["checks"]
+
+
+def test_host_doctor_tool_runs_workspace_diagnostics(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = Path.cwd()
+    initialize_workspace(workspace, runtime)
+    context = PermissionContext(workspace_root=str(workspace), runtime_root=str(runtime))
+
+    result = doctor({}, context)
+
+    assert result.ok is True
+    assert result.summary == "Maurice doctor is ok."
+    check_names = {check["name"] for check in result.data["checks"]}
+    assert {"runtime_root", "workspace_dirs", "model_profiles", "skills"}.issubset(check_names)
 
 
 def test_host_logs_tool_reads_recent_agent_events(tmp_path) -> None:
@@ -91,7 +124,7 @@ def test_host_agent_tools_manage_durable_agents(tmp_path) -> None:
     assert deleted.ok is True
 
 
-def test_host_subagent_template_tools_create_template_and_run(tmp_path) -> None:
+def test_host_dev_worker_model_update_sets_agent_worker_chain(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     runtime = tmp_path / "runtime"
     runtime.mkdir()
@@ -103,7 +136,7 @@ def test_host_subagent_template_tools_create_template_and_run(tmp_path) -> None:
         "protocol": "ollama_chat",
         "name": "gemma4",
         "base_url": "http://localhost:11434",
-        "credential": "ollama",
+        "credential": None,
         "tier": "middle",
         "capabilities": ["text", "tools"],
         "privacy": "local",
@@ -111,34 +144,14 @@ def test_host_subagent_template_tools_create_template_and_run(tmp_path) -> None:
     write_yaml_file(kernel_path, kernel_data)
     context = PermissionContext(workspace_root=str(workspace), runtime_root=str(runtime))
 
-    created = subagent_template_create(
-        {
-            "template_id": "coder",
-            "description": "Coding worker",
-            "permission_profile": "safe",
-            "skills": ["filesystem"],
-            "credentials": ["ollama"],
-            "model_chain": ["ollama_gemma4"],
-        },
+    result = dev_worker_model_update(
+        {"agent_id": "main", "model_chain": ["ollama_gemma4"]},
         context,
-    )
-    listed = subagent_template_list({}, context)
-    run = subagent_run_create(
-        {
-            "task": "Run tests.",
-            "template_id": "coder",
-            "write_paths": ["$workspace/runs/**"],
-            "permission_classes": ["fs.read"],
-        },
-        context,
-        agent_id="main",
     )
 
-    assert created.ok is True
-    assert listed.data["templates"][0]["model_chain"] == ["ollama_gemma4"]
-    assert run.ok is True
-    assert run.data["template"]["model_chain"] == ["ollama_gemma4"]
-    assert (workspace / "runs" / run.data["run"]["id"] / "mission.json").is_file()
+    assert result.ok is True
+    assert result.data["worker_model_chain"] == ["ollama_gemma4"]
+    assert load_workspace_config(workspace).agents.agents["main"].worker_model_chain == ["ollama_gemma4"]
 
 
 def test_host_telegram_bind_connects_existing_bot_to_agent(tmp_path) -> None:
@@ -158,5 +171,6 @@ def test_host_telegram_bind_connects_existing_bot_to_agent(tmp_path) -> None:
     assert result.ok is True
     assert bundle.host.channels["telegram"]["agent"] == "paul"
     assert bundle.host.channels["telegram"]["allowed_users"] == [123]
+    assert bundle.host.channels["telegram"]["allowed_chats"] == [123]
     assert bundle.agents.agents["paul"].channels == ["telegram"]
     assert "telegram" not in bundle.agents.agents["main"].channels

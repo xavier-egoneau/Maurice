@@ -21,15 +21,23 @@ from maurice.host.project import (
     maurice_dir,
     GITIGNORE_CONTENT,
 )
+from maurice.host.project_registry import list_known_projects, list_machine_projects
 from maurice.host.server import MauriceServer, _send, _recv_line
 from maurice.host.client import MauriceClient, _desired_server_meta, _runtime_hash_files
 from maurice.host.context import resolve_global_context
 from maurice.host.workspace import initialize_workspace
+from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.config import load_workspace_config
+from maurice.kernel.providers import MockProvider
 
 
 # ---------------------------------------------------------------------------
 # project root resolution
+
+@pytest.fixture(autouse=True)
+def _isolated_maurice_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAURICE_HOME", str(tmp_path / ".maurice_home"))
+
 
 class TestFindProjectRoot:
     def test_finds_git_root(self, tmp_path):
@@ -213,6 +221,8 @@ class TestMauriceServer:
         assert "done" in types
         done = next(e for e in events if e["type"] == "done")
         assert done["status"] == "completed"
+        assert list_known_projects(server.ctx.agent_workspace_root)[0]["path"] == str(tmp_path.resolve())
+        assert list_machine_projects()[0]["path"] == str(tmp_path.resolve())
 
     def test_global_context_turn_returns_done(self, tmp_path):
         workspace = tmp_path / "workspace"
@@ -311,6 +321,48 @@ class TestMauriceServer:
         assert "filesystem.write" in approved_tools
         done = next(e for e in events if e["type"] == "done")
         assert done["status"] == "completed"
+
+    def test_store_approval_mode_creates_pending_approval_without_socket_prompt(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _write_mock_config(tmp_path)
+
+        def fake_provider(_cfg, message=""):
+            return MockProvider(
+                [
+                    {
+                        "type": "tool_call",
+                        "tool_call": {
+                            "id": "call_1",
+                            "name": "web.search",
+                            "arguments": {"query": "Demis Hassabis"},
+                        },
+                    },
+                    {"type": "status", "status": "completed"},
+                ]
+            )
+
+        monkeypatch.setattr("maurice.host.server._build_provider", fake_provider)
+        srv_sock, cli_sock = self._make_pair()
+        server = MauriceServer(tmp_path)
+        thread = threading.Thread(target=_run_connection, args=(server, srv_sock), daemon=True)
+        thread.start()
+
+        client = MauriceClient(tmp_path)
+        client._sock = cli_sock
+        client._buf = bytearray()
+        events = list(client.run_turn("search", session_id="telegram:123", approval_mode="store"))
+        cli_sock.close()
+        thread.join(timeout=2.0)
+
+        assert not any(event.get("type") == "approval_required" for event in events)
+        tool_result = next(event for event in events if event.get("type") == "tool_result")
+        assert tool_result["error"] == "approval_required"
+        pending = ApprovalStore(approvals_path(tmp_path)).list(status="pending")
+        assert pending[0].tool_name == "web.search"
+        assert pending[0].session_id == "telegram:123"
 
 
 class TestMauriceClient:

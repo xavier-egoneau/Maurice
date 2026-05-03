@@ -6,6 +6,8 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib import import_module
+import json
+from pathlib import Path
 import re
 from typing import Any, Literal
 
@@ -43,6 +45,7 @@ class RuntimeCommand:
     renderer: str = "markdown"
     aliases: tuple[str, ...] = ()
     available_in: tuple[CommandScope, ...] = ("local", "global")
+    project_required: bool = False
 
     def all_names(self) -> tuple[str, ...]:
         return (self.name, *self.aliases)
@@ -75,12 +78,26 @@ class CommandRegistry:
         command = self.command_for_text(context.message_text)
         if command is None or command.handler is None:
             return None
+        if command.project_required and not _context_has_active_project(context):
+            return _missing_project_result(command)
         return command.handler(context)
 
-    def help_text(self, *, title: str = "Commandes Maurice", scope: str | None = None) -> str:
+    def help_text(
+        self,
+        *,
+        title: str = "Commandes Maurice",
+        scope: str | None = None,
+        agent_id: str | None = None,
+        has_active_project: bool = True,
+    ) -> str:
         unique: dict[str, RuntimeCommand] = {}
         for command in self._commands.values():
-            if command.available_for(scope):
+            if _command_visible(
+                command,
+                scope=scope,
+                agent_id=agent_id,
+                has_active_project=has_active_project,
+            ):
                 unique[command.name] = command
         grouped: dict[str, list[RuntimeCommand]] = defaultdict(list)
         for command in unique.values():
@@ -98,10 +115,21 @@ class CommandRegistry:
                 lines.append(f"{command.name} - {command.description}")
         return "\n".join(lines)
 
-    def telegram_bot_commands(self, *, scope: str | None = None) -> list[dict[str, str]]:
+    def telegram_bot_commands(
+        self,
+        *,
+        scope: str | None = None,
+        agent_id: str | None = None,
+        has_active_project: bool = True,
+    ) -> list[dict[str, str]]:
         unique: dict[str, RuntimeCommand] = {}
         for command in self._commands.values():
-            if command.available_for(scope):
+            if _command_visible(
+                command,
+                scope=scope,
+                agent_id=agent_id,
+                has_active_project=has_active_project,
+            ):
                 unique[command.name] = command
         commands = []
         for command in sorted(unique.values(), key=lambda item: item.name):
@@ -133,6 +161,7 @@ class CommandRegistry:
                 renderer=command.renderer,
                 aliases=tuple(command.aliases),
                 available_in=tuple(command.available_in),
+                project_required=command.project_required,
             )
             if all(command_registry.command_for_text(name) is None for name in runtime.all_names()):
                 command_registry.register(runtime)
@@ -174,12 +203,6 @@ def core_commands() -> list[RuntimeCommand]:
             owner="system",
             handler=_model_handler,
         ),
-        RuntimeCommand(
-            name="/setup",
-            description="configurer Maurice ou passer en assistant de bureau",
-            owner="system",
-            handler=_setup_handler,
-        ),
     ]
 
 
@@ -204,6 +227,90 @@ def default_command_registry() -> CommandRegistry:
     return registry
 
 
+def _command_visible_for_agent(command: RuntimeCommand, agent_id: str | None) -> bool:
+    if agent_id in {None, "", "main"}:
+        return True
+    if command.name in {"/add_agent", "/edit_agent"}:
+        return False
+    return True
+
+
+def _command_visible(
+    command: RuntimeCommand,
+    *,
+    scope: str | None,
+    agent_id: str | None,
+    has_active_project: bool,
+) -> bool:
+    return (
+        command.available_for(scope)
+        and _command_visible_for_agent(command, agent_id)
+        and (not command.project_required or has_active_project)
+    )
+
+
+def _context_has_active_project(context: CommandContext) -> bool:
+    callbacks = context.callbacks
+    if callbacks.get("active_project_path") or callbacks.get("project_root"):
+        return True
+    has_active_project = callbacks.get("has_active_project")
+    if callable(has_active_project):
+        return bool(has_active_project(context.agent_id, context.session_id))
+    if has_active_project is not None:
+        return bool(has_active_project)
+    return _dev_state_has_active_project(context)
+
+
+def _dev_state_has_active_project(context: CommandContext) -> bool:
+    for path in _dev_state_candidates(context):
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        active_path = data.get("active_project_path")
+        if isinstance(active_path, str) and active_path.strip():
+            return True
+        active_name = data.get("active_project")
+        if isinstance(active_name, str) and active_name.strip():
+            return True
+    return False
+
+
+def _dev_state_candidates(context: CommandContext) -> list[Path]:
+    callbacks = context.callbacks
+    candidates: list[Path] = []
+    content_root = callbacks.get("content_root")
+    if content_root:
+        candidates.append(Path(content_root).expanduser().resolve().parent / ".dev_state.json")
+    agent_workspace = callbacks.get("agent_workspace")
+    if agent_workspace:
+        candidates.append(Path(agent_workspace).expanduser().resolve() / ".dev_state.json")
+    else:
+        workspace = callbacks.get("workspace")
+        if workspace:
+            candidates.append(
+                Path(workspace).expanduser().resolve()
+                / "agents"
+                / context.agent_id
+                / ".dev_state.json"
+            )
+    return candidates
+
+
+def _missing_project_result(command: RuntimeCommand) -> CommandResult:
+    return CommandResult(
+        text=(
+            f"La commande `{command.name}` demande un projet actif.\n\n"
+            "Ouvre d'abord un projet avec `/project <nom-ou-chemin>`, ou lance Maurice depuis le dossier du projet."
+        ),
+        metadata={"command": command.name, "blocked": "missing_active_project"},
+    )
+
+
 def command_name_from_text(text: str) -> str:
     stripped = text.strip()
     if not stripped.startswith("/"):
@@ -217,34 +324,63 @@ def _help_handler(context: CommandContext) -> CommandResult:
     scope = context.callbacks.get("scope")
     scope_value = str(scope) if scope is not None else None
     if isinstance(registry, CommandRegistry):
-        text = registry.help_text(scope=scope_value)
+        text = registry.help_text(
+            scope=scope_value,
+            agent_id=context.agent_id,
+            has_active_project=_context_has_active_project(context),
+        )
     else:
-        text = default_command_registry().help_text(scope=scope_value)
+        text = default_command_registry().help_text(
+            scope=scope_value,
+            agent_id=context.agent_id,
+            has_active_project=_context_has_active_project(context),
+        )
     return CommandResult(text=text, metadata={"command": "/help"})
 
 
 def _new_handler(context: CommandContext) -> CommandResult:
+    cleared = _clear_conversation_state(context)
     reset_session = context.callbacks.get("reset_session")
     if reset_session is not None:
         reset_session(context.agent_id, context.session_id)
+    text = "Session reinitialisee. On repart proprement."
+    if cleared:
+        text += "\n\nFlux en cours annule : " + ", ".join(cleared) + "."
     return CommandResult(
-        text="Session reinitialisee. On repart proprement.",
-        metadata={"command": "/new"},
+        text=text,
+        metadata={"command": "/new", "cleared_state": cleared, "clears_history": True},
     )
 
 
 def _stop_handler(context: CommandContext) -> CommandResult:
     cancel_turn = context.callbacks.get("cancel_turn")
     cancelled = bool(cancel_turn(context.agent_id, context.session_id)) if cancel_turn is not None else False
-    text = (
-        "Annulation demandee pour la reponse en cours."
-        if cancelled
-        else "Aucune reponse en cours a annuler dans cette session."
-    )
+    cleared = _clear_conversation_state(context)
+    parts = []
+    if cancelled:
+        parts.append("Annulation demandee pour la reponse en cours.")
+    if cleared:
+        parts.append("Flux en cours annule : " + ", ".join(cleared) + ".")
+    if not parts:
+        parts.append("Aucune reponse ni flux en cours a annuler dans cette session.")
     return CommandResult(
-        text=text,
-        metadata={"command": "/stop", "cancelled": cancelled},
+        text="\n\n".join(parts),
+        metadata={"command": "/stop", "cancelled": cancelled, "cleared_state": cleared},
     )
+
+
+def _clear_conversation_state(context: CommandContext) -> list[str]:
+    callback = context.callbacks.get("clear_conversation_state")
+    if callback is None:
+        return []
+    cleared = callback(context.agent_id, context.session_id)
+    if isinstance(cleared, list):
+        return [str(item) for item in cleared if str(item)]
+    if isinstance(cleared, tuple):
+        return [str(item) for item in cleared if str(item)]
+    if isinstance(cleared, str) and cleared:
+        return [cleared]
+    return []
 
 
 def _compact_handler(context: CommandContext) -> CommandResult:
@@ -252,10 +388,10 @@ def _compact_handler(context: CommandContext) -> CommandResult:
     if compact_session is None:
         return CommandResult(
             text="Compaction indisponible sur cette surface.",
-            metadata={"command": "/compact"},
+            metadata={"command": "/compact", "preserve_view": True},
         )
     text = compact_session(context.agent_id, context.session_id)
-    return CommandResult(text=str(text), metadata={"command": "/compact"})
+    return CommandResult(text=str(text), metadata={"command": "/compact", "preserve_view": True})
 
 
 def _model_handler(context: CommandContext) -> CommandResult:

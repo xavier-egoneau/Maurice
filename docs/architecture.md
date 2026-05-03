@@ -1,9 +1,9 @@
 # Architecture
 
-Maurice is one runtime with two context levels. Folder and desktop-assistant
-usage do not create two projects or two agent stacks; they resolve different
-`MauriceContext` instances and feed the same kernel, server, permission,
-session, event, memory, and skill machinery.
+Maurice is one runtime with two conversation surfaces. Folder and
+desktop-assistant usage do not create two products or two agent stacks; they
+resolve different `MauriceContext` instances and feed the same kernel, server,
+permission, session, event, memory, and skill machinery.
 
 ## Layers
 
@@ -29,7 +29,8 @@ Boundary rules:
 
 It carries:
 
-- `scope`: `local` or `global`
+- `scope`: `local` or `global` (`local` means punctual folder surface,
+  `global` means persistent assistant surface)
 - `lifecycle`: `transient` or `daemon`
 - `runtime_root`: Maurice installation/runtime code
 - `context_root`: folder or global workspace being served
@@ -37,7 +38,8 @@ It carries:
 - `content_root`: user-facing files for that context
 - `active_project_root`: project folder used for relative work, when one is
   active
-- sessions, events, approvals, agent memory, server pid/socket/meta paths
+- sessions, events, approvals, agent workspace, agent memory, server
+  pid/socket/meta paths
 - config, enabled skills, skill config, skill roots
 
 The central rule is simple: once a context is resolved, host wiring should use
@@ -64,18 +66,18 @@ a context rule, not a project discovery system:
 - In older global dev flows, the active project may be an agent-owned project
   selected under `<workspace>/agents/<agent-id>/content/`.
 
-Global agents may keep a per-agent list of projects they have already seen. The
-list is stored under `<workspace>/agents/<agent-id>/projects.json`, next to that
-agent's content and runtime state. That list is only history: Maurice records a
-project when it was explicitly active; it does not scan the filesystem or infer
-active projects from an IDE. A known project becomes active only when the user
-launches a context from that folder or selects it explicitly.
+Maurice records known projects only from explicit activity. Each turn with an
+active project writes both `~/.maurice/projects.json` for machine-level history
+and the current agent's `projects.json` for contribution history. That list is
+only history: Maurice does not scan the filesystem or infer active projects from
+an IDE. A known project becomes active only when the user launches a context from
+that folder or selects it explicitly.
 
-## Folder Context
+## Punctual Folder Surface
 
-Folder context is project-centered and transient. It is used when a user stands
-in a folder and launches Maurice directly, like a code assistant focused on that
-folder.
+The folder surface is project-centered and transient. It is used when a user
+stands in a folder and launches Maurice directly, like a code assistant focused
+on that folder.
 
 ```text
 <project>/
@@ -96,7 +98,10 @@ At this level:
 
 - `context_root`, `content_root` and the permission `$workspace` all point at
   the project folder.
-- memory is `./.maurice/memory.sqlite`.
+- `$agent_workspace` points at the current agent workspace; durable memory is
+  `$agent_workspace/memory/memory.sqlite`.
+- project memory stays in project files under `./.maurice/`, such as `PLAN.md`,
+  `DECISIONS.md`, `AGENTS.md`, and `dreams.md`.
 - `./skills` and configured user skill roots can be loaded alongside system
   skills.
 - the local server is transient and can be reused while its `server.meta` stays
@@ -180,7 +185,21 @@ Both lifecycles use `MauriceServer(ctx)`.
 The daemon path also writes service metadata so `service status` can report
 whether the running process matches the current context. Gateway turns route
 through the global server when it is running; scheduler jobs build their handlers
-from the same global context.
+from the same global context. Dreaming and daily jobs are configured by
+`kernel.scheduler`, stored per agent under `jobs.json`, and documented in
+[automations](automations.md).
+
+## Workers And Long Missions
+
+Development workers are temporary helper executions spawned by a parent agent.
+They are bounded, receive narrow context, report back to the parent, and do not
+own product direction or durable user-facing state.
+
+Long missions are a separate future concept for durable autonomous work that
+must survive one turn or wait on events over time. They should be explicit,
+agent-owned, budgeted, observable, cancellable, and approval-gated. Do not
+reintroduce generic persistent runs for this; model the product concept as
+missions when the need is clear. See [missions](missions.md).
 
 ## Config
 

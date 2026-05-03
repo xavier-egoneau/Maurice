@@ -30,6 +30,7 @@ def create_agent(
     credentials: list[str] | None = None,
     channels: list[str] | None = None,
     model_chain: list[str] | None = None,
+    worker_model_chain: list[str] | None = None,
     make_default: bool = False,
     confirmed_permission_elevation: bool = False,
 ) -> AgentConfig:
@@ -60,6 +61,7 @@ def create_agent(
         status="active",
         channels=channels or [],
         model_chain=model_chain or [],
+        worker_model_chain=worker_model_chain or [],
         event_stream=str(agent_workspace / "events.jsonl"),
     )
     bundle.agents.agents[agent_id] = agent
@@ -79,6 +81,7 @@ def update_agent(
     credentials: list[str] | None = None,
     channels: list[str] | None = None,
     model_chain: list[str] | None = None,
+    worker_model_chain: list[str] | None = None,
     make_default: bool | None = None,
     confirmed_permission_elevation: bool = False,
 ) -> AgentConfig:
@@ -101,6 +104,7 @@ def update_agent(
             "credentials": credentials if credentials is not None else current.credentials,
             "channels": channels if channels is not None else current.channels,
             "model_chain": model_chain if model_chain is not None else current.model_chain,
+            "worker_model_chain": worker_model_chain if worker_model_chain is not None else current.worker_model_chain,
             "default": make_default if make_default is not None else current.default,
         }
     )

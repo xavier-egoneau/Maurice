@@ -65,8 +65,9 @@ from maurice.host.telegram import (
     _telegram_send_chat_action, _telegram_api_json, _telegram_update_to_inbound,
     _int_list, _read_int_file, _write_int_file, _redact_secret,
     _telegram_sender_ids, _telegram_start_chat_action,
+    _telegram_allowed_chats_with_private_users,
 )
-from maurice.host.workspace import ensure_workspace_content_migrated, initialize_workspace
+from maurice.host.workspace import DEFAULT_SEARXNG_URL, ensure_workspace_content_migrated, initialize_workspace
 from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.compaction import CompactionConfig
 from maurice.kernel.config import (
@@ -85,7 +86,6 @@ from maurice.kernel.providers import (
     ApiProvider, ChatGPTCodexProvider, MockProvider,
     OllamaCompatibleProvider, OpenAICompatibleProvider, UnsupportedProvider,
 )
-from maurice.kernel.runs import RunApprovalStore, RunCoordinationStore, RunExecutor, RunStore
 from maurice.kernel.scheduler import JobRunner, JobStatus, JobStore, SchedulerService, utc_now
 from maurice.kernel.session import SessionStore
 from maurice.kernel.skills import SkillContext, SkillLoader
@@ -96,7 +96,6 @@ PROVIDER_HELP = {
     "openai_api": ("API compatible OpenAI", "URL + cle API, pour OpenAI ou un provider compatible"),
     "ollama": ("Ollama", "modele local ou serveur Ollama"),
 }
-DEFAULT_SEARXNG_URL = "http://localhost:8080"
 DEFAULT_WORKSPACE = Path.home() / "Documents" / "workspace_maurice"
 
 
@@ -539,7 +538,7 @@ def _ask_telegram_config(workspace: Path, *, existing: dict[str, object]) -> dic
     print("Dans Telegram, parle a @BotFather, cree un bot avec /newbot, puis colle ici le token qu'il te donne.")
     print("Pour trouver ton id Telegram, tu peux envoyer /start a @userinfobot ou @RawDataBot.")
     print("Tu peux mettre plusieurs ids autorises, separes par des virgules.")
-    _print_dim("Pour les groupes, on securise d'abord par l'id de l'utilisateur qui parle au bot.")
+    _print_dim("Les groupes restent bloques tant que leur chat id n'est pas ajoute explicitement.")
     if not _ask_yes_no("Configurer un bot Telegram", default=default_enabled):
         return None
 
@@ -568,7 +567,7 @@ def _ask_telegram_config(workspace: Path, *, existing: dict[str, object]) -> dic
         "agent": "main",
         "credential": credential_name,
         "allowed_users": allowed_users,
-        "allowed_chats": [],
+        "allowed_chats": _telegram_allowed_chats_with_private_users(allowed_users, []),
         "status": "configured_pending_adapter",
     }
 

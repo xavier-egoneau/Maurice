@@ -14,46 +14,99 @@ dependencies:
     - filesystem
     - memory
 permissions: []
-tools: []
+tools:
+  - name: dev.spawn_workers
+    description: Spawn bounded development workers for parallelizable project tasks. Workers use the parent agent's worker_model_chain when configured, otherwise the parent model_chain.
+    input_schema:
+      type: object
+      properties:
+        workers:
+          type: array
+          items:
+            type: object
+            properties:
+              task:
+                type: string
+              context_summary:
+                type: string
+              relevant_files:
+                type: array
+                items:
+                  type: string
+              expected_output:
+                type: string
+              write_paths:
+                type: array
+                items:
+                  type: string
+            required: [task]
+        max_workers:
+          type: integer
+          minimum: 1
+          maximum: 5
+        max_tool_iterations:
+          type: integer
+          minimum: 1
+          maximum: 20
+        max_seconds_per_worker:
+          type: integer
+          minimum: 30
+          maximum: 900
+      required: [workers]
+    permission_class: agent.spawn
+    permission_scope:
+      agents:
+        - dev_worker
+      max_parallel: 5
+      max_depth: 1
+    trust:
+      input: local_mutable
+      output: skill_generated
+    executor: maurice.system_skills.dev.tools.spawn_workers
 commands:
   - name: /projects
     description: lister les projets de l'agent courant
     handler: maurice.system_skills.dev.commands.projects
     renderer: markdown
-    available_in: [global]
   - name: /project
     description: ouvrir ou afficher le projet actif
     handler: maurice.system_skills.dev.commands.project
     renderer: markdown
-    available_in: [global]
   - name: /plan
     description: cadrer puis creer PLAN.md pour le projet actif
     handler: maurice.system_skills.dev.commands.plan
     renderer: markdown
+    project_required: true
   - name: /tasks
     description: afficher les taches du projet actif
     handler: maurice.system_skills.dev.commands.tasks
     renderer: markdown
+    project_required: true
   - name: /decision
     description: afficher ou ajouter une decision projet
     handler: maurice.system_skills.dev.commands.decision
     renderer: markdown
+    project_required: true
   - name: /dev
     description: executer le plan actif en autonomie jusqu'a blocage ou validation requise
     handler: maurice.system_skills.dev.commands.dev
     renderer: markdown
+    project_required: true
   - name: /check
     description: verifier l'etat du projet actif
     handler: maurice.system_skills.dev.commands.check
     renderer: markdown
+    project_required: true
   - name: /review
     description: relire l'etat du projet actif avant validation
     handler: maurice.system_skills.dev.commands.review
     renderer: markdown
+    project_required: true
   - name: /commit
     description: preparer un commit pour le projet actif
     handler: maurice.system_skills.dev.commands.commit
     renderer: markdown
+    project_required: true
 backend: null
 storage: null
 dreams:
@@ -61,3 +114,4 @@ dreams:
   input_builder: maurice.system_skills.dev.commands.build_dream_input
 events:
   state_publisher: null
+tools_module: maurice.system_skills.dev.tools

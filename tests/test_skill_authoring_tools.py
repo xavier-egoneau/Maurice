@@ -38,8 +38,10 @@ def test_skills_create_writes_user_skill_under_workspace(tmp_path) -> None:
     registry = SkillLoader(roots(tmp_path), enabled_skills=["notes_helper"]).load()
 
     assert result.ok
-    assert (skill_dir / "skill.yaml").is_file()
-    assert (skill_dir / "prompt.md").is_file()
+    assert (skill_dir / "skill.md").is_file()
+    assert not (skill_dir / "skill.yaml").exists()
+    assert not (skill_dir / "prompt.md").exists()
+    assert not (skill_dir / "tools.py").exists()
     assert (skill_dir / "daily.md").is_file()
     assert registry.skills["notes_helper"].state == SkillState.LOADED
     assert registry.skills["notes_helper"].daily
@@ -61,7 +63,24 @@ def test_skills_create_prefers_context_user_root(tmp_path) -> None:
     assert result.ok
     assert result.data["path"] == str(project_skills / "local_notes")
     assert not (global_skills / "local_notes").exists()
-    assert (project_skills / "local_notes" / "skill.yaml").is_file()
+    assert (project_skills / "local_notes" / "skill.md").is_file()
+
+
+def test_skills_create_can_add_code_scaffold(tmp_path) -> None:
+    permission_context = context(tmp_path)
+
+    result = create(
+        {"name": "calendar_notes", "description": "Reads calendar notes.", "with_code": True},
+        permission_context,
+        roots(tmp_path),
+    )
+
+    skill_dir = tmp_path / "workspace" / "skills" / "calendar_notes"
+    registry = SkillLoader(roots(tmp_path), enabled_skills=["calendar_notes"]).load()
+
+    assert result.ok
+    assert (skill_dir / "tools.py").is_file()
+    assert registry.skills["calendar_notes"].manifest.dreams.input_builder == "tools.build_dream_input"
 
 
 def test_skills_create_rejects_collision_with_system_skill(tmp_path) -> None:

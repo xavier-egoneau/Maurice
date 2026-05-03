@@ -33,7 +33,5 @@ Use `self_update.propose` when you have a concrete behavior change or patch to
 review.
 
 Users can review and apply proposals from any channel with:
-- `/auto_update_list`
-- `/auto_update_show <proposal_id>`
-- `/auto_update_validate <proposal_id>`
+- `/auto_update_list` to see pending proposals, compact diffs, and exact apply commands
 - `/auto_update_apply <proposal_id> confirm`

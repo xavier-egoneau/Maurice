@@ -698,6 +698,8 @@ body.tools-hidden .tool-activity { display: none; }
 #agent-model-select,
 #agent-fallback-provider,
 #agent-fallback-model-select,
+#agent-worker-provider,
+#agent-worker-model-select,
 #agent-base-url,
 #agent-api-key,
 #agent-telegram-token,
@@ -932,6 +934,53 @@ body.tools-hidden .tool-activity { display: none; }
         </div>
       </div>
       <div class="field">
+        <label class="switch-row">
+          <span class="switch-copy">
+            <strong>Modele workers dev</strong>
+            <span>Utilise ce modele pour les workers de developpement.</span>
+          </span>
+          <input id="agent-worker-enabled" type="checkbox">
+        </label>
+        <div id="agent-worker-fields" class="conditional-field">
+          <label for="agent-worker-provider">Provider worker</label>
+          <select id="agent-worker-provider"></select>
+          <label for="agent-worker-model-select">Modele worker</label>
+          <select id="agent-worker-model-select"></select>
+          <div id="agent-worker-current" class="field-hint"></div>
+        </div>
+      </div>
+      <div class="field">
+        <div class="field-title">Automatismes</div>
+        <label class="switch-row">
+          <span class="switch-copy">
+            <strong>Scheduler</strong>
+            <span>Lance dreaming et daily aux heures choisies.</span>
+          </span>
+          <input id="agent-scheduler-enabled" type="checkbox">
+        </label>
+        <div id="agent-scheduler-fields" class="conditional-field">
+          <label class="switch-row">
+            <span class="switch-copy">
+              <strong>Dreaming</strong>
+              <span>Prépare les signaux de fond.</span>
+            </span>
+            <input id="agent-dreaming-enabled" type="checkbox">
+          </label>
+          <label for="agent-dreaming-time">Heure dreaming</label>
+          <input id="agent-dreaming-time" type="time" step="60">
+          <label class="switch-row">
+            <span class="switch-copy">
+              <strong>Daily</strong>
+              <span>Prépare le digest du matin.</span>
+            </span>
+            <input id="agent-daily-enabled" type="checkbox">
+          </label>
+          <label for="agent-daily-time">Heure daily</label>
+          <input id="agent-daily-time" type="time" step="60">
+          <div id="agent-scheduler-current" class="field-hint"></div>
+        </div>
+      </div>
+      <div class="field">
         <div class="field-title">Telegram</div>
         <label class="switch-row">
           <span class="switch-copy">
@@ -1027,6 +1076,18 @@ const agentFallbackFields = $("agent-fallback-fields");
 const agentFallbackProvider = $("agent-fallback-provider");
 const agentFallbackModelSelect = $("agent-fallback-model-select");
 const agentFallbackCurrent = $("agent-fallback-current");
+const agentWorkerEnabled = $("agent-worker-enabled");
+const agentWorkerFields = $("agent-worker-fields");
+const agentWorkerProvider = $("agent-worker-provider");
+const agentWorkerModelSelect = $("agent-worker-model-select");
+const agentWorkerCurrent = $("agent-worker-current");
+const agentSchedulerEnabled = $("agent-scheduler-enabled");
+const agentSchedulerFields = $("agent-scheduler-fields");
+const agentDreamingEnabled = $("agent-dreaming-enabled");
+const agentDreamingTime = $("agent-dreaming-time");
+const agentDailyEnabled = $("agent-daily-enabled");
+const agentDailyTime = $("agent-daily-time");
+const agentSchedulerCurrent = $("agent-scheduler-current");
 const agentTelegramEnabled = $("agent-telegram-enabled");
 const agentTelegramFields = $("agent-telegram-fields");
 const agentTelegramToken = $("agent-telegram-token");
@@ -1042,6 +1103,7 @@ let sessionId = sessionFor(activeAgent);
 let busy = false;
 let thinking = null;
 let renderedMessageKeys = new Set();
+let transientHistorySignatures = new Map();
 let commandChoices = [];
 let suggestionIndex = 0;
 let lastCommandQuery = "";
@@ -1161,6 +1223,13 @@ function addNotice(text) {
   el.textContent = compactDisplayText(text);
   messages.appendChild(el);
   scrollBottom();
+}
+
+function clearVisibleConversation(notice = "") {
+  messages.innerHTML = "";
+  renderedMessageKeys = new Set();
+  transientHistorySignatures = new Map();
+  if (notice) addNotice(notice);
 }
 
 function addUser(text, attachments = [], options = {}) {
@@ -1536,6 +1605,10 @@ async function loadHistory(options = {}) {
     for (const msg of data.messages || []) {
       const key = messageKey(msg);
       if (renderedMessageKeys.has(key)) continue;
+      if (auto && consumeTransientHistorySignature(msg)) {
+        renderedMessageKeys.add(key);
+        continue;
+      }
       renderHistoryMessage(msg);
       renderedMessageKeys.add(key);
     }
@@ -1553,6 +1626,24 @@ function messageKey(msg) {
     msg.content || "",
     JSON.stringify(msg.metadata || {}),
   ].join("\u001f");
+}
+
+function historySignature(role, content) {
+  return [role || "", content || ""].join("\u001f");
+}
+
+function rememberTransientHistory(role, content) {
+  const signature = historySignature(role, content);
+  transientHistorySignatures.set(signature, (transientHistorySignatures.get(signature) || 0) + 1);
+}
+
+function consumeTransientHistorySignature(msg) {
+  const signature = historySignature(msg.role, msg.content);
+  const count = transientHistorySignatures.get(signature) || 0;
+  if (!count) return false;
+  if (count <= 1) transientHistorySignatures.delete(signature);
+  else transientHistorySignatures.set(signature, count - 1);
+  return true;
 }
 
 function renderHistoryMessage(msg) {
@@ -1604,11 +1695,23 @@ async function sendMessage(text, options = {}) {
     });
     const payload = await res.json();
     if (!payload.ok) throw new Error(payload.error || "Erreur gateway");
-    const answer = payload.result?.outbound?.text || "";
-    const tools = payload.result?.outbound?.metadata?.tool_activity || [];
-    const context = payload.result?.outbound?.metadata?.context || null;
+    const outbound = payload.result?.outbound || {};
+    const answer = outbound.text || "";
+    const metadata = outbound.metadata || {};
+    const tools = metadata.tool_activity || [];
+    const context = metadata.context || null;
     if (!options.silent) {
+      if (metadata.command === "/new" || metadata.clears_history === true) {
+        clearVisibleConversation(answer || "Session reinitialisee. On repart proprement.");
+        return answer;
+      }
       addAssistant(answer, tools, context);
+      if (metadata.command === "/compact" || metadata.preserve_view === true) {
+        rememberTransientHistory("user", text);
+        rememberTransientHistory("assistant", answer);
+      } else {
+        await loadHistory();
+      }
     }
     return answer;
   } catch (error) {
@@ -1663,9 +1766,7 @@ async function newSession() {
   const previous = sessionId;
   sessionId = `web:${activeAgent}:${Date.now()}`;
   localStorage.setItem(SESSION_PREFIX + activeAgent, sessionId);
-  messages.innerHTML = "";
-  renderedMessageKeys = new Set();
-  addNotice("Nouvelle session demarree.");
+  clearVisibleConversation("Nouvelle session demarree.");
   if (previous) {
     try {
       await apiFetch(`/api/session?agent_id=${encodeURIComponent(activeAgent)}&session_id=${encodeURIComponent(previous)}`, {method: "DELETE"});
@@ -1842,6 +1943,7 @@ async function openAgentDialog(targetAgent) {
       agentProvider.appendChild(opt);
     }
     renderFallbackProviderOptions(provider.choices || [], data.fallback || {});
+    renderWorkerProviderOptions(provider.choices || [], data.worker || {});
     agentBaseUrl.value = provider.base_url || agentProvider.selectedOptions[0]?.dataset.defaultBaseUrl || "";
     agentApiKey.value = "";
     renderProviderFields();
@@ -1856,6 +1958,20 @@ async function openAgentDialog(targetAgent) {
       : "Aucun fallback configure.";
     if (fallback.provider) agentFallbackProvider.value = fallback.provider;
     renderFallbackFields(fallback.model || "");
+    const worker = data.worker || {};
+    agentWorkerEnabled.checked = Boolean(worker.enabled);
+    agentWorkerCurrent.textContent = worker.enabled
+      ? `${worker.provider || "modele"}:${worker.model || ""}`
+      : "Par defaut : meme modele que l'agent.";
+    if (worker.provider) agentWorkerProvider.value = worker.provider;
+    renderWorkerFields(worker.model || "");
+    const scheduler = data.scheduler || {};
+    agentSchedulerEnabled.checked = scheduler.enabled !== false;
+    agentDreamingEnabled.checked = scheduler.dreaming_enabled !== false;
+    agentDreamingTime.value = scheduler.dreaming_time || "09:00";
+    agentDailyEnabled.checked = scheduler.daily_enabled !== false;
+    agentDailyTime.value = scheduler.daily_time || "09:30";
+    renderSchedulerFields();
     const telegram = data.telegram || {};
     agentTelegramEnabled.checked = Boolean(telegram.enabled);
     agentTelegramToken.value = "";
@@ -1863,7 +1979,7 @@ async function openAgentDialog(targetAgent) {
     renderTelegramFields();
     if (telegram.enabled) {
       const users = Array.isArray(telegram.allowed_users) && telegram.allowed_users.length ? telegram.allowed_users.join(", ") : "aucun filtre utilisateur";
-      const chats = Array.isArray(telegram.allowed_chats) && telegram.allowed_chats.length ? telegram.allowed_chats.join(", ") : "aucun filtre groupe";
+      const chats = Array.isArray(telegram.allowed_chats) && telegram.allowed_chats.length ? telegram.allowed_chats.join(", ") : "aucun chat autorise";
       agentTelegramStatus.textContent = `Actif via ${telegram.channel || "telegram"} · ${telegram.credential || "credential"} · ${users} · ${chats}`;
     } else {
       agentTelegramStatus.textContent = "Inactif. La connexion Telegram garde son assistant securise dans le chat pour le token et les IDs.";
@@ -1941,6 +2057,21 @@ function renderFallbackProviderOptions(choices, fallback = {}) {
   }
 }
 
+function renderWorkerProviderOptions(choices, worker = {}) {
+  agentWorkerProvider.innerHTML = "";
+  for (const choice of choices || []) {
+    agentWorkerProvider.appendChild(cloneProviderOption(choice, worker.provider || ""));
+  }
+  if (worker.provider && !Array.from(agentWorkerProvider.options).some(option => option.value === worker.provider)) {
+    const opt = document.createElement("option");
+    opt.value = worker.provider;
+    opt.textContent = worker.provider;
+    opt.selected = true;
+    opt._models = [];
+    agentWorkerProvider.appendChild(opt);
+  }
+}
+
 function renderFallbackFields(currentModel = "") {
   agentFallbackFields.style.display = agentFallbackEnabled.checked ? "grid" : "none";
   const selected = agentFallbackProvider.selectedOptions[0];
@@ -1970,6 +2101,35 @@ function renderFallbackFields(currentModel = "") {
   }
 }
 
+function renderWorkerFields(currentModel = "") {
+  agentWorkerFields.style.display = agentWorkerEnabled.checked ? "grid" : "none";
+  const selected = agentWorkerProvider.selectedOptions[0];
+  const models = selected?._models || [];
+  const fallback = selected?.dataset.defaultModel || currentModel || "";
+  agentWorkerModelSelect.innerHTML = "";
+  for (const model of models) {
+    const opt = document.createElement("option");
+    opt.value = model.id;
+    opt.textContent = model.label || model.id;
+    if (model.id === currentModel) opt.selected = true;
+    agentWorkerModelSelect.appendChild(opt);
+  }
+  if (!agentWorkerModelSelect.options.length && fallback) {
+    const opt = document.createElement("option");
+    opt.value = fallback;
+    opt.textContent = fallback;
+    opt.selected = true;
+    agentWorkerModelSelect.appendChild(opt);
+  }
+  if (currentModel && !Array.from(agentWorkerModelSelect.options).some(option => option.value === currentModel)) {
+    const opt = document.createElement("option");
+    opt.value = currentModel;
+    opt.textContent = currentModel;
+    opt.selected = true;
+    agentWorkerModelSelect.insertBefore(opt, agentWorkerModelSelect.firstChild);
+  }
+}
+
 function renderWebSearchFields() {
   const webCheckbox = agentSkills.querySelector('input[value="web"]');
   const webEnabled = Boolean(webCheckbox?.checked);
@@ -1986,6 +2146,13 @@ function renderTelegramFields() {
   agentTelegramFields.style.display = agentTelegramEnabled.checked ? "grid" : "none";
 }
 
+function renderSchedulerFields() {
+  agentSchedulerFields.style.display = agentSchedulerEnabled.checked ? "grid" : "none";
+  agentSchedulerCurrent.textContent = agentSchedulerEnabled.checked
+    ? `Dreaming ${agentDreamingEnabled.checked ? agentDreamingTime.value || "09:00" : "off"} · Daily ${agentDailyEnabled.checked ? agentDailyTime.value || "09:30" : "off"}`
+    : "Scheduler inactif.";
+}
+
 function closeAgentDialog() {
   agentModalBackdrop.classList.remove("open");
 }
@@ -1995,6 +2162,7 @@ async function applyAgentConfig() {
   const skills = Array.from(agentSkills.querySelectorAll("input[type=checkbox]:checked")).map(input => input.value);
   const model = agentModelSelect.value || "";
   const fallbackProviderOption = agentFallbackProvider.selectedOptions[0];
+  const workerProviderOption = agentWorkerProvider.selectedOptions[0];
   agentApply.disabled = true;
   try {
     const res = await apiFetch("/api/agent", {
@@ -2012,7 +2180,16 @@ async function applyAgentConfig() {
         fallback_provider: agentFallbackEnabled.checked ? agentFallbackProvider.value : "",
         fallback_model: agentFallbackEnabled.checked ? agentFallbackModelSelect.value : "",
         fallback_base_url: agentFallbackEnabled.checked ? (fallbackProviderOption?.dataset.defaultBaseUrl || "") : "",
+        worker_enabled: agentWorkerEnabled.checked,
+        worker_provider: agentWorkerEnabled.checked ? agentWorkerProvider.value : "",
+        worker_model: agentWorkerEnabled.checked ? agentWorkerModelSelect.value : "",
+        worker_base_url: agentWorkerEnabled.checked ? (workerProviderOption?.dataset.defaultBaseUrl || "") : "",
         web_search_base_url: agentWebSearchUrl.value.trim(),
+        scheduler_enabled: agentSchedulerEnabled.checked,
+        dreaming_enabled: agentDreamingEnabled.checked,
+        dreaming_time: agentDreamingTime.value || "09:00",
+        daily_enabled: agentDailyEnabled.checked,
+        daily_time: agentDailyTime.value || "09:30",
         telegram_enabled: agentTelegramEnabled.checked,
         telegram_token: agentTelegramToken.value,
         telegram_allowed_users: agentTelegramUsers.value,
@@ -2093,7 +2270,19 @@ agentFallbackProvider.onchange = () => {
   const selected = agentFallbackProvider.selectedOptions[0];
   renderFallbackFields(selected?.dataset.defaultModel || "");
 };
+agentWorkerEnabled.onchange = () => {
+  renderWorkerFields(agentWorkerModelSelect.value || agentWorkerProvider.selectedOptions[0]?.dataset.defaultModel || "");
+};
+agentWorkerProvider.onchange = () => {
+  const selected = agentWorkerProvider.selectedOptions[0];
+  renderWorkerFields(selected?.dataset.defaultModel || "");
+};
 agentWebSearchUrl.oninput = renderWebSearchFields;
+agentSchedulerEnabled.onchange = renderSchedulerFields;
+agentDreamingEnabled.onchange = renderSchedulerFields;
+agentDreamingTime.oninput = renderSchedulerFields;
+agentDailyEnabled.onchange = renderSchedulerFields;
+agentDailyTime.oninput = renderSchedulerFields;
 agentTelegramEnabled.onchange = renderTelegramFields;
 modalBackdrop.addEventListener("click", event => {
   if (event.target === modalBackdrop) closeModelDialog();

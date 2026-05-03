@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import importlib
+import inspect
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,14 +12,18 @@ from uuid import uuid4
 from maurice.kernel.contracts import DreamInput, DreamReport, ToolResult
 from maurice.kernel.events import EventStore
 from maurice.kernel.permissions import PermissionContext
-from maurice.kernel.skills import SkillRegistry
+from maurice.kernel.skills import SkillRegistry, import_skill_module
 
 DreamInputBuilder = Callable[[], DreamInput]
 
 
 def build_executors(ctx: Any) -> dict[str, Any]:
     registry: SkillRegistry = ctx.registry
-    builders = _discover_dream_input_builders(registry, ctx.permission_context)
+    builders = _discover_dream_input_builders(
+        registry,
+        ctx.permission_context,
+        all_skill_configs=ctx.all_skill_configs or {},
+    )
     return dreaming_tool_executors(
         ctx.permission_context,
         registry,
@@ -30,9 +34,13 @@ def build_executors(ctx: Any) -> dict[str, Any]:
 
 
 def _discover_dream_input_builders(
-    registry: SkillRegistry, context: PermissionContext
+    registry: SkillRegistry,
+    context: PermissionContext,
+    *,
+    all_skill_configs: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, DreamInputBuilder]:
     builders: dict[str, DreamInputBuilder] = {}
+    all_skill_configs = all_skill_configs or {}
     for name, skill in registry.loaded().items():
         if not skill.manifest or not skill.manifest.dreams:
             continue
@@ -41,12 +49,39 @@ def _discover_dream_input_builders(
             continue
         try:
             module_path, fn_name = input_builder_path.rsplit(".", 1)
-            mod = importlib.import_module(module_path)
+            mod = import_skill_module(skill, module_path)
             fn = getattr(mod, fn_name)
-            builders[name] = lambda ctx=context, f=fn: f(ctx)
+            skill_config = all_skill_configs.get(name, {})
+            builders[name] = lambda ctx=context, f=fn, cfg=skill_config: _call_input_builder(
+                f,
+                ctx,
+                config=cfg,
+                all_skill_configs=all_skill_configs,
+            )
         except Exception:
             continue
     return builders
+
+
+def _call_input_builder(
+    fn: Any,
+    context: PermissionContext,
+    *,
+    config: dict[str, Any],
+    all_skill_configs: dict[str, dict[str, Any]],
+) -> DreamInput:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return fn(context)
+    parameters = signature.parameters
+    kwargs: dict[str, Any] = {}
+    accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    if accepts_kwargs or "config" in parameters:
+        kwargs["config"] = config
+    if accepts_kwargs or "all_skill_configs" in parameters:
+        kwargs["all_skill_configs"] = all_skill_configs
+    return fn(context, **kwargs)
 
 
 def dreaming_tool_executors(

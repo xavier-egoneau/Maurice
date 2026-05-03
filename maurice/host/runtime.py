@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
+from difflib import SequenceMatcher
 from typing import Any
 
 from maurice.host.auth import CHATGPT_CREDENTIAL_NAME, get_valid_chatgpt_access_token
@@ -11,7 +13,11 @@ from maurice.host.context import MauriceContext, resolve_global_context
 from maurice.host.credentials import CredentialsStore, load_workspace_credentials
 from maurice.host.delivery import _cancel_job_callback, _schedule_reminder_callback
 from maurice.host.paths import maurice_home
-from maurice.host.project_registry import list_known_projects, record_known_project
+from maurice.host.project_registry import (
+    list_known_projects,
+    list_machine_projects,
+    record_seen_project,
+)
 from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.classifier import Classifier
 from maurice.kernel.compaction import CompactionConfig
@@ -59,9 +65,10 @@ def build_global_agent_loop(
         bundle=bundle,
         active_project=ctx.active_project_root,
     )
-    active_project_root = _turn_active_project_path(ctx, agent, source_metadata)
+    active_project_root = _turn_active_project_path(ctx, agent, source_metadata, message=message)
     if active_project_root:
-        record_known_project(agent.workspace, active_project_root)
+        record_seen_project(agent.workspace, active_project_root)
+        _write_active_dev_project_path(agent, active_project_root)
     permission_context = PermissionContext(
         workspace_root=str(ctx.content_root),
         runtime_root=str(ctx.runtime_root),
@@ -217,10 +224,31 @@ def _active_dev_project_path(agent: Any | None) -> str | None:
     return str((agent_workspace / "content" / active.strip()).resolve())
 
 
+def _write_active_dev_project_path(agent: Any | None, project_root: str | Path) -> None:
+    if agent is None:
+        return
+    project = Path(project_root).expanduser().resolve()
+    if not project.exists():
+        return
+    state_path = Path(agent.workspace).expanduser().resolve() / ".dev_state.json"
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["active_project_path"] = str(project)
+    payload.pop("active_project", None)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def _turn_active_project_path(
     ctx: MauriceContext,
     agent: Any | None,
     source_metadata: dict[str, Any] | None,
+    *,
+    message: str | None = None,
 ) -> str | None:
     metadata_project = (
         source_metadata.get("active_project_root")
@@ -231,7 +259,99 @@ def _turn_active_project_path(
         return str(Path(metadata_project).expanduser().resolve())
     if ctx.active_project_root is not None:
         return str(ctx.active_project_root)
+    inferred = _infer_known_project_from_message(agent, message or "")
+    if inferred is not None:
+        return str(inferred)
     return _active_dev_project_path(agent)
+
+
+def _infer_known_project_from_message(agent: Any | None, message: str) -> Path | None:
+    if agent is None or not _message_has_project_intent(message):
+        return None
+    candidates = _known_project_candidates(agent)
+    if not candidates:
+        return None
+    scored = [
+        (_project_message_score(project["name"], message), Path(project["path"]).expanduser().resolve())
+        for project in candidates
+        if isinstance(project.get("name"), str) and isinstance(project.get("path"), str)
+    ]
+    scored = [(score, path) for score, path in scored if score >= 0.72 and path.exists()]
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if len(scored) > 1 and scored[0][0] - scored[1][0] < 0.08:
+        return None
+    return scored[0][1]
+
+
+def _known_project_candidates(agent: Any) -> list[dict[str, str]]:
+    projects: list[dict[str, str]] = []
+    seen_paths: set[str] = set()
+    for project in [*list_known_projects(agent.workspace), *list_machine_projects()]:
+        path = project.get("path")
+        if not isinstance(path, str):
+            continue
+        key = str(Path(path).expanduser().resolve())
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        projects.append(project)
+    return projects
+
+
+def _message_has_project_intent(message: str) -> bool:
+    normalized = _normalize_project_text(message)
+    if not normalized:
+        return False
+    markers = (
+        "projet",
+        "project",
+        "dossier",
+        "folder",
+        "repo",
+        "codebase",
+        "mets toi",
+        "met toi",
+        "ouvre",
+        "ouvrir",
+        "travaille sur",
+        "critique",
+        "explore",
+        "resume",
+        "résume",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _project_message_score(project_name: str, message: str) -> float:
+    project_text = _normalize_project_text(project_name)
+    message_text = _normalize_project_text(message)
+    if not project_text or not message_text:
+        return 0.0
+    if project_text in message_text:
+        return 1.0
+    project_tokens = project_text.split()
+    message_tokens = message_text.split()
+    if not project_tokens or not message_tokens:
+        return 0.0
+    token_overlap = len(set(project_tokens) & set(message_tokens)) / len(set(project_tokens))
+    if token_overlap >= 0.66 and len(set(project_tokens) & set(message_tokens)) >= 2:
+        return max(0.78, token_overlap)
+    window = max(1, len(project_tokens))
+    best = 0.0
+    for start in range(0, len(message_tokens)):
+        for size in range(max(1, window - 1), window + 3):
+            snippet = " ".join(message_tokens[start : start + size])
+            if not snippet:
+                continue
+            best = max(best, SequenceMatcher(None, project_text, snippet).ratio())
+    return best
+
+
+def _normalize_project_text(value: str) -> str:
+    normalized = re.sub(r"[^0-9A-Za-zÀ-ÿ]+", " ", str(value).lower())
+    return " ".join(normalized.split())
 
 
 def _agent_system_prompt(

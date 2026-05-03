@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from maurice.host.credentials import credentials_path, load_workspace_credentials
+from maurice.host.credentials import credentials_path, load_credentials, load_workspace_credentials
 from maurice.host.paths import agents_config_path, host_config_path, kernel_config_path
 from maurice.host.workspace import initialize_workspace
 from maurice.kernel.config import load_workspace_config
@@ -39,6 +39,8 @@ def test_initialize_workspace_creates_expected_shape(tmp_path) -> None:
     assert bundle.host.workspace_root == str(workspace.resolve())
     assert bundle.kernel.permissions.profile == "limited"
     assert bundle.agents.agents["main"].permission_profile == "limited"
+    assert bundle.skills.skills["web"]["search_provider"] == "searxng"
+    assert bundle.skills.skills["web"]["base_url"] == "http://localhost:18080"
     assert credentials_path().is_file()
     assert credentials_path().parent.is_dir()
     assert not (workspace / "credentials.yaml").exists()
@@ -67,6 +69,19 @@ def test_credentials_are_loaded_separately_from_config(tmp_path) -> None:
     assert credentials.credentials["openai"].value == "secret"
     assert credentials_path().is_file()
     assert not (workspace / "credentials.yaml").exists()
+
+
+def test_load_credentials_accepts_legacy_scalar_values(tmp_path) -> None:
+    path = tmp_path / "credentials.yaml"
+    path.write_text(
+        "credentials:\n  caldav_icloud: app-specific-secret\n",
+        encoding="utf-8",
+    )
+
+    credentials = load_credentials(path)
+
+    assert credentials.credentials["caldav_icloud"].type == "token"
+    assert credentials.credentials["caldav_icloud"].value == "app-specific-secret"
 
 
 def test_openai_chatgpt_configs_upgrade_legacy_context_window(tmp_path) -> None:

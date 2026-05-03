@@ -592,6 +592,18 @@ class AgentLoop:
             )
             result = self._failed_tool_result(msg, code="shell_blocked")
         else:
+            approval_scope = _shell_approval_scope(tool_call.arguments, command)
+            if self.approval_store is not None:
+                approved = self.approval_store.approved_for_replay(
+                    permission_class=PermissionClass.SHELL_EXEC,
+                    scope=approval_scope,
+                    tool_name=tool_call.name,
+                    arguments=tool_call.arguments,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                )
+                if approved is not None:
+                    return None
             label = "trop complexe à analyser" if parsed.too_complex else "risquée"
             msg = (
                 f"Commande {label} : {parsed.reason} "
@@ -604,7 +616,7 @@ class AgentLoop:
                     correlation_id=correlation_id,
                     tool_name=tool_call.name,
                     permission_class=PermissionClass.SHELL_EXEC,
-                    scope={"commands": [command]},
+                    scope=approval_scope,
                     arguments=tool_call.arguments,
                     summary=f"Shell: {command[:80]}",
                     reason=parsed.reason,
@@ -662,23 +674,27 @@ class AgentLoop:
                 host = _host_from_url(arguments["base_url"])
                 if host:
                     return {"hosts": [host]}
+        if permission_class in (PermissionClass.INTEGRATION_READ, PermissionClass.INTEGRATION_WRITE):
+            if "integration" in arguments:
+                return {"integrations": [arguments["integration"]]}
         if permission_class == PermissionClass.SHELL_EXEC:
             scope: dict[str, Any] = {}
             if "command" in arguments:
                 scope["commands"] = [arguments["command"]]
-            if "cwd" in arguments:
-                scope["cwd"] = [arguments["cwd"]]
+            scope["cwd"] = [arguments.get("cwd") or "."]
             if "timeout_seconds" in arguments:
                 scope["timeout_seconds"] = arguments["timeout_seconds"]
             return scope
         if permission_class == PermissionClass.SECRET_READ and "credential" in arguments:
             return {"credentials": [arguments["credential"]]}
         if permission_class == PermissionClass.AGENT_SPAWN:
-            scope = {}
+            scope = dict(declaration.permission.scope)
             if "agent" in arguments:
                 scope["agents"] = [arguments["agent"]]
             if "max_parallel" in arguments:
                 scope["max_parallel"] = arguments["max_parallel"]
+            elif "max_workers" in arguments:
+                scope["max_parallel"] = arguments["max_workers"]
             if "max_depth" in arguments:
                 scope["max_depth"] = arguments["max_depth"]
             return scope
@@ -930,6 +946,13 @@ def _normalize_runtime_target(value: Any) -> str:
         return target
     first = re.split(r"[:/]", target, maxsplit=1)[0]
     return first or target
+
+
+def _shell_approval_scope(arguments: dict[str, Any], command: str) -> dict[str, Any]:
+    scope: dict[str, Any] = {"commands": [command], "cwd": [arguments.get("cwd") or "."]}
+    if "timeout_seconds" in arguments:
+        scope["timeout_seconds"] = arguments["timeout_seconds"]
+    return scope
 
 
 _DEFAULT_MAX_TOOL_ITERATIONS = 10

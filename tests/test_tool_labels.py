@@ -16,3 +16,8 @@ def test_unknown_tool_falls_back_without_skill_prefix() -> None:
 
 def test_host_credentials_has_human_label() -> None:
     assert tool_action_label("host.credentials") == "lister les profils d'authentification"
+
+
+def test_host_doctor_and_logs_have_human_labels() -> None:
+    assert tool_action_label("host.doctor") == "diagnostiquer Maurice"
+    assert tool_action_label("host.logs") == "lire les derniers événements Maurice"

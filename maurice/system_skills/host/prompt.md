@@ -1,16 +1,19 @@
-Host tools inspect Maurice runtime status, recent event logs, credentials metadata, durable agents, and reusable subagent templates.
+Admin tools inspect Maurice runtime diagnostics, service status, recent event logs, credentials metadata, durable agents, and dev worker model configuration.
 
 Use them for local diagnostics and reviewed host-owned configuration changes.
 
-Treat durable agents as user/persona surfaces. Do not propose switching the web chat between agents as a normal user workflow. For temporary delegated work, prefer reusable subagent templates and disposable runs; templates reference central `model_chain` profile ids instead of embedding provider config.
+Treat durable agents as user/persona surfaces. Do not propose switching the web chat between agents as a normal user workflow. For development workers, configure the parent agent's dev worker model chain; if it is empty, workers inherit the parent agent model chain.
 
-Use `host.status` only when the user asks about Maurice service health, runtime diagnostics, or whether the service/gateway/scheduler is running.
-Do not use `host.status` for questions about the current folder, current project, selected project, or whether you are "on" a user project.
+Use `host.doctor` when the user asks for `maurice doctor`, general install/config/workspace health, fresh setup validation, or a broad "check Maurice" diagnostic.
+Use `host.logs` when the user asks for `maurice logs`, recent failures, what happened, or why something just failed.
+Use `host.status` only when the user asks about live Maurice service health, runtime status, or whether the service/gateway/scheduler is running.
+Do not use `host.doctor`, `host.logs`, or `host.status` for questions about the current folder, current project, selected project, or whether you are "on" a user project.
 For current project questions, answer from the active project context or use the dev/filesystem project rules.
 
 For assisted agent creation:
 
-- Prefer the deterministic gateway commands `/add_agent` and `/edit_agent <agent>` when the user is talking through Telegram. These commands run the host-owned wizard and avoid improvising fragile multi-step config flows.
+- Prefer the deterministic gateway commands `/add_agent` and `/edit_agent <agent>` when the user is talking through Telegram from the `main` agent. These commands run the host-owned wizard and avoid improvising fragile multi-step config flows.
+- `/add_agent` and `/edit_agent` are main-agent administration commands. Other agents should not offer or run them.
 - If you are not inside that deterministic wizard, still follow the rules below and use host tools only after the user confirms the proposed change.
 
 - Ask exactly one question at a time. Do not send a multi-question form or numbered questionnaire.
@@ -27,7 +30,7 @@ For assisted agent creation:
   6. `vision` : analyser des images
   7. `dreaming` : consolider la memoire et agir avec proactivite
   8. `skills` : creer de nouvelles competences
-  9. `host` : diagnostiquer Maurice et demander des changements de config valides
+  9. `admin` : diagnostiquer Maurice et demander des changements de config valides
   10. `self_update` : signaler des bugs Maurice et proposer des ameliorations du runtime, sans les appliquer directement
   11. `dev` : piloter un projet de developpement
 - At the skills step, ask exactly one question like: "Quelles competences veux-tu lui donner ? Reponds par des numeros (`1,2,4`), des noms, `tous`, ou `recommande`."
@@ -39,7 +42,7 @@ For assisted agent creation:
 - Call `host.request_secret` with provider `telegram_bot`, type `token`, and the chosen credential name, then ask the user: "Envoie-moi maintenant le token BotFather de ce bot Telegram." The next user message will be captured by the host and must not be treated as normal chat.
 - For `/edit_agent`, ask whether to keep or replace the current token. If the user replaces it, call `host.request_secret` for the current agent credential.
 - After the token step, ask one question only for access control: "Quels ids Telegram peuvent parler a ce bot ? Tu peux en mettre plusieurs, separes par des virgules."
-- Use those ids as `allowed_users` when calling `host.telegram_bind`.
+- Use those ids as `allowed_users` when calling `host.telegram_bind`; the host also records them as private `allowed_chats`.
 - If the user says they do not know their Telegram id, explain briefly: "Dans Telegram, envoie /start a @userinfobot ou @RawDataBot pour voir ton id, puis reviens me l'envoyer."
 - If the user confirms Telegram, call `host.telegram_bind` after the agent exists and after token/id collection is complete.
 - Do not say "channel" or "canaux" to the user unless explaining config internals.

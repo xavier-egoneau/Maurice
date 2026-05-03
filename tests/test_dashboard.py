@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from maurice.host.dashboard import build_dashboard_snapshot
 from maurice.host.paths import agents_config_path
 from maurice.host.workspace import initialize_workspace
@@ -59,7 +60,7 @@ def test_dashboard_snapshot_marks_errors_for_journal(tmp_path) -> None:
 
     snapshot = build_dashboard_snapshot(workspace)
 
-    assert snapshot.logs[-1].message == "job.failed"
+    assert snapshot.logs[-1].message == "job.failed - boom"
     assert snapshot.logs[-1].level == "error"
 
 
@@ -122,4 +123,96 @@ def test_dashboard_models_use_agent_override(tmp_path) -> None:
     snapshot = build_dashboard_snapshot(workspace)
 
     assert snapshot.models[0].provider == "ollama"
-    assert snapshot.models[0].model == "ollama/ollama_chat"
+    assert snapshot.models[0].model == "ollama/llama3.2"
+
+
+def test_dashboard_hides_terminal_one_shot_automations(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = Path(__file__).resolve().parents[1]
+    initialize_workspace(workspace, runtime)
+    store = JobStore(workspace / "agents" / "main" / "jobs.json")
+    failed = store.schedule(
+        name="reminders.fire",
+        owner="skill:reminders",
+        run_at=datetime.now(UTC),
+        payload={"agent_id": "main", "session_id": "reminders"},
+    )
+    cancelled = store.schedule(
+        name="reminders.fire",
+        owner="skill:reminders",
+        run_at=datetime.now(UTC),
+        payload={"agent_id": "main", "session_id": "reminders"},
+    )
+    recurring = store.schedule(
+        name="daily.digest",
+        owner="skill:daily",
+        run_at=datetime.now(UTC),
+        interval_seconds=86400,
+        payload={"agent_id": "main", "session_id": "daily"},
+    )
+    store.fail(failed.id, "boom")
+    store.cancel(cancelled.id)
+
+    snapshot = build_dashboard_snapshot(workspace)
+
+    assert [row.job_id for row in snapshot.automations] == [recurring.id]
+
+
+def test_dashboard_lists_dev_worker_runs_as_sessions(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = Path(__file__).resolve().parents[1]
+    initialize_workspace(workspace, runtime)
+    worker = workspace / "agents" / "main" / "runs" / "dev_workers" / "devw_1"
+    worker.mkdir(parents=True)
+    worker.joinpath("status.json").write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "task": "Explorer le projet",
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = build_dashboard_snapshot(workspace)
+
+    row = next(item for item in snapshot.sessions if item.session_id == "worker:devw_1")
+    assert row.origin == "Worker dev"
+    assert row.status == "actif"
+    assert row.last_event == "Explorer le projet"
+
+
+def test_dashboard_log_rows_include_payload_details(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = Path(__file__).resolve().parents[1]
+    initialize_workspace(workspace, runtime)
+    EventStore(workspace / "agents" / "main" / "events.jsonl").emit(
+        name="channel.poll.failed",
+        origin="host.channel.telegram",
+        agent_id="main",
+        session_id="telegram",
+        payload={"error": "Conflict: terminated by other getUpdates request"},
+    )
+
+    snapshot = build_dashboard_snapshot(workspace)
+
+    assert snapshot.logs[-1].level == "error"
+    assert "Conflict" in snapshot.logs[-1].message
+
+
+def test_dashboard_keeps_scheduled_one_shot_automation_visible(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = Path(__file__).resolve().parents[1]
+    initialize_workspace(workspace, runtime)
+    store = JobStore(workspace / "agents" / "main" / "jobs.json")
+    reminder = store.schedule(
+        name="reminders.fire",
+        owner="skill:reminders",
+        run_at=datetime.now(UTC) + timedelta(hours=1),
+        payload={"agent_id": "main", "session_id": "reminders"},
+    )
+
+    snapshot = build_dashboard_snapshot(workspace)
+
+    assert [row.job_id for row in snapshot.automations] == [reminder.id]

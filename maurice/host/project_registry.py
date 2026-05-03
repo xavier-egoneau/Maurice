@@ -1,4 +1,4 @@
-"""Per-agent registry of projects Maurice has explicitly seen."""
+"""Project registries for projects Maurice has explicitly seen."""
 
 from __future__ import annotations
 
@@ -7,13 +7,27 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from maurice.host.paths import maurice_home
+
 
 REGISTRY_FILE = "projects.json"
 MAX_PROJECTS = 50
 
 
+def machine_registry_path() -> Path:
+    return maurice_home() / REGISTRY_FILE
+
+
 def registry_path(agent_workspace: str | Path) -> Path:
     return Path(agent_workspace).expanduser().resolve() / REGISTRY_FILE
+
+
+def record_machine_project(project_root: str | Path) -> None:
+    _record_project(machine_registry_path(), project_root)
+
+
+def list_machine_projects() -> list[dict[str, str]]:
+    return _list_projects(machine_registry_path())
 
 
 def record_known_project(agent_workspace: str | Path, project_root: str | Path) -> None:
@@ -22,8 +36,31 @@ def record_known_project(agent_workspace: str | Path, project_root: str | Path) 
     This is intentionally event-driven: callers pass a concrete active project.
     The registry never scans arbitrary parent directories.
     """
+    _record_project(registry_path(agent_workspace), project_root)
+
+
+def record_seen_project(agent_workspace: str | Path, project_root: str | Path) -> None:
+    """Record a concrete active project in both machine and agent registries."""
+    record_machine_project(project_root)
+    record_known_project(agent_workspace, project_root)
+
+
+def list_known_projects(agent_workspace: str | Path) -> list[dict[str, str]]:
+    return _list_projects(registry_path(agent_workspace))
+
+
+def known_project_by_name(agent_workspace: str | Path, name: str) -> Path | None:
+    wanted = name.strip()
+    if not wanted:
+        return None
+    for project in list_known_projects(agent_workspace):
+        if project["name"] == wanted:
+            return Path(project["path"]).expanduser().resolve()
+    return None
+
+
+def _record_project(path: Path, project_root: str | Path) -> None:
     project = Path(project_root).expanduser().resolve()
-    path = registry_path(agent_workspace)
     payload = _read_payload(path)
     projects = _projects_by_path(payload)
     existing = projects.get(str(project), {})
@@ -45,8 +82,7 @@ def record_known_project(agent_workspace: str | Path, project_root: str | Path) 
     )
 
 
-def list_known_projects(agent_workspace: str | Path) -> list[dict[str, str]]:
-    path = registry_path(agent_workspace)
+def _list_projects(path: Path) -> list[dict[str, str]]:
     payload = _read_payload(path)
     projects = [
         {
@@ -60,16 +96,6 @@ def list_known_projects(agent_workspace: str | Path) -> list[dict[str, str]]:
         and isinstance(project.get("path"), str)
     ]
     return sorted(projects, key=lambda item: item["last_seen_at"], reverse=True)
-
-
-def known_project_by_name(agent_workspace: str | Path, name: str) -> Path | None:
-    wanted = name.strip()
-    if not wanted:
-        return None
-    for project in list_known_projects(agent_workspace):
-        if project["name"] == wanted:
-            return Path(project["path"]).expanduser().resolve()
-    return None
 
 
 def _read_payload(path: Path) -> dict[str, Any]:

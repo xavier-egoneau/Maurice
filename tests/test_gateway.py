@@ -9,6 +9,7 @@ import time
 
 from maurice.host.command_registry import CommandRegistry, CommandResult, RuntimeCommand, core_commands
 from maurice.host.channels import ChannelAdapterRegistry
+from maurice.host.agent_wizard import handle_agent_creation_wizard
 from maurice.host.commands.gateway_server import (
     _build_gateway_http_server,
     _build_gateway_http_server_for_context,
@@ -17,6 +18,7 @@ from maurice.host.commands.gateway_server import (
     _gateway_agent_config_update_and_sync_telegram,
     _gateway_model_status,
     _gateway_model_update,
+    _gateway_router_for,
     _record_gateway_exchange_in_store,
     _run_turn_via_global_server,
     _read_web_attachment,
@@ -27,6 +29,7 @@ from maurice.host.commands.gateway_server import (
 from maurice.host.context import resolve_global_context, resolve_local_context
 from maurice.host.gateway import InboundMessage, MessageRouter, OutboundMessage
 from maurice.host.gateway import GatewayHttpServer
+from maurice.host.telegram import _telegram_update_to_inbound
 from maurice.host.agents import create_agent
 from maurice.host.workspace import initialize_workspace
 from maurice.host.paths import host_config_path, kernel_config_path
@@ -87,6 +90,76 @@ class CancelledTurn:
 PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
+
+
+def _telegram_text_update(*, user_id: int, chat_id: int, chat_type: str = "private") -> dict:
+    return {
+        "update_id": 7,
+        "message": {
+            "message_id": 1,
+            "from": {"id": user_id},
+            "chat": {"id": chat_id, "type": chat_type},
+            "text": "salut",
+        },
+    }
+
+
+def test_telegram_inbound_accepts_allowed_private_user() -> None:
+    inbound = _telegram_update_to_inbound(
+        _telegram_text_update(user_id=111, chat_id=111),
+        agent_id="main",
+        allowed_users=[111],
+        allowed_chats=[],
+    )
+
+    assert inbound is not None
+    assert inbound["peer_id"] == "111"
+    assert inbound["metadata"]["chat_id"] == 111
+
+
+def test_telegram_inbound_rejects_unconfigured_private_user() -> None:
+    inbound = _telegram_update_to_inbound(
+        _telegram_text_update(user_id=222, chat_id=222),
+        agent_id="main",
+        allowed_users=[111],
+        allowed_chats=[],
+    )
+
+    assert inbound is None
+
+
+def test_telegram_inbound_rejects_group_when_chat_is_not_allowed() -> None:
+    inbound = _telegram_update_to_inbound(
+        _telegram_text_update(user_id=111, chat_id=-222, chat_type="supergroup"),
+        agent_id="main",
+        allowed_users=[111],
+        allowed_chats=[],
+    )
+
+    assert inbound is None
+
+
+def test_telegram_inbound_accepts_allowed_group_and_user() -> None:
+    inbound = _telegram_update_to_inbound(
+        _telegram_text_update(user_id=111, chat_id=-222, chat_type="supergroup"),
+        agent_id="main",
+        allowed_users=[111],
+        allowed_chats=[-222],
+    )
+
+    assert inbound is not None
+    assert inbound["metadata"]["chat_id"] == -222
+
+
+def test_telegram_inbound_rejects_unconfigured_user_in_allowed_group() -> None:
+    inbound = _telegram_update_to_inbound(
+        _telegram_text_update(user_id=333, chat_id=-222, chat_type="supergroup"),
+        agent_id="main",
+        allowed_users=[111],
+        allowed_chats=[-222],
+    )
+
+    assert inbound is None
 
 
 def test_gateway_routes_inbound_message_to_turn_runner(tmp_path) -> None:
@@ -212,6 +285,7 @@ def test_gateway_turn_uses_global_server_when_running(tmp_path, monkeypatch) -> 
     assert calls[-1] == ("close",)
     assert calls[1][2]["agent_id"] == "main"
     assert calls[1][2]["source_channel"] == "local"
+    assert calls[1][2]["approval_mode"] == "store"
     assert calls[1][2]["source_metadata"]["x"] == 1
     assert calls[1][2]["source_metadata"]["active_project_root"] == str(project.resolve())
 
@@ -285,6 +359,16 @@ def test_gateway_handles_start_as_help_without_turn_runner() -> None:
     assert not called
     assert "/help" in result.outbound.text
     assert "/add_agent" in result.outbound.text
+
+
+def test_gateway_help_hides_agent_admin_commands_outside_main() -> None:
+    result = MessageRouter(run_turn=lambda **_kwargs: DummyTurn()).handle(
+        {"channel": "telegram", "peer_id": "123", "text": "/help", "agent_id": "num2"}
+    )
+
+    assert "/help" in result.outbound.text
+    assert "/add_agent" not in result.outbound.text
+    assert "/edit_agent" not in result.outbound.text
 
 
 def test_gateway_help_uses_dynamic_command_registry() -> None:
@@ -369,6 +453,24 @@ def test_gateway_can_record_command_exchange() -> None:
     router.handle({"channel": "web", "peer_id": "peer_1", "text": "/model", "agent_id": "main"})
 
     assert recorded == [("/model", "Modele de main", True)]
+
+
+def test_gateway_new_command_is_not_recorded_after_reset() -> None:
+    recorded = []
+
+    router = MessageRouter(
+        run_turn=lambda **_kwargs: DummyTurn(),
+        reset_session=lambda _agent_id, _session_id: None,
+        record_exchange=lambda inbound, outbound, include_user: recorded.append(
+            (inbound.text, outbound.text, include_user)
+        ),
+    )
+
+    result = router.handle({"channel": "web", "peer_id": "peer_1", "text": "/new", "agent_id": "main"})
+
+    assert result.outbound.metadata["command"] == "/new"
+    assert result.outbound.metadata["clears_history"] is True
+    assert recorded == []
 
 
 def test_gateway_command_can_trigger_agent_turn() -> None:
@@ -659,6 +761,7 @@ def test_gateway_handles_compact_command_without_turn_runner() -> None:
     assert not called
     assert result.outbound.text == "compact main local:peer_1"
     assert result.outbound.metadata["command"] == "/compact"
+    assert result.outbound.metadata["preserve_view"] is True
 
 
 def test_gateway_intercepts_message_before_turn_runner() -> None:
@@ -710,6 +813,32 @@ def test_gateway_approves_pending_action_before_rerun(tmp_path) -> None:
     assert approvals.list()[0].status == "approved"
     assert approvals.list()[0].id == approval.id
     assert calls[0]["message"] == "ok"
+    assert result.outbound.text == "Salut"
+
+
+def test_gateway_accepts_ok_go_for_pending_approval(tmp_path) -> None:
+    approvals = ApprovalStore(tmp_path / "approvals.json")
+    approval = approvals.request(
+        agent_id="main",
+        session_id="telegram:123",
+        correlation_id="corr_old",
+        tool_name="veille.run",
+        permission_class="network.outbound",
+        scope={"hosts": ["*"]},
+        arguments={},
+        summary="Approve watch",
+        reason="Network asks before watch.",
+    )
+
+    router = MessageRouter(
+        run_turn=lambda **_kwargs: DummyTurn(),
+        approval_store_for=lambda _agent_id: approvals,
+    )
+
+    result = router.handle({"channel": "telegram", "peer_id": "123", "text": "Ok go", "agent_id": "main"})
+
+    assert approvals.list()[0].status == "approved"
+    assert approvals.list()[0].id == approval.id
     assert result.outbound.text == "Salut"
 
 
@@ -811,6 +940,51 @@ def test_gateway_http_server_health_and_message() -> None:
         assert payload["ok"] is True
         assert payload["result"]["outbound"]["text"] == "Salut"
         assert payload["result"]["outbound"]["session_id"] == "http:peer_1"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_gateway_http_server_captures_web_secret_before_router() -> None:
+    calls = []
+
+    def run_turn(**_kwargs):
+        raise AssertionError("secret should not reach the agent runtime")
+
+    server = GatewayHttpServer(
+        host="127.0.0.1",
+        port=0,
+        router=MessageRouter(run_turn=run_turn),
+        web_secret_capture=lambda agent_id, session_id, peer_id, text: calls.append(
+            (agent_id, session_id, peer_id, text)
+        )
+        or "Secret enregistre.",
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.address
+        req = request.Request(
+            f"http://{host}:{port}/api/message",
+            data=json.dumps(
+                {
+                    "agent_id": "main",
+                    "session_id": "web:main:1",
+                    "peer_id": "web:main:1",
+                    "message": "SECRET",
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert payload["ok"] is True
+        assert payload["result"]["outbound"]["text"] == "Secret enregistre."
+        assert payload["result"]["inbound"]["text"] == ""
+        assert payload["result"]["inbound"]["metadata"]["persist"] is False
+        assert calls == [("main", "web:main:1", "web:main:1", "SECRET")]
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -954,6 +1128,7 @@ def test_gateway_http_server_can_require_web_token() -> None:
 
 
 def test_gateway_http_server_can_serve_local_context(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MAURICE_HOME", str(tmp_path / ".maurice"))
     ctx = resolve_local_context(tmp_path)
     calls = []
 
@@ -997,6 +1172,7 @@ def test_gateway_http_server_can_serve_local_context(tmp_path, monkeypatch) -> N
         assert payload["result"]["outbound"]["text"] == "Salut"
         assert calls[0]["ctx"].scope == "local"
         assert calls[0]["ctx"].content_root == tmp_path.resolve()
+        assert calls[0]["source_metadata"]["active_project_root"] == str(tmp_path.resolve())
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -1231,6 +1407,44 @@ def test_gateway_agent_config_update_replaces_skills_and_permission(tmp_path) ->
     assert bundle.agents.agents["maurice_polo"].skills == ["filesystem", "explore", "dev"]
 
 
+def test_gateway_agent_config_exposes_declarative_user_skills(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    (runtime / "maurice").mkdir(parents=True)
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+    skill_dir = workspace / "skills" / "calendar_notes"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "skill.md").write_text(
+        "---\n"
+        "name: calendar_notes\n"
+        "description: Read local calendar notes.\n"
+        "---\n"
+        "\n"
+        "# Calendar Notes\n",
+        encoding="utf-8",
+    )
+    (skill_dir / "dreams.md").write_text("Notice calendar events.\n", encoding="utf-8")
+    (skill_dir / "daily.md").write_text("Surface today's events.\n", encoding="utf-8")
+    create_agent(
+        workspace,
+        agent_id="maurice_polo",
+        permission_profile="limited",
+        skills=["filesystem"],
+    )
+
+    status = _gateway_agent_config_status(workspace, "maurice_polo")
+    changed = _gateway_agent_config_update(
+        workspace,
+        "maurice_polo",
+        {"skills": ["filesystem", "calendar_notes"]},
+    )
+    bundle = load_workspace_config(workspace)
+
+    assert any(skill["id"] == "calendar_notes" for skill in status["skills"])
+    assert changed["updated"] is True
+    assert bundle.agents.agents["maurice_polo"].skills == ["filesystem", "calendar_notes"]
+
+
 def test_gateway_agent_config_update_changes_provider_and_telegram(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     runtime = tmp_path / "runtime"
@@ -1270,6 +1484,7 @@ def test_gateway_agent_config_update_changes_provider_and_telegram(tmp_path) -> 
     assert credentials["telegram_bot_maurice_polo"].value == "telegram-secret"
     assert telegram["enabled"] is True
     assert telegram["allowed_users"] == [123, 456]
+    assert telegram["allowed_chats"] == [123, 456]
     assert "telegram" in agent.channels
     assert skills_data["skills"]["web"]["base_url"] == "https://search.example"
 
@@ -1309,8 +1524,93 @@ def test_gateway_agent_config_update_can_add_model_fallback(tmp_path, monkeypatc
     assert changed["fallback"]["provider"] == "ollama_local"
     assert changed["fallback"]["model"] == "gemma4"
     assert agent.model_chain == ["auth_gpt_5_4", "ollama_gemma4"]
+
+
+def test_gateway_agent_config_update_can_set_dev_worker_model(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    (runtime / "maurice").mkdir(parents=True)
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+    create_agent(workspace, agent_id="maurice_polo", permission_profile="limited")
+    monkeypatch.setattr(
+        "maurice.host.commands.gateway_server.chatgpt_model_choices",
+        lambda: [("gpt-5.4", "GPT-5.4")],
+    )
+    monkeypatch.setattr(
+        "maurice.host.commands.gateway_server.ollama_model_choices",
+        lambda _base_url, api_key="": [("gemma4", "Gemma 4")],
+    )
+
+    changed = _gateway_agent_config_update(
+        workspace,
+        "maurice_polo",
+        {
+            "provider": "chatgpt",
+            "model": "gpt-5.4",
+            "worker_enabled": True,
+            "worker_provider": "ollama_local",
+            "worker_model": "gemma4",
+            "worker_base_url": "http://localhost:11434",
+        },
+    )
+    bundle = load_workspace_config(workspace)
+    agent = bundle.agents.agents["maurice_polo"]
+
+    assert changed["updated"] is True
+    assert changed["worker"]["enabled"] is True
+    assert changed["worker"]["inherits_parent"] is False
+    assert changed["worker"]["provider"] == "ollama_local"
+    assert changed["worker"]["model"] == "gemma4"
+    assert agent.model_chain == ["auth_gpt_5_4"]
+    assert agent.worker_model_chain == ["ollama_gemma4"]
     assert bundle.kernel.models.entries["auth_gpt_5_4"].credential == "chatgpt"
     assert bundle.kernel.models.entries["ollama_gemma4"].base_url == "http://localhost:11434"
+
+
+def test_gateway_agent_config_update_can_configure_scheduler_times(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    (runtime / "maurice").mkdir(parents=True)
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+
+    status = _gateway_agent_config_status(workspace, "main")
+    changed = _gateway_agent_config_update(
+        workspace,
+        "main",
+        {
+            "scheduler_enabled": True,
+            "dreaming_enabled": True,
+            "dreaming_time": "8h15",
+            "daily_enabled": False,
+            "daily_time": "10:45",
+        },
+    )
+    bundle = load_workspace_config(workspace)
+
+    assert status["scheduler"]["dreaming_time"] == "09:00"
+    assert changed["updated"] is True
+    assert changed["scheduler"]["enabled"] is True
+    assert changed["scheduler"]["dreaming_enabled"] is True
+    assert changed["scheduler"]["dreaming_time"] == "08:15"
+    assert changed["scheduler"]["daily_enabled"] is False
+    assert changed["scheduler"]["daily_time"] == "10:45"
+    assert bundle.kernel.scheduler.dreaming_time == "08:15"
+    assert bundle.kernel.scheduler.daily_enabled is False
+
+
+def test_gateway_agent_config_update_rejects_invalid_scheduler_time(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    (runtime / "maurice").mkdir(parents=True)
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+
+    changed = _gateway_agent_config_update(
+        workspace,
+        "main",
+        {"dreaming_time": "28:99"},
+    )
+
+    assert changed == {"ok": False, "error": "invalid_dreaming_time"}
 
 
 def test_gateway_agent_config_exposes_single_telegram_default_session(tmp_path) -> None:
@@ -1796,6 +2096,67 @@ def test_gateway_stop_command_cancels_active_session_turn() -> None:
         assert message_result["status"] == "cancelled"
     finally:
         thread.join(timeout=1)
+
+
+def test_gateway_stop_command_clears_agent_wizard_state(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+    router, _agent, _bundle = _gateway_router_for(workspace, "main")
+
+    started = handle_agent_creation_wizard(
+        workspace,
+        agent_id="main",
+        session_id="telegram:123",
+        text="/add_agent",
+    )
+    assert started is not None and "Quel nom unique" in started
+
+    stopped = router.handle(
+        {
+            "channel": "telegram",
+            "peer_id": "123",
+            "text": "/stop",
+            "agent_id": "main",
+        }
+    )
+    assert "configuration d'agent" in stopped.outbound.text
+    assert stopped.outbound.metadata["cleared_state"] == ["configuration d'agent"]
+
+    next_message = router.handle(
+        {
+            "channel": "telegram",
+            "peer_id": "123",
+            "text": "Demis Hassabis",
+            "agent_id": "main",
+        }
+    )
+    assert "mission principale" not in next_message.outbound.text
+
+
+def test_gateway_new_command_clears_agent_wizard_state(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+    router, _agent, _bundle = _gateway_router_for(workspace, "main")
+
+    handle_agent_creation_wizard(
+        workspace,
+        agent_id="main",
+        session_id="telegram:123",
+        text="/add_agent",
+    )
+
+    reset = router.handle(
+        {
+            "channel": "telegram",
+            "peer_id": "123",
+            "text": "/new",
+            "agent_id": "main",
+        }
+    )
+    assert "Session reinitialisee" in reset.outbound.text
+    assert "configuration d'agent" in reset.outbound.text
 
 
 def test_gateway_http_server_web_api_message_accepts_image_upload(tmp_path) -> None:

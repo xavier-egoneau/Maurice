@@ -27,6 +27,43 @@ Lifecycle = Literal["transient", "daemon"]
 
 
 @dataclass(frozen=True)
+class LocalConfig:
+    """Merged machine + project config for a folder-scoped surface."""
+
+    data: dict[str, Any]
+
+    @property
+    def permission_profile(self) -> str:
+        return str(self.data.get("permission_profile") or "limited")
+
+    @property
+    def enabled_skills(self) -> list[str] | None:
+        skills = self.data.get("skills")
+        return list(skills) if isinstance(skills, list) else None
+
+    @property
+    def skills_config(self) -> dict[str, dict[str, Any]]:
+        value = self.data.get("skills_config") or {}
+        return value if isinstance(value, dict) else {}
+
+    @property
+    def provider(self) -> dict[str, Any]:
+        value = self.data.get("provider") or {}
+        return value if isinstance(value, dict) else {}
+
+    @property
+    def usage(self) -> dict[str, Any]:
+        value = self.data.get("usage") or {}
+        return value if isinstance(value, dict) else {}
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.data.get(key, default)
+
+    def setdefault(self, key: str, default: Any) -> Any:
+        return self.data.setdefault(key, default)
+
+
+@dataclass(frozen=True)
 class MauriceContext:
     """Resolved runtime/state/content roots for one Maurice conversation surface."""
 
@@ -36,12 +73,13 @@ class MauriceContext:
     context_root: Path
     state_root: Path
     content_root: Path
-    config: ConfigBundle | dict[str, Any]
+    config: ConfigBundle | LocalConfig
     sessions_path: Path
     events_path: Path
     approvals_path: Path
     memory_path: Path
     skill_roots: list[SkillRoot]
+    agent_workspace_root: Path
     active_project_root: Path | None = None
 
     @property
@@ -62,22 +100,20 @@ class MauriceContext:
 
     @property
     def permission_profile(self) -> str:
-        if isinstance(self.config, dict):
-            return str(self.config.get("permission_profile") or "limited")
+        if isinstance(self.config, LocalConfig):
+            return self.config.permission_profile
         return self.config.kernel.permissions.profile
 
     @property
     def enabled_skills(self) -> list[str] | None:
-        if isinstance(self.config, dict):
-            skills = self.config.get("skills")
-            return list(skills) if isinstance(skills, list) else None
+        if isinstance(self.config, LocalConfig):
+            return self.config.enabled_skills
         return list(self.config.kernel.skills) or None
 
     @property
     def skills_config(self) -> dict[str, dict[str, Any]]:
-        if isinstance(self.config, dict):
-            value = self.config.get("skills_config") or {}
-            return value if isinstance(value, dict) else {}
+        if isinstance(self.config, LocalConfig):
+            return self.config.skills_config
         return self.config.skills.skills
 
 
@@ -90,6 +126,8 @@ def resolve_local_context(
     root = project_root.expanduser().resolve()
     state_root = ensure_maurice_dir(root)
     cfg = _load_local_config(root)
+    agent_workspace = _local_agent_workspace(cfg)
+    _ensure_agent_workspace_dirs(agent_workspace)
     return MauriceContext(
         scope="local",
         lifecycle=lifecycle,
@@ -101,8 +139,9 @@ def resolve_local_context(
         sessions_path=sessions_dir(root),
         events_path=events_path(root),
         approvals_path=approvals_path(root),
-        memory_path=state_root / "memory.sqlite",
+        memory_path=agent_workspace / "memory" / "memory.sqlite",
         skill_roots=_local_skill_roots(root, cfg),
+        agent_workspace_root=agent_workspace,
         active_project_root=root,
     )
 
@@ -151,6 +190,7 @@ def resolve_global_context(
             root if isinstance(root, SkillRoot) else SkillRoot.from_config(root)
             for root in cfg.host.skill_roots
         ],
+        agent_workspace_root=agent_workspace,
         active_project_root=active_project_root,
     )
 
@@ -214,7 +254,7 @@ def build_command_callbacks(
         callbacks["active_project_path"] = ctx.active_project_root
         callbacks["project_root"] = ctx.active_project_root
     if ctx.scope == "local":
-        callbacks["agent_workspace"] = ctx.content_root
+        callbacks["agent_workspace"] = ctx.agent_workspace_root
     elif agent_workspace is not None:
         callbacks["agent_workspace"] = Path(agent_workspace).expanduser().resolve()
     if command_registry is not None:
@@ -235,7 +275,7 @@ def _runtime_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _load_local_config(project_root: Path) -> dict[str, Any]:
+def _load_local_config(project_root: Path) -> LocalConfig:
     """Merge global ~/.maurice/config.yaml with local .maurice/config.yaml."""
     import yaml
 
@@ -245,7 +285,20 @@ def _load_local_config(project_root: Path) -> dict[str, Any]:
             data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
             if isinstance(data, dict):
                 cfg = _merge_local_config(cfg, data)
-    return cfg
+    return LocalConfig(cfg)
+
+
+def _local_agent_workspace(cfg: LocalConfig) -> Path:
+    usage = cfg.usage
+    workspace = usage.get("workspace")
+    if isinstance(workspace, str) and workspace.strip():
+        return (Path(workspace).expanduser().resolve() / "agents" / "main")
+    return maurice_home() / "agents" / "main"
+
+
+def _ensure_agent_workspace_dirs(agent_workspace: Path) -> None:
+    for relative in ("content", "memory", "dreams", "reminders"):
+        (agent_workspace / relative).mkdir(parents=True, exist_ok=True)
 
 
 def _merge_local_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -280,7 +333,7 @@ def _merge_host_config(base: dict[str, Any], override: dict[str, Any]) -> dict[s
     return merged
 
 
-def _local_skill_roots(project_root: Path, cfg: dict[str, Any]) -> list[SkillRoot]:
+def _local_skill_roots(project_root: Path, cfg: LocalConfig) -> list[SkillRoot]:
     roots = [
         SkillRoot(
             path=str(Path(__file__).parent.parent / "system_skills"),

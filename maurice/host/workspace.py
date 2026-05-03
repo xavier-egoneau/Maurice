@@ -27,6 +27,12 @@ WORKSPACE_DIRS = (
     "sessions",
 )
 
+DEFAULT_SEARXNG_URL = "http://localhost:18080"
+
+
+def default_web_search_config() -> dict[str, str]:
+    return {"search_provider": "searxng", "base_url": DEFAULT_SEARXNG_URL}
+
 
 def initialize_workspace(
     workspace_root: str | Path,
@@ -91,7 +97,7 @@ def initialize_workspace(
             }
         }
     }
-    skills_config = {"skills": {}}
+    skills_config = {"skills": {"web": default_web_search_config()}}
 
     write_yaml_file(host_config_path(workspace), host_config)
     write_yaml_file(kernel_config_path(workspace), kernel_config)

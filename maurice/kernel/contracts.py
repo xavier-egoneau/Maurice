@@ -46,6 +46,8 @@ class PermissionClass(StrEnum):
     FS_READ = "fs.read"
     FS_WRITE = "fs.write"
     NETWORK_OUTBOUND = "network.outbound"
+    INTEGRATION_READ = "integration.read"
+    INTEGRATION_WRITE = "integration.write"
     SHELL_EXEC = "shell.exec"
     SECRET_READ = "secret.read"
     AGENT_SPAWN = "agent.spawn"
@@ -252,6 +254,7 @@ class SkillCommandExport(MauriceModel):
         default_factory=lambda: ["local", "global"],
         validation_alias=AliasChoices("available_in", "visible_in"),
     )
+    project_required: bool = False
 
     @field_validator("name")
     @classmethod
@@ -277,6 +280,7 @@ class CommandDeclaration(MauriceModel):
     renderer: Literal["text", "markdown"] = "markdown"
     aliases: list[str] = Field(default_factory=list)
     available_in: list[Literal["local", "global"]] = Field(default_factory=lambda: ["local", "global"])
+    project_required: bool = False
 
 
 class SkillRequires(MauriceModel):
@@ -354,31 +358,8 @@ class AgentConfig(MauriceModel):
     default: bool = False
     channels: list[str] = Field(default_factory=list)
     model_chain: list[str] = Field(default_factory=list)
+    worker_model_chain: list[str] = Field(default_factory=list)
     event_stream: str | None = None
-
-
-class SubagentRunState(StrEnum):
-    CREATED = "created"
-    RUNNING = "running"
-    CHECKPOINTING = "checkpointing"
-    PAUSED = "paused"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
-class SubagentRun(MauriceModel):
-    id: str
-    parent_agent_id: str
-    task: str
-    workspace: str
-    write_scope: dict[str, Any] = Field(default_factory=dict)
-    permission_scope: dict[str, Any] = Field(default_factory=dict)
-    context_inheritance: Literal["none", "current_task", "linked_session"] = "current_task"
-    base_agent: str | None = None
-    state: SubagentRunState = SubagentRunState.CREATED
-    event_stream: str | None = None
-    safe_to_resume: bool = False
 
 
 class DreamFreshness(MauriceModel):
