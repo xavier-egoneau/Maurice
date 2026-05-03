@@ -38,6 +38,7 @@ class SkillHooks:
     schedule_reminder: Callable[..., Any] | None = dc_field(default=None)
     cancel_job: Callable[..., Any] | None = dc_field(default=None)
     vision_backend: Any = dc_field(default=None)
+    agents: dict[str, dict[str, Any]] = dc_field(default_factory=dict)
 
 
 class SkillState(StrEnum):

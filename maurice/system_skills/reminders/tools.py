@@ -133,6 +133,8 @@ def build_executors(ctx: Any) -> dict[str, Any]:
         event_store=ctx.event_store,
         schedule_reminder=ctx.hooks.schedule_reminder,
         cancel_job=ctx.hooks.cancel_job,
+        agents=ctx.hooks.agents,
+        agent_id=ctx.agent_id,
     )
 
 
@@ -142,6 +144,8 @@ def reminders_tool_executors(
     event_store: EventStore | None = None,
     schedule_reminder: ScheduleReminder | None = None,
     cancel_job: CancelReminderJob | None = None,
+    agents: dict[str, dict[str, Any]] | None = None,
+    agent_id: str = "main",
 ) -> dict[str, Any]:
     return {
         "reminders.create": lambda arguments: create(
@@ -149,6 +153,8 @@ def reminders_tool_executors(
             context,
             event_store=event_store,
             schedule_reminder=schedule_reminder,
+            agents=agents,
+            agent_id=agent_id,
         ),
         "reminders.list": lambda arguments: list_reminders(arguments, context),
         "reminders.cancel": lambda arguments: cancel(
@@ -162,6 +168,8 @@ def reminders_tool_executors(
             context,
             event_store=event_store,
             schedule_reminder=schedule_reminder,
+            agents=agents,
+            agent_id=agent_id,
         ),
         "maurice.system_skills.reminders.tools.list_reminders": lambda arguments: list_reminders(arguments, context),
         "maurice.system_skills.reminders.tools.cancel": lambda arguments: cancel(
@@ -179,10 +187,23 @@ def create(
     *,
     event_store: EventStore | None = None,
     schedule_reminder: ScheduleReminder | None = None,
+    agents: dict[str, dict[str, Any]] | None = None,
+    agent_id: str = "main",
 ) -> ToolResult:
     text = arguments.get("text")
     if not isinstance(text, str) or not text.strip():
         return _error("invalid_arguments", "reminders.create requires non-empty text.")
+    agents = agents or {}
+    targets = _resolve_targets(arguments, agents=agents, current_agent_id=agent_id)
+    if targets:
+        return _create_for_targets(
+            arguments,
+            context,
+            targets=targets,
+            agents=agents,
+            event_store=event_store,
+            schedule_reminder=schedule_reminder,
+        )
     try:
         run_at, trigger_type, trigger_value, interval_seconds = _resolve_schedule(arguments)
     except ValueError as exc:
@@ -219,6 +240,66 @@ def create(
         trust="local_mutable",
         artifacts=[{"type": "file", "path": str(_store_path(context))}],
         events=[{"name": "reminder.created", "payload": {"reminder_id": reminder.id}}],
+        error=None,
+    )
+
+
+def _create_for_targets(
+    arguments: dict[str, Any],
+    context: PermissionContext,
+    *,
+    targets: list[str],
+    agents: dict[str, dict[str, Any]],
+    event_store: EventStore | None,
+    schedule_reminder: ScheduleReminder | None,
+) -> ToolResult:
+    text = arguments["text"].strip()
+    try:
+        run_at, trigger_type, trigger_value, interval_seconds = _resolve_schedule(arguments)
+    except ValueError as exc:
+        return _error("invalid_arguments", str(exc))
+    if run_at < datetime.now(UTC) - timedelta(seconds=60):
+        return _error(
+            "invalid_arguments",
+            "reminders.create requires a future schedule. Use the current date and local timezone when the user gives a time.",
+        )
+
+    created = []
+    for target in targets:
+        agent = agents.get(target)
+        if not isinstance(agent, dict) or not isinstance(agent.get("workspace"), str):
+            return _error("invalid_arguments", f"Unknown reminder target agent: {target}")
+        target_context = context.model_copy(update={"agent_workspace_root": agent["workspace"]})
+        store = ReminderStore(_store_path(target_context))
+        reminder = store.create(
+            text=text,
+            run_at=run_at,
+            trigger_type=trigger_type,
+            trigger_value=trigger_value,
+            interval_seconds=interval_seconds,
+        )
+        if schedule_reminder is not None:
+            job_id = schedule_reminder(
+                {
+                    "agent_id": target,
+                    "reminder_id": reminder.id,
+                    "text": reminder.text,
+                    "run_at": reminder.run_at,
+                    "interval_seconds": reminder.interval_seconds,
+                }
+            )
+            reminder = store.update_job(reminder.id, job_id)
+        _emit(event_store, "reminder.created", reminder, agent_id=target)
+        created.append({"agent_id": target, "reminder": reminder.model_dump(mode="json")})
+
+    label = "tout le monde" if len(targets) > 1 else targets[0]
+    return ToolResult(
+        ok=True,
+        summary=f"{len(created)} rappel(s) créé(s) pour {label}.",
+        data={"target_scope": arguments.get("target_scope"), "target_agents": targets, "reminders": created},
+        trust="local_mutable",
+        artifacts=[{"type": "file", "path": str(_store_path(context))}],
+        events=[{"name": "reminder.created_for_targets", "payload": {"target_agents": targets}}],
         error=None,
     )
 
@@ -382,6 +463,33 @@ def _optional_positive_int(value: Any, *, field: str) -> int | None:
     return value
 
 
+def _resolve_targets(
+    arguments: dict[str, Any],
+    *,
+    agents: dict[str, dict[str, Any]],
+    current_agent_id: str,
+) -> list[str]:
+    target_agent_id = arguments.get("target_agent_id")
+    target_scope = arguments.get("target_scope")
+    if target_agent_id is None and target_scope is None:
+        return []
+    if target_agent_id is not None:
+        if not isinstance(target_agent_id, str) or not target_agent_id.strip():
+            raise ValueError("target_agent_id must be a non-empty string.")
+        target = target_agent_id.strip()
+        if target not in agents:
+            raise ValueError(f"Unknown active agent: {target}")
+        return [target]
+    if not isinstance(target_scope, str):
+        raise ValueError("target_scope must be a string.")
+    normalized = target_scope.strip().lower()
+    if normalized in {"current", "current_agent", "agent"}:
+        return [current_agent_id] if current_agent_id in agents else []
+    if normalized not in {"all_active_agents", "all", "everyone", "tout_le_monde", "tous_les_agents"}:
+        raise ValueError("target_scope must be current_agent or all_active_agents.")
+    return sorted(agents)
+
+
 def _confirmation_message(reminder: Reminder) -> str:
     local_time = _human_local_time(reminder.run_at.astimezone())
     if reminder.interval_seconds:
@@ -430,13 +538,13 @@ _MONTHS_FR = [
 ]
 
 
-def _emit(event_store: EventStore | None, name: str, reminder: Reminder) -> None:
+def _emit(event_store: EventStore | None, name: str, reminder: Reminder, *, agent_id: str = "system") -> None:
     if event_store is None:
         return
     event_store.emit(
         name=name,
         origin="skill:reminders",
-        agent_id="system",
+        agent_id=agent_id,
         session_id="reminders",
         correlation_id=reminder.id,
         payload={

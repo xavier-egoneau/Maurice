@@ -22,6 +22,20 @@ def context(tmp_path) -> PermissionContext:
     return PermissionContext(workspace_root=str(workspace), runtime_root=str(runtime))
 
 
+def agent_context(tmp_path, agent_id: str) -> PermissionContext:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    workspace.mkdir(exist_ok=True)
+    runtime.mkdir(exist_ok=True)
+    agent_workspace = workspace / "agents" / agent_id
+    agent_workspace.mkdir(parents=True, exist_ok=True)
+    return PermissionContext(
+        workspace_root=str(workspace),
+        runtime_root=str(runtime),
+        agent_workspace_root=str(agent_workspace),
+    )
+
+
 def test_reminder_create_persists_and_schedules_job(tmp_path) -> None:
     permission_context = context(tmp_path)
     job_store = JobStore(tmp_path / "workspace" / "agents" / "main" / "jobs.json")
@@ -163,6 +177,63 @@ def test_reminder_create_treats_zero_interval_as_one_shot(tmp_path) -> None:
     assert created.data["reminder"]["interval_seconds"] is None
     assert job_store.list()[0].interval_seconds is None
     assert "puis toutes" not in created.summary
+
+
+def test_reminder_create_can_target_all_active_agents(tmp_path) -> None:
+    permission_context = agent_context(tmp_path, "main")
+    jobs_by_agent = {}
+
+    def schedule(payload):
+        target = payload["agent_id"]
+        job_store = jobs_by_agent.setdefault(
+            target,
+            JobStore(tmp_path / "workspace" / "agents" / target / "jobs.json"),
+        )
+        job = job_store.schedule(
+            name="reminders.fire",
+            run_at=payload["run_at"],
+            owner="skill:reminders",
+            payload={"agent_id": target, "arguments": {"reminder_id": payload["reminder_id"]}},
+            interval_seconds=payload.get("interval_seconds"),
+        )
+        return job.id
+
+    created = create(
+        {"text": "Réunion", "trigger_type": "at", "trigger_value": "15:00", "target_scope": "all_active_agents"},
+        permission_context,
+        schedule_reminder=schedule,
+        agents={
+            "main": {"id": "main", "workspace": str(tmp_path / "workspace" / "agents" / "main")},
+            "paul": {"id": "paul", "workspace": str(tmp_path / "workspace" / "agents" / "paul")},
+        },
+        agent_id="main",
+    )
+
+    assert created.ok
+    assert created.data["target_agents"] == ["main", "paul"]
+    assert len(ReminderStore(tmp_path / "workspace" / "agents" / "main" / "reminders" / "reminders.json").list()) == 1
+    assert len(ReminderStore(tmp_path / "workspace" / "agents" / "paul" / "reminders" / "reminders.json").list()) == 1
+    assert jobs_by_agent["main"].list()[0].payload["agent_id"] == "main"
+    assert jobs_by_agent["paul"].list()[0].payload["agent_id"] == "paul"
+
+
+def test_reminder_create_can_target_named_agent(tmp_path) -> None:
+    permission_context = agent_context(tmp_path, "main")
+
+    created = create(
+        {"text": "Dormir", "trigger_type": "at", "trigger_value": "22:00", "target_agent_id": "paul"},
+        permission_context,
+        agents={
+            "main": {"id": "main", "workspace": str(tmp_path / "workspace" / "agents" / "main")},
+            "paul": {"id": "paul", "workspace": str(tmp_path / "workspace" / "agents" / "paul")},
+        },
+        agent_id="main",
+    )
+
+    assert created.ok
+    assert created.data["target_agents"] == ["paul"]
+    assert not (tmp_path / "workspace" / "agents" / "main" / "reminders" / "reminders.json").exists()
+    assert ReminderStore(tmp_path / "workspace" / "agents" / "paul" / "reminders" / "reminders.json").list()[0].text == "Dormir"
 
 
 def test_recurring_reminder_uses_interval_and_stays_scheduled_after_fire(tmp_path) -> None:

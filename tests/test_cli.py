@@ -11,6 +11,7 @@ from maurice.kernel.approvals import ApprovalStore
 from maurice.host.cli import build_parser, main
 from maurice.host.cli import (
     _deliver_daily_digest,
+    _deliver_reminder_result,
     _ensure_configured_scheduler_jobs,
     _ollama_model_choices,
     _scheduler_handlers,
@@ -81,7 +82,7 @@ def test_cli_interactive_onboard_configures_basics(tmp_path, capsys, monkeypatch
             "",
             "auto_heberge",
             "http://localhost:11434",
-            "llama3.2",
+            "gemma4",
         ]
     )
     monkeypatch.setattr(
@@ -98,7 +99,7 @@ def test_cli_interactive_onboard_configures_basics(tmp_path, capsys, monkeypatch
     assert bundle.host.gateway.port == 18792
     assert bundle.kernel.model.provider == "ollama"
     assert bundle.kernel.model.protocol == "ollama_chat"
-    assert bundle.kernel.model.name == "llama3.2"
+    assert bundle.kernel.model.name == "gemma4"
     assert bundle.skills.skills["web"]["search_provider"] == "searxng"
     assert bundle.skills.skills["web"]["base_url"] == "http://localhost:8080"
 
@@ -113,7 +114,7 @@ def test_cli_interactive_onboard_keeps_existing_values_on_enter(tmp_path, capsys
             "",
             "auto_heberge",
             "http://localhost:11434",
-            "llama3.2",
+            "gemma4",
         ]
     )
     monkeypatch.setattr("builtins.input", lambda _prompt: next(first_answers))
@@ -133,7 +134,7 @@ def test_cli_interactive_onboard_keeps_existing_values_on_enter(tmp_path, capsys
     assert bundle.host.gateway.port == 18792
     assert bundle.kernel.model.provider == "ollama"
     assert bundle.kernel.model.protocol == "ollama_chat"
-    assert bundle.kernel.model.name == "llama3.2"
+    assert bundle.kernel.model.name == "gemma4"
     assert bundle.kernel.model.base_url == "http://localhost:11434"
     assert bundle.skills.skills["web"]["search_provider"] == "searxng"
     assert bundle.skills.skills["web"]["base_url"] == "http://localhost:8080"
@@ -144,7 +145,7 @@ def test_cli_onboard_agent_model_updates_only_agent_model(tmp_path, capsys, monk
     main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
     main(["agents", "create", "coding", "--workspace", str(workspace)])
     capsys.readouterr()
-    answers = iter(["ollama", "auto_heberge", "http://localhost:11434", "llama3.2"])
+    answers = iter(["ollama", "auto_heberge", "http://localhost:11434", "gemma4"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     assert main(["onboard", "--workspace", str(workspace), "--agent", "coding", "--model"]) == 0
@@ -156,7 +157,7 @@ def test_cli_onboard_agent_model_updates_only_agent_model(tmp_path, capsys, monk
     assert bundle.agents.agents["coding"].model == {
         "provider": "ollama",
         "protocol": "ollama_chat",
-        "name": "llama3.2",
+        "name": "gemma4",
         "base_url": "http://localhost:11434",
         "credential": None,
     }
@@ -166,7 +167,7 @@ def test_cli_onboard_default_agent_model_updates_kernel_default(tmp_path, capsys
     workspace = tmp_path / "workspace"
     main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
     capsys.readouterr()
-    answers = iter(["ollama", "auto_heberge", "http://localhost:11434", "llama3.2"])
+    answers = iter(["ollama", "auto_heberge", "http://localhost:11434", "gemma4"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     assert main(["onboard", "--workspace", str(workspace), "--agent", "main", "--model"]) == 0
@@ -174,7 +175,7 @@ def test_cli_onboard_default_agent_model_updates_kernel_default(tmp_path, capsys
     bundle = load_workspace_config(workspace)
     assert bundle.kernel.model.provider == "ollama"
     assert bundle.kernel.model.protocol == "ollama_chat"
-    assert bundle.kernel.model.name == "llama3.2"
+    assert bundle.kernel.model.name == "gemma4"
     assert bundle.agents.agents["main"].model is None
 
 
@@ -278,7 +279,7 @@ def test_run_one_turn_uses_agent_model_name(tmp_path, capsys, monkeypatch) -> No
         model={
             "provider": "ollama",
             "protocol": "ollama_chat",
-            "name": "llama3.2",
+            "name": "gemma4",
             "base_url": "http://localhost:11434",
             "credential": None,
         },
@@ -305,7 +306,7 @@ def test_run_one_turn_uses_agent_model_name(tmp_path, capsys, monkeypatch) -> No
         agent_id="coding",
     )
 
-    assert captured["model"] == "llama3.2"
+    assert captured["model"] == "gemma4"
     assert captured["session_root"] == workspace / "sessions"
     assert captured["event_path"] == workspace / "agents" / "coding" / "events.jsonl"
     assert captured["approvals_path"] == workspace / "agents" / "coding" / "approvals.json"
@@ -353,7 +354,7 @@ def test_cli_interactive_onboard_configures_telegram_bot(tmp_path, capsys, monke
             "n",
             "auto_heberge",
             "http://localhost:11434",
-            "llama3.2",
+            "gemma4",
         ]
     )
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
@@ -1962,6 +1963,42 @@ def test_daily_digest_delivers_to_configured_telegram_chats(tmp_path, monkeypatc
     assert [item[1] for item in sent] == [123, 456]
     session = SessionStore(workspace / "sessions").load("main", "daily")
     assert session.messages[-1].content == "Bonjour, voici ton daily Maurice."
+
+
+def test_web_created_reminder_delivers_to_configured_telegram_session(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
+    host_path = host_config_path(workspace)
+    host_data = read_yaml_file(host_path)
+    host_data["host"]["channels"]["telegram"] = {
+        "adapter": "telegram",
+        "enabled": True,
+        "agent": "main",
+        "credential": "telegram_bot",
+        "allowed_users": [123],
+        "allowed_chats": [],
+    }
+    write_yaml_file(host_path, host_data)
+    sent = []
+    monkeypatch.setattr("maurice.host.delivery._credential_value", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr("maurice.host.delivery._telegram_send_message", lambda token, chat_id, text: sent.append((token, chat_id, text)))
+
+    _deliver_reminder_result(
+        workspace,
+        {
+            "agent_id": "main",
+            "session_id": "web:main:1",
+            "channel": "web",
+            "peer_id": "web:main:1",
+        },
+        "🔔 Faire une pause",
+    )
+
+    assert sent == [("token", 123, "🔔 Faire une pause")]
+    web_session = SessionStore(workspace / "sessions").load("main", "web:main:1")
+    telegram_session = SessionStore(workspace / "sessions").load("main", "telegram:123")
+    assert web_session.messages[-1].content == "🔔 Faire une pause"
+    assert telegram_session.messages[-1].content == "🔔 Faire une pause"
 
 
 def test_cli_gateway_local_message_routes_through_runtime(tmp_path, capsys) -> None:

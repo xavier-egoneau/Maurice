@@ -385,6 +385,11 @@ def _scheduler_handlers(workspace_root: Path, agent_id: str):
             scope=ctx.scope,
             lifecycle=ctx.lifecycle,
             vision_backend=build_vision_backend(ctx.skills_config.get("vision")),
+            agents={
+                item.id: item.model_dump(mode="json")
+                for item in bundle.agents.agents.values()
+                if item.status == "active"
+            },
         ),
     )
     executors = registry.build_executor_map(skill_ctx)

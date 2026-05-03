@@ -1097,6 +1097,21 @@ function sessionFor(agentId) {
   return created;
 }
 
+async function sessionForGlobalSurface(agentId) {
+  const fallback = sessionFor(agentId);
+  if (WEB_TOKEN) return fallback;
+  try {
+    const res = await apiFetch(`/api/agent?agent_id=${encodeURIComponent(agentId)}`);
+    if (!res.ok) return fallback;
+    const data = await res.json();
+    const shared = data?.telegram?.default_session_id;
+    return typeof shared === "string" && shared ? shared : fallback;
+  } catch (error) {
+    console.error(error);
+    return fallback;
+  }
+}
+
 function setOnline(on) {
   statusDot.classList.toggle("on", on);
 }
@@ -1931,7 +1946,7 @@ agentSelect.onchange = async () => {
   }
   activeAgent = agentSelect.value || "main";
   localStorage.setItem(AGENT_KEY, activeAgent);
-  sessionId = sessionFor(activeAgent);
+  sessionId = await sessionForGlobalSurface(activeAgent);
   messages.innerHTML = "";
   renderedMessageKeys = new Set();
   await loadHistory();
@@ -2098,7 +2113,7 @@ function closeAutocomplete() {
 
 (async function init() {
   await loadAgents();
-  sessionId = sessionFor(activeAgent);
+  sessionId = await sessionForGlobalSurface(activeAgent);
   await loadHistory();
   await refreshCommands();
   await loadGitChanges();

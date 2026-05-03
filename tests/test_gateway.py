@@ -1198,6 +1198,27 @@ def test_gateway_agent_config_update_changes_provider_and_telegram(tmp_path) -> 
     assert skills_data["skills"]["web"]["base_url"] == "https://search.example"
 
 
+def test_gateway_agent_config_exposes_single_telegram_default_session(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    (runtime / "maurice").mkdir(parents=True)
+    initialize_workspace(workspace, runtime, permission_profile="limited")
+    host_data = read_yaml_file(host_config_path(workspace))
+    host_data.setdefault("host", {}).setdefault("channels", {})["telegram"] = {
+        "adapter": "telegram",
+        "enabled": True,
+        "agent": "main",
+        "credential": "telegram_bot",
+        "allowed_users": [123],
+        "allowed_chats": [],
+    }
+    write_yaml_file(host_config_path(workspace), host_data)
+
+    status = _gateway_agent_config_status(workspace, "main")
+
+    assert status["telegram"]["default_session_id"] == "telegram:123"
+
+
 def test_gateway_agent_config_update_syncs_web_telegram_pollers(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     runtime = tmp_path / "runtime"

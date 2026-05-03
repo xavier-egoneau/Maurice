@@ -110,6 +110,11 @@ def build_global_agent_loop(
             ),
             cancel_job=_cancel_job_callback(workspace, agent.id),
             vision_backend=build_vision_backend(ctx.skills_config.get("vision")),
+            agents={
+                item.id: item.model_dump(mode="json")
+                for item in bundle.agents.agents.values()
+                if item.status == "active"
+            },
         ),
     )
     sessions_cfg = bundle.kernel.sessions

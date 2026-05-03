@@ -37,6 +37,13 @@ tools:
         interval_seconds:
           type: integer
           description: Optional repeat interval in seconds after the first run_at. Omit for one-shot reminders; 0 is treated as omitted.
+        target_agent_id:
+          type: string
+          description: Optional active agent id to receive this reminder.
+        target_scope:
+          type: string
+          enum: ["current_agent", "all_active_agents"]
+          description: Use all_active_agents only when the user clearly asks for everyone / tous les agents / tout le monde.
       required: ["text"]
     permission_class: fs.write
     permission_scope:

@@ -11,7 +11,12 @@ from maurice.kernel.config import load_workspace_config
 from maurice.kernel.events import EventStore
 from maurice.kernel.scheduler import JobStore
 from maurice.kernel.session import SessionStore
-from maurice.host.telegram import _credential_value, _int_list, _telegram_send_message
+from maurice.host.telegram import (
+    _credential_value,
+    _int_list,
+    _telegram_channel_configs,
+    _telegram_send_message,
+)
 
 
 def _schedule_reminder_callback(
@@ -24,7 +29,8 @@ def _schedule_reminder_callback(
     source_metadata: dict[str, Any] | None,
 ):
     def schedule(payload: dict[str, object]) -> str:
-        store = JobStore(workspace / "agents" / agent_id / "jobs.json")
+        target_agent_id = str(payload.get("agent_id") or agent_id)
+        store = JobStore(workspace / "agents" / target_agent_id / "jobs.json")
         metadata = source_metadata or {}
         job = store.schedule(
             name="reminders.fire",
@@ -34,7 +40,7 @@ def _schedule_reminder_callback(
             if isinstance(payload.get("interval_seconds"), int)
             else None,
             payload={
-                "agent_id": agent_id,
+                "agent_id": target_agent_id,
                 "session_id": session_id,
                 "channel": source_channel,
                 "peer_id": source_peer_id,
@@ -50,33 +56,73 @@ def _schedule_reminder_callback(
 def _deliver_reminder_result(workspace: Path, payload: dict[str, Any], text: str) -> None:
     agent_id = str(payload.get("agent_id") or "main")
     session_id = str(payload.get("session_id") or "reminders")
+    store = SessionStore(workspace / "sessions")
     if session_id and session_id != "reminders":
-        store = SessionStore(workspace / "sessions")
-        try:
-            store.load(agent_id, session_id)
-        except FileNotFoundError:
-            store.create(agent_id, session_id=session_id)
-        store.append_message(
-            agent_id,
-            session_id,
-            role="assistant",
-            content=text,
-            metadata={"reminder": True},
-        )
-    if payload.get("channel") != "telegram":
-        return
-    chat_id = payload.get("chat_id")
-    if not isinstance(chat_id, int):
-        return
+        _append_reminder_message(store, agent_id, session_id, text)
+
     bundle = load_workspace_config(workspace)
-    telegram = bundle.host.channels.get("telegram")
-    if not isinstance(telegram, dict):
-        return
-    credential_name = str(telegram.get("credential") or "telegram_bot")
-    token = _credential_value(workspace, credential_name)
-    if not token:
-        return
-    _telegram_send_message(token, chat_id, text)
+    for target in _telegram_reminder_targets(workspace, bundle, agent_id, payload):
+        _telegram_send_message(target["token"], target["chat_id"], text)
+        target_session_id = target.get("session_id")
+        if isinstance(target_session_id, str) and target_session_id and target_session_id != session_id:
+            _append_reminder_message(store, agent_id, target_session_id, text)
+
+
+def _append_reminder_message(store: SessionStore, agent_id: str, session_id: str, text: str) -> None:
+    try:
+        store.load(agent_id, session_id)
+    except FileNotFoundError:
+        store.create(agent_id, session_id=session_id)
+    store.append_message(
+        agent_id,
+        session_id,
+        role="assistant",
+        content=text,
+        metadata={"reminder": True},
+    )
+
+
+def _telegram_reminder_targets(
+    workspace: Path,
+    bundle,
+    agent_id: str,
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+
+    def add_target(token: str, chat_id: int, session_id: str | None) -> None:
+        if not token:
+            return
+        key = (token, chat_id)
+        if key in seen:
+            return
+        seen.add(key)
+        targets.append({"token": token, "chat_id": chat_id, "session_id": session_id})
+
+    source_chat_id = payload.get("chat_id")
+    if payload.get("channel") == "telegram" and isinstance(source_chat_id, int):
+        channel_name = str(payload.get("telegram_channel") or "telegram")
+        telegram = bundle.host.channels.get(channel_name)
+        if not isinstance(telegram, dict):
+            telegram = bundle.host.channels.get("telegram")
+        if isinstance(telegram, dict):
+            token = _credential_value(workspace, str(telegram.get("credential") or "telegram_bot"))
+            peer_id = payload.get("peer_id")
+            source_session = f"telegram:{peer_id}" if isinstance(peer_id, str) and peer_id else None
+            add_target(token, source_chat_id, source_session)
+
+    for _channel_name, telegram in _telegram_channel_configs(bundle):
+        if telegram.get("enabled", True) is False:
+            continue
+        if str(telegram.get("agent") or "main") != agent_id:
+            continue
+        token = _credential_value(workspace, str(telegram.get("credential") or "telegram_bot"))
+        for user_id in _int_list(telegram.get("allowed_users")):
+            add_target(token, user_id, f"telegram:{user_id}")
+        for chat_id in _int_list(telegram.get("allowed_chats")):
+            add_target(token, chat_id, f"telegram:{chat_id}")
+    return targets
 
 
 def _build_daily_digest(

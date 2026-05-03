@@ -11,5 +11,12 @@ Prefer `trigger_type` and `trigger_value` instead of inventing ISO datetimes:
 For one-shot reminders, omit `interval_seconds`. Do not invent a repeat
 interval unless the user explicitly asks for recurrence.
 
+Reminder ownership defaults to the current agent. If the user names another
+agent clearly, set `target_agent_id`. If the user says "tout le monde", "tous",
+"tous les agents", "l'equipe", or equivalent wording, set
+`target_scope="all_active_agents"`. If "tout le monde" could mean people outside
+Maurice or you are not sure whether the user wants a global agent reminder, ask
+for confirmation before creating it.
+
 For recurring reminders at a fixed local hour, choose the next local occurrence as `run_at` and set `interval_seconds` (`86400` for daily, `604800` for weekly).
 Never create a reminder in the past. If the user gives a past date, ask for a future date.

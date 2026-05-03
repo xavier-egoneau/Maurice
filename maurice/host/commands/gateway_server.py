@@ -1401,12 +1401,15 @@ def _gateway_agent_config_status(workspace: Path, agent_id: str) -> dict[str, An
     telegram_payload: dict[str, Any] = {"enabled": False}
     if telegram is not None:
         channel_name, channel_config = telegram
+        allowed_users = _int_list(channel_config.get("allowed_users"))
+        allowed_chats = _int_list(channel_config.get("allowed_chats"))
         telegram_payload = {
             "enabled": channel_config.get("enabled", True) is not False,
             "channel": channel_name,
             "credential": channel_config.get("credential"),
-            "allowed_users": _int_list(channel_config.get("allowed_users")),
-            "allowed_chats": _int_list(channel_config.get("allowed_chats")),
+            "allowed_users": allowed_users,
+            "allowed_chats": allowed_chats,
+            "default_session_id": _default_web_session_for_telegram(allowed_users, allowed_chats),
             "status": channel_config.get("status"),
         }
     return {
@@ -1443,6 +1446,13 @@ def _gateway_agent_config_status(workspace: Path, agent_id: str) -> dict[str, An
         "web_search": web_search,
         "telegram": telegram_payload,
     }
+
+
+def _default_web_session_for_telegram(allowed_users: list[int], allowed_chats: list[int]) -> str | None:
+    targets = [*allowed_users, *allowed_chats]
+    if len(targets) != 1:
+        return None
+    return f"telegram:{targets[0]}"
 
 
 def _gateway_agent_config_update(workspace: Path, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
