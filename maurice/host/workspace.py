@@ -19,9 +19,12 @@ from maurice.kernel.config import KernelConfig, write_yaml_file
 
 WORKSPACE_DIRS = (
     "agents/main",
+    "agents/main/content",
+    "agents/main/memory",
+    "agents/main/dreams",
+    "agents/main/reminders",
     "skills",
     "sessions",
-    "content",
 )
 
 
@@ -39,6 +42,7 @@ def initialize_workspace(
     for relative in WORKSPACE_DIRS:
         (workspace / relative).mkdir(parents=True, exist_ok=True)
     ensure_workspace_content_migrated(workspace)
+    ensure_agent_memory_migrated(workspace, agent_id="main")
     ensure_workspace_config_migrated(workspace)
 
     host_config = {
@@ -98,22 +102,88 @@ def initialize_workspace(
 
 
 def ensure_workspace_content_migrated(workspace_root: str | Path) -> Path:
-    """Rename the legacy user-facing artifacts directory to content."""
+    """Move legacy workspace-global content into the main agent workspace."""
     workspace = Path(workspace_root).expanduser().resolve()
+    agent_root = workspace / "agents" / "main"
+    agent_content = agent_root / "content"
+    agent_content.mkdir(parents=True, exist_ok=True)
+
     legacy = workspace / "artifacts"
     content = workspace / "content"
     if legacy.exists():
-        if not content.exists():
-            legacy.rename(content)
-        else:
-            for item in legacy.iterdir():
-                destination = content / item.name
-                if destination.exists():
-                    continue
-                shutil.move(str(item), str(destination))
-            try:
-                legacy.rmdir()
-            except OSError:
-                pass
-    content.mkdir(parents=True, exist_ok=True)
-    return content
+        for item in legacy.iterdir():
+            destination = agent_content / item.name
+            if destination.exists():
+                continue
+            shutil.move(str(item), str(destination))
+        try:
+            legacy.rmdir()
+        except OSError:
+            pass
+
+    if content.exists():
+        _move_tree_contents(content / "dreams", agent_root / "dreams")
+        _move_tree_contents(content / "reminders", agent_root / "reminders")
+        for item in list(content.iterdir()):
+            destination = agent_content / item.name
+            if destination.exists():
+                continue
+            shutil.move(str(item), str(destination))
+        try:
+            content.rmdir()
+        except OSError:
+            pass
+    return agent_content
+
+
+def ensure_agent_memory_migrated(
+    workspace_root: str | Path,
+    *,
+    agent_id: str = "main",
+    agent_workspace: str | Path | None = None,
+) -> Path:
+    """Resolve and migrate durable memory for one agent."""
+    workspace = Path(workspace_root).expanduser().resolve()
+    agent_root = (
+        Path(agent_workspace).expanduser().resolve()
+        if agent_workspace is not None
+        else workspace / "agents" / agent_id
+    )
+    memory_dir = agent_root / "memory"
+    current = memory_dir / "memory.sqlite"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+
+    if agent_id == "main" and not current.exists():
+        for legacy in (
+            workspace / "memory" / "memory.sqlite",
+            workspace / "skills" / "memory" / "memory.sqlite",
+        ):
+            if legacy.exists():
+                legacy.replace(current)
+                try:
+                    legacy.parent.rmdir()
+                except OSError:
+                    pass
+                break
+    return current
+
+
+def ensure_workspace_memory_migrated(workspace_root: str | Path) -> Path:
+    """Backward-compatible wrapper for the main agent memory path."""
+    return ensure_agent_memory_migrated(workspace_root, agent_id="main")
+
+
+def _move_tree_contents(source: Path, destination: Path) -> None:
+    if not source.exists():
+        return
+    destination.mkdir(parents=True, exist_ok=True)
+    for item in source.iterdir():
+        target = destination / item.name
+        if target.exists():
+            continue
+        shutil.move(str(item), str(target))
+    try:
+        source.rmdir()
+    except OSError:
+        pass
+

@@ -84,6 +84,7 @@ def create(
             {"type": "file", "path": str(skill_dir / "prompt.md")},
             {"type": "file", "path": str(skill_dir / "tools.py")},
             {"type": "file", "path": str(skill_dir / "dreams.md")},
+            {"type": "file", "path": str(skill_dir / "daily.md")},
         ],
         events=[{"name": "skills.created", "payload": {"name": name, "path": str(skill_dir)}}],
         error=None,
@@ -151,6 +152,7 @@ def _write_skill_skeleton(skill_dir: Path, name: str, description: str) -> None:
         "backend": None,
         "storage": None,
         "dreams": {"attachment": "dreams.md"},
+        "daily": {"attachment": "daily.md"},
         "events": {"state_publisher": None},
     }
     (skill_dir / "skill.yaml").write_text(
@@ -167,6 +169,10 @@ def _write_skill_skeleton(skill_dir: Path, name: str, description: str) -> None:
     )
     (skill_dir / "dreams.md").write_text(
         "This user skill does not provide dream inputs yet.\n",
+        encoding="utf-8",
+    )
+    (skill_dir / "daily.md").write_text(
+        "This user skill does not contribute to the daily yet.\n",
         encoding="utf-8",
     )
 

@@ -623,7 +623,7 @@ class MauriceServer:
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(str(socket_path))
         srv.listen(8)
-        srv.settimeout(2.0)
+        srv.settimeout(0.2)
 
         if self.ctx.lifecycle == "transient":
             threading.Thread(target=self._idle_watchdog, daemon=True).start()

@@ -48,6 +48,8 @@ def create_agent(
     workspace = Path(bundle.host.workspace_root)
     agent_workspace = workspace / "agents" / agent_id
     agent_workspace.mkdir(parents=True, exist_ok=False)
+    for relative in ("content", "memory", "dreams", "reminders"):
+        (agent_workspace / relative).mkdir(parents=True, exist_ok=True)
     agent = AgentConfig(
         id=agent_id,
         default=make_default,

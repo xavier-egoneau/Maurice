@@ -72,7 +72,11 @@ from maurice.host.telegram import (
     _int_list, _read_int_file, _write_int_file, _redact_secret,
     _telegram_sender_ids, _telegram_start_chat_action,
 )
-from maurice.host.workspace import ensure_workspace_content_migrated, initialize_workspace
+from maurice.host.workspace import (
+    ensure_workspace_content_migrated,
+    ensure_workspace_memory_migrated,
+    initialize_workspace,
+)
 from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.compaction import CompactionConfig
 from maurice.kernel.config import ConfigBundle, load_workspace_config, read_yaml_file, write_yaml_file
@@ -531,7 +535,16 @@ def _doctor_workspace(workspace_root: Path) -> None:
     ensure_workspace_credentials_migrated(workspace)
     ensure_workspace_config_migrated(workspace)
     ensure_workspace_content_migrated(workspace)
-    required_dirs = ["agents", "skills", "sessions", "content"]
+    ensure_workspace_memory_migrated(workspace)
+    required_dirs = [
+        "agents",
+        "agents/main/content",
+        "agents/main/memory",
+        "agents/main/dreams",
+        "agents/main/reminders",
+        "skills",
+        "sessions",
+    ]
     missing = [name for name in required_dirs if not (workspace / name).is_dir()]
     if missing:
         raise SystemExit(f"Maurice doctor: missing workspace dirs: {', '.join(missing)}")

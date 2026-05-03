@@ -12,7 +12,7 @@ from maurice.kernel.skills import (
 )
 
 
-def write_skill(root, name: str, body: str, prompt: str = "", dreams: str = ""):
+def write_skill(root, name: str, body: str, prompt: str = "", dreams: str = "", daily: str = ""):
     skill_dir = root / name
     skill_dir.mkdir(parents=True)
     (skill_dir / "skill.yaml").write_text(body, encoding="utf-8")
@@ -20,6 +20,8 @@ def write_skill(root, name: str, body: str, prompt: str = "", dreams: str = ""):
         (skill_dir / "prompt.md").write_text(prompt, encoding="utf-8")
     if dreams:
         (skill_dir / "dreams.md").write_text(dreams, encoding="utf-8")
+    if daily:
+        (skill_dir / "daily.md").write_text(daily, encoding="utf-8")
     return skill_dir
 
 
@@ -329,7 +331,7 @@ def test_loader_loads_system_self_update_skill() -> None:
     assert registry.tools["self_update.report_bug"].permission.permission_class == "fs.write"
 
 
-def test_loader_reads_prompt_and_dream_fragments(tmp_path) -> None:
+def test_loader_reads_prompt_dream_and_daily_fragments(tmp_path) -> None:
     root = tmp_path / "skills"
     write_skill(
         root,
@@ -337,12 +339,14 @@ def test_loader_reads_prompt_and_dream_fragments(tmp_path) -> None:
         minimal_manifest("echo"),
         prompt="Prompt fragment",
         dreams="Dream fragment",
+        daily="Daily fragment",
     )
 
     registry = SkillLoader([SkillRoot(path=str(root), origin="user", mutable=True)]).load()
 
     assert registry.skills["echo"].prompt == "Prompt fragment"
     assert registry.skills["echo"].dreams == "Dream fragment"
+    assert registry.skills["echo"].daily == "Daily fragment"
     assert registry.tools["echo.echo"].executor == "tests.echo.echo"
 
 

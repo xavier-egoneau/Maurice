@@ -29,7 +29,7 @@ def test_memory_remember_search_and_get(tmp_path) -> None:
     assert remembered.ok
     assert searched.data["memories"][0]["id"] == remembered.data["id"]
     assert fetched.data["memory"]["content"] == "Maurice keeps memory outside the kernel."
-    assert (tmp_path / "workspace" / "skills" / "memory" / "memory.sqlite").is_file()
+    assert (tmp_path / "workspace" / "agents" / "main" / "memory" / "memory.sqlite").is_file()
 
 
 def test_memory_can_use_context_memory_path(tmp_path) -> None:
@@ -45,7 +45,9 @@ def test_memory_can_use_context_memory_path(tmp_path) -> None:
     assert remembered.ok
     assert remembered.artifacts[0].path == str(memory_path.resolve())
     assert memory_path.is_file()
-    assert not (tmp_path / "workspace" / "skills" / "memory" / "memory.sqlite").exists()
+    assert not (
+        tmp_path / "workspace" / "agents" / "main" / "memory" / "memory.sqlite"
+    ).exists()
 
 
 def test_memory_search_missing_query_returns_tool_error(tmp_path) -> None:

@@ -17,7 +17,7 @@ from maurice.host.paths import (
     kernel_config_path,
     workspace_skills_config_path,
 )
-from maurice.host.workspace import ensure_workspace_content_migrated
+from maurice.host.workspace import ensure_workspace_content_migrated, ensure_workspace_memory_migrated
 from maurice.kernel.config import ConfigBundle, load_workspace_config
 from maurice.kernel.contracts import AgentConfig, Event, MauriceModel
 from maurice.kernel.events import EventStore
@@ -171,7 +171,16 @@ def _workspace_checks(workspace_root: str | Path) -> list[HostCheck]:
         return checks
 
     ensure_workspace_content_migrated(workspace)
-    required_dirs = ["agents", "skills", "sessions", "content"]
+    ensure_workspace_memory_migrated(workspace)
+    required_dirs = [
+        "agents",
+        "agents/main/content",
+        "agents/main/memory",
+        "agents/main/dreams",
+        "agents/main/reminders",
+        "skills",
+        "sessions",
+    ]
     missing = [name for name in required_dirs if not (workspace / name).is_dir()]
     required_files = [
         workspace_skills_config_path(workspace),

@@ -7,6 +7,7 @@ from maurice.host.context import (
     resolve_global_context,
     resolve_local_context,
 )
+from maurice.host.agents import create_agent
 from maurice.host.project import config_path, global_config_path
 from maurice.host.workspace import initialize_workspace
 from maurice.kernel.config import load_workspace_config
@@ -111,11 +112,41 @@ def test_resolve_global_context_uses_workspace_agent_state(tmp_path) -> None:
     assert ctx.sessions_path == workspace / "sessions"
     assert ctx.events_path == workspace / "agents" / "main" / "events.jsonl"
     assert ctx.approvals_path == workspace / "agents" / "main" / "approvals.json"
-    assert ctx.memory_path == workspace / "skills" / "memory" / "memory.sqlite"
+    assert ctx.memory_path == workspace / "agents" / "main" / "memory" / "memory.sqlite"
     assert ctx.run_root == workspace / "run"
     assert ctx.server_meta_path == workspace / "run" / "server.meta"
     assert ctx.permission_profile == "limited"
     assert any(Path(root.path).name == "system_skills" for root in ctx.skill_roots)
+
+
+def test_resolve_global_context_migrates_legacy_memory_path(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    legacy = workspace / "skills" / "memory" / "memory.sqlite"
+    (runtime / "maurice").mkdir(parents=True)
+    initialize_workspace(workspace, runtime)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("memory data", encoding="utf-8")
+    bundle = load_workspace_config(workspace)
+
+    ctx = resolve_global_context(workspace, agent=bundle.agents.agents["main"], bundle=bundle)
+
+    assert ctx.memory_path == workspace / "agents" / "main" / "memory" / "memory.sqlite"
+    assert ctx.memory_path.read_text(encoding="utf-8") == "memory data"
+    assert not legacy.exists()
+
+
+def test_resolve_global_context_scopes_memory_to_selected_agent(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    (runtime / "maurice").mkdir(parents=True)
+    initialize_workspace(workspace, runtime)
+    agent = create_agent(workspace, agent_id="paul")
+    bundle = load_workspace_config(workspace)
+
+    ctx = resolve_global_context(workspace, agent=agent, bundle=bundle)
+
+    assert ctx.memory_path == workspace / "agents" / "paul" / "memory" / "memory.sqlite"
 
 
 def test_command_callbacks_reset_and_compact_context_session(tmp_path) -> None:

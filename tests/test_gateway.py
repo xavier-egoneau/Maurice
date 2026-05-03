@@ -137,8 +137,8 @@ def test_gateway_attaches_context_usage_metadata() -> None:
     )
 
     assert result.outbound.metadata["context"]["total_tokens"] == 65_000
-    assert result.outbound.metadata["context"]["context_window_tokens"] == 128_000
-    assert result.outbound.metadata["context"]["level"] == "medium"
+    assert result.outbound.metadata["context"]["context_window_tokens"] == 250_000
+    assert result.outbound.metadata["context"]["level"] == "low"
 
 
 def test_gateway_surfaces_interrupted_partial_response() -> None:

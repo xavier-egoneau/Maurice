@@ -34,7 +34,11 @@ class PermissionContext(MauriceModel):
 
     def variables(self) -> dict[str, str]:
         workspace = Path(self.workspace_root).expanduser().resolve()
-        agent_workspace = Path(self.agent_workspace_root).expanduser().resolve() if self.agent_workspace_root else workspace
+        agent_workspace = (
+            Path(self.agent_workspace_root).expanduser().resolve()
+            if self.agent_workspace_root
+            else workspace / "agents" / "main"
+        )
         active_project = (
             Path(self.active_project_root).expanduser().resolve()
             if self.active_project_root

@@ -45,8 +45,10 @@ Triggered at step 3 of each turn. Three levels based on estimated token usage:
 | SUMMARIZE | 75% | LLM call to summarize oldest turns into one system block |
 | RESET | 90% | LLM summary of full session → new first message; emits `session.compacted` |
 
-Token estimate: `len(content) // 4` per message (configurable window, default 100k).
-Compaction does nothing below 60% and is silent below RESET level.
+Token estimate: `len(content) // 4` per message (configurable window, default 250k).
+Compaction does nothing below 60% and is silent below RESET level. At RESET
+level, Maurice leaves a visible notice in the session so the user knows the
+history was compacted.
 Can be disabled with `kernel.sessions.compaction: false`.
 
 ## Permission profiles

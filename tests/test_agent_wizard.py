@@ -83,10 +83,13 @@ def test_agent_wizard_accepts_all_and_numbered_skills(tmp_path) -> None:
         "reminders",
         "vision",
         "dreaming",
+        "workspace_dreaming",
+        "veille",
         "skills",
         "host",
         "self_update",
         "dev",
+        "daily",
     ]
 
 
@@ -411,7 +414,7 @@ def test_agent_wizard_full_agent_edit_can_jump_directly_to_skills(tmp_path) -> N
     assert "`explore`" in skills_question
     assert "Reponds par des numeros" in skills_question
 
-    model_question = _send(workspace, "1,4,11")
+    model_question = _send(workspace, "1,4,13")
     assert "Modele actuel" in model_question
     _send(workspace, "non")
     _send(workspace, "non")

@@ -16,8 +16,18 @@ def test_initialize_workspace_creates_expected_shape(tmp_path) -> None:
     created = initialize_workspace(workspace, runtime, permission_profile="limited")
 
     assert created == workspace.resolve()
-    for relative in ("agents/main", "skills", "sessions", "content"):
+    for relative in (
+        "agents/main",
+        "agents/main/content",
+        "agents/main/memory",
+        "agents/main/dreams",
+        "agents/main/reminders",
+        "skills",
+        "sessions",
+    ):
         assert (workspace / relative).is_dir()
+    assert not (workspace / "content").exists()
+    assert not (workspace / "memory").exists()
     assert (workspace / "skills.yaml").is_file()
     assert not (workspace / "config").exists()
     assert host_config_path(workspace).is_file()
@@ -57,3 +67,28 @@ def test_credentials_are_loaded_separately_from_config(tmp_path) -> None:
     assert credentials.credentials["openai"].value == "secret"
     assert credentials_path().is_file()
     assert not (workspace / "credentials.yaml").exists()
+
+
+def test_openai_chatgpt_configs_upgrade_legacy_context_window(tmp_path) -> None:
+    runtime = tmp_path / "runtime"
+    workspace = tmp_path / "workspace"
+    runtime.mkdir()
+    initialize_workspace(workspace, runtime)
+    (workspace / "config").mkdir(exist_ok=True)
+    (workspace / "config" / "kernel.yaml").write_text(
+        """
+kernel:
+  model:
+    provider: auth
+    protocol: chatgpt_codex
+    name: gpt-5
+    credential: chatgpt
+  sessions:
+    context_window_tokens: 100000
+""",
+        encoding="utf-8",
+    )
+
+    bundle = load_workspace_config(workspace)
+
+    assert bundle.kernel.sessions.context_window_tokens == 250_000

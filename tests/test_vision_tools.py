@@ -36,8 +36,8 @@ def context_with_project(tmp_path) -> PermissionContext:
 
 def test_vision_inspect_reads_local_image_metadata(tmp_path) -> None:
     permission_context = context(tmp_path)
-    image = tmp_path / "workspace" / "content" / "pixel.png"
-    image.parent.mkdir()
+    image = tmp_path / "workspace" / "agents" / "main" / "content" / "pixel.png"
+    image.parent.mkdir(parents=True)
     image.write_bytes(PNG_1X1)
 
     result = inspect({"path": "pixel.png"}, permission_context)
@@ -63,8 +63,8 @@ def test_vision_relative_path_prefers_active_project(tmp_path) -> None:
 
 def test_vision_analyze_requires_backend(tmp_path) -> None:
     permission_context = context(tmp_path)
-    image = tmp_path / "workspace" / "content" / "pixel.png"
-    image.parent.mkdir()
+    image = tmp_path / "workspace" / "agents" / "main" / "content" / "pixel.png"
+    image.parent.mkdir(parents=True)
     image.write_bytes(PNG_1X1)
 
     result = analyze({"path": "pixel.png", "prompt": "Describe it"}, permission_context)
@@ -75,8 +75,8 @@ def test_vision_analyze_requires_backend(tmp_path) -> None:
 
 def test_vision_analyze_uses_injected_backend(tmp_path) -> None:
     permission_context = context(tmp_path)
-    image = tmp_path / "workspace" / "content" / "pixel.png"
-    image.parent.mkdir()
+    image = tmp_path / "workspace" / "agents" / "main" / "content" / "pixel.png"
+    image.parent.mkdir(parents=True)
     image.write_bytes(PNG_1X1)
 
     def backend(payload):

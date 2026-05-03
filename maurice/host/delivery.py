@@ -79,16 +79,25 @@ def _deliver_reminder_result(workspace: Path, payload: dict[str, Any], text: str
     _telegram_send_message(token, chat_id, text)
 
 
-def _build_daily_digest(workspace: Path, agent_id: str) -> str:
-    report = _latest_dream_report(workspace)
+def _build_daily_digest(
+    workspace: Path,
+    agent_id: str,
+    *,
+    daily_attachments: dict[str, str] | None = None,
+) -> str:
+    report = _latest_dream_report(workspace, agent_id)
     today = datetime.now().astimezone().strftime("%d/%m/%Y")
     lines = [f"Bonjour, voici ton daily Maurice du {today}."]
+    daily_attachments = daily_attachments or {}
     if not report:
         lines.extend([
             "",
             "Le dreaming n'a pas encore produit de rapport exploitable.",
             "Je garde le daily actif pour les prochains matins.",
         ])
+        if daily_attachments:
+            lines.extend(["", "Contributions daily disponibles :"])
+            lines.extend(f"- {name}" for name in sorted(daily_attachments))
         return "\n".join(lines)
 
     generated_at = _human_datetime(report.get("generated_at"))
@@ -118,12 +127,15 @@ def _build_daily_digest(workspace: Path, agent_id: str) -> str:
                     lines.append(f"- {summary}")
     if not summaries and not actions:
         lines.extend(["", "Rien de particulier a remonter pour l'instant."])
+    if daily_attachments:
+        lines.extend(["", "Contributions daily prises en compte :"])
+        lines.extend(f"- {name}" for name in sorted(daily_attachments))
     lines.extend(["", f"Agent: {agent_id}"])
     return "\n".join(lines)
 
 
-def _latest_dream_report(workspace: Path) -> dict[str, Any] | None:
-    dreams_dir = workspace / "content" / "dreams"
+def _latest_dream_report(workspace: Path, agent_id: str) -> dict[str, Any] | None:
+    dreams_dir = workspace / "agents" / agent_id / "dreams"
     try:
         paths = sorted(dreams_dir.glob("dream_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
@@ -205,7 +217,7 @@ def _emit_daily_event(
     event_store.emit(
         name=name,
         kind="progress",
-        origin="host.daily",
+        origin="skill:daily",
         agent_id=agent_id,
         session_id=session_id,
         payload=payload,

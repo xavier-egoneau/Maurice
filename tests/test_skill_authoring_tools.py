@@ -40,7 +40,9 @@ def test_skills_create_writes_user_skill_under_workspace(tmp_path) -> None:
     assert result.ok
     assert (skill_dir / "skill.yaml").is_file()
     assert (skill_dir / "prompt.md").is_file()
+    assert (skill_dir / "daily.md").is_file()
     assert registry.skills["notes_helper"].state == SkillState.LOADED
+    assert registry.skills["notes_helper"].daily
 
 
 def test_skills_create_prefers_context_user_root(tmp_path) -> None:

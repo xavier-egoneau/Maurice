@@ -29,7 +29,7 @@ def test_dreaming_run_degrades_without_memory_input(tmp_path) -> None:
     assert result.ok
     assert result.data["report"]["inputs"] == []
     assert result.data["report"]["summary"] == "Dream completed with no skill inputs."
-    assert (tmp_path / "workspace" / "content" / "dreams").is_dir()
+    assert (tmp_path / "workspace" / "agents" / "main" / "dreams").is_dir()
 
 
 def test_dreaming_run_consumes_memory_dream_input(tmp_path) -> None:
@@ -60,10 +60,10 @@ def test_dreaming_run_consumes_memory_dream_input(tmp_path) -> None:
     ]
 
 
-def test_dreaming_run_includes_global_memory_by_default(tmp_path) -> None:
+def test_dreaming_run_includes_agent_memory_by_default(tmp_path) -> None:
     permission_context = context(tmp_path)
     remembered = remember(
-        {"content": "Global memory must stay in dream context.", "tags": ["dreaming"]},
+        {"content": "Agent memory must stay in dream context.", "tags": ["dreaming"]},
         permission_context,
     )
 
@@ -80,7 +80,7 @@ def test_dreaming_run_includes_global_memory_by_default(tmp_path) -> None:
     assert inputs[0]["signals"][0]["data"]["memory"]["id"] == remembered.data["id"]
 
 
-def test_dreaming_run_can_explicitly_skip_global_memory(tmp_path) -> None:
+def test_dreaming_run_can_explicitly_skip_agent_memory(tmp_path) -> None:
     permission_context = context(tmp_path)
     remember(
         {"content": "Diagnostic run can skip memory.", "tags": ["dreaming"]},

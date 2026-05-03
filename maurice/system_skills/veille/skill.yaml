@@ -1,0 +1,113 @@
+name: veille
+version: 0.1.0
+origin: system
+mutable: false
+required: false
+description: Store watch topics and turn them into dreaming signals.
+config_namespace: skills.veille
+available_in: ["local", "global"]
+requires:
+  binaries: []
+  credentials: []
+dependencies:
+  skills: []
+  optional_skills:
+    - web
+    - dreaming
+    - daily
+permissions:
+  - class: fs.write
+    scope:
+      paths:
+        - "$agent_workspace/veille/**"
+  - class: network.outbound
+    scope:
+      hosts: ["*"]
+tools:
+  - name: veille.add_topic
+    description: Add a watch topic for future dreaming runs.
+    input_schema:
+      type: object
+      properties:
+        topic:
+          type: string
+        query:
+          type: string
+          description: Optional search query. Defaults to topic.
+        tags:
+          type: array
+          items:
+            type: string
+      required: ["topic"]
+    permission_class: fs.write
+    permission_scope:
+      paths:
+        - "$agent_workspace/veille/**"
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.veille.tools.add_topic
+  - name: veille.list_topics
+    description: List configured watch topics.
+    input_schema:
+      type: object
+      properties: {}
+      required: []
+    permission_class: fs.read
+    permission_scope:
+      paths:
+        - "$agent_workspace/veille/**"
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.veille.tools.list_topics
+  - name: veille.remove_topic
+    description: Remove a watch topic.
+    input_schema:
+      type: object
+      properties:
+        topic_id:
+          type: string
+      required: ["topic_id"]
+    permission_class: fs.write
+    permission_scope:
+      paths:
+        - "$agent_workspace/veille/**"
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.veille.tools.remove_topic
+  - name: veille.run
+    description: Run the watch now and return dreaming-ready signals.
+    input_schema:
+      type: object
+      properties:
+        max_results:
+          type: integer
+          minimum: 1
+        topic_ids:
+          type: array
+          items:
+            type: string
+      required: []
+    permission_class: network.outbound
+    permission_scope:
+      hosts: ["*"]
+    trust:
+      input: local_mutable
+      output: external_untrusted
+    executor: maurice.system_skills.veille.tools.run_watch
+backend: null
+storage:
+  engine: json
+  path: "$agent_workspace/veille/topics.json"
+  schema_version: 1
+  migrations: []
+dreams:
+  attachment: dreams.md
+  input_builder: maurice.system_skills.veille.tools.build_dream_input
+daily:
+  attachment: daily.md
+events:
+  state_publisher: null
+tools_module: maurice.system_skills.veille.tools

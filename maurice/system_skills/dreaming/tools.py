@@ -25,6 +25,7 @@ def build_executors(ctx: Any) -> dict[str, Any]:
         registry,
         event_store=ctx.event_store,
         dream_input_builders=builders,
+        agent_id=ctx.agent_id,
     )
 
 
@@ -54,6 +55,7 @@ def dreaming_tool_executors(
     *,
     event_store: EventStore | None = None,
     dream_input_builders: dict[str, DreamInputBuilder] | None = None,
+    agent_id: str = "main",
 ) -> dict[str, Any]:
     return {
         "dreaming.run": lambda arguments: run(
@@ -62,6 +64,7 @@ def dreaming_tool_executors(
             registry,
             event_store=event_store,
             dream_input_builders=dream_input_builders or {},
+            agent_id=agent_id,
         ),
         "maurice.system_skills.dreaming.tools.run": lambda arguments: run(
             arguments,
@@ -69,6 +72,7 @@ def dreaming_tool_executors(
             registry,
             event_store=event_store,
             dream_input_builders=dream_input_builders or {},
+            agent_id=agent_id,
         ),
     }
 
@@ -80,9 +84,10 @@ def run(
     *,
     event_store: EventStore | None = None,
     dream_input_builders: dict[str, DreamInputBuilder] | None = None,
+    agent_id: str = "main",
 ) -> ToolResult:
     dream_id = f"dream_{uuid4().hex}"
-    _emit(event_store, "dream.started", dream_id, {"requested": arguments})
+    _emit(event_store, "dream.started", dream_id, {"requested": arguments}, agent_id=agent_id)
 
     requested_skills = arguments.get("skills")
     if requested_skills is not None and (
@@ -151,6 +156,7 @@ def run(
             "signal_count": total_signals,
             "report_path": str(path),
         },
+        agent_id=agent_id,
     )
 
     return ToolResult(
@@ -171,18 +177,23 @@ def run(
 
 
 def _report_path(context: PermissionContext, dream_id: str) -> Path:
-    return Path(context.variables()["$workspace"]) / "content" / "dreams" / f"{dream_id}.json"
+    return Path(context.variables()["$agent_workspace"]) / "dreams" / f"{dream_id}.json"
 
 
 def _emit(
-    event_store: EventStore | None, name: str, dream_id: str, payload: dict[str, Any]
+    event_store: EventStore | None,
+    name: str,
+    dream_id: str,
+    payload: dict[str, Any],
+    *,
+    agent_id: str,
 ) -> None:
     if event_store is None:
         return
     event_store.emit(
         name=name,
         origin="skill:dreaming",
-        agent_id="system",
+        agent_id=agent_id,
         session_id="dreaming",
         correlation_id=dream_id,
         payload={"dream_id": dream_id, **payload},

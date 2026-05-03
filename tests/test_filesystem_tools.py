@@ -33,7 +33,9 @@ def test_filesystem_write_read_list_and_mkdir(tmp_path) -> None:
     assert write_result.data["bytes"] == 5
     assert read_result.data["content"] == "hello"
     assert list_result.data["entries"][0]["name"] == "today.md"
-    assert (workspace / "content" / "notes" / "today.md").read_text(encoding="utf-8") == "hello"
+    assert (
+        workspace / "agents" / "main" / "content" / "notes" / "today.md"
+    ).read_text(encoding="utf-8") == "hello"
 
 
 def test_filesystem_write_returns_diff_artifact(tmp_path) -> None:

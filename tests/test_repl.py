@@ -41,7 +41,7 @@ def test_context_bar_is_clamped_to_terminal_width(capsys) -> None:
     repl._print_context_bar(2_000_000, 66_631)
 
     output = capsys.readouterr().out
-    assert "2,066,631 / 128,000 tokens" in output
+    assert "2,066,631 / 250,000 tokens" in output
     assert output.count("█") <= int(repl._console.width * 0.8)
 
 

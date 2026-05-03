@@ -124,6 +124,12 @@ def _telegram_send_message(token: str, chat_id: int, text: str) -> None:
     )
 
 
+def _telegram_set_my_commands(token: str, commands: list[dict[str, str]]) -> None:
+    if not commands:
+        return
+    _telegram_api_json(token, "setMyCommands", {"commands": commands})
+
+
 def _telegram_send_chat_action(token: str, chat_id: int, action: str = "typing") -> None:
     _telegram_api_json(
         token,

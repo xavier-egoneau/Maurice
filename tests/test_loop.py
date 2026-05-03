@@ -708,7 +708,7 @@ def test_callback_can_approve_tool_for_whole_session(tmp_path) -> None:
 
 
 def test_loop_uses_real_filesystem_executors(tmp_path) -> None:
-    workspace_file = tmp_path / "workspace" / "content" / "notes.md"
+    workspace_file = tmp_path / "workspace" / "agents" / "main" / "content" / "notes.md"
     workspace_file.parent.mkdir(parents=True)
     workspace_file.write_text("real content", encoding="utf-8")
     provider = MockProvider(

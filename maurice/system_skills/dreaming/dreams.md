@@ -2,4 +2,4 @@ Dreaming owns the dream run pipeline. It can enumerate active skill dream attach
 
 Dreaming does not execute actions. Actions remain proposals until validated by their owner skill and approved by policy.
 
-Maurice global memory is not a secondary optional signal for normal dream runs. When memory is available, dreaming should treat it as the baseline context and combine it with skill-specific dream inputs.
+The current agent memory is not a secondary optional signal for normal dream runs. When memory is available, dreaming should treat it as the baseline context and combine it with skill-specific dream inputs for that agent.

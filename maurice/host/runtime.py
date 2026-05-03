@@ -237,7 +237,11 @@ def _agent_system_prompt(
 ) -> str:
     from maurice.kernel.system_prompt import build_base_prompt
     agent_workspace = Path(agent.workspace).expanduser().resolve() if agent is not None else None
-    agent_content = agent_workspace / "content" if agent_workspace is not None else workspace / "content"
+    agent_content = (
+        agent_workspace / "content"
+        if agent_workspace is not None
+        else workspace / "agents" / "main" / "content"
+    )
     project = active_project if active_project is not None else (
         _active_dev_project_path(agent) if agent is not None else None
     )

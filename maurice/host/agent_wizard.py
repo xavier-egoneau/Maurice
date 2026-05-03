@@ -25,10 +25,13 @@ DEFAULT_SKILL_DESCRIPTIONS: dict[str, str] = {
     "reminders": "créer et suivre des rappels",
     "vision": "analyser des images",
     "dreaming": "consolider la mémoire et agir avec proactivité",
+    "workspace_dreaming": "relier les mémoires des agents dans l'open space",
+    "veille": "suivre des sujets et les injecter dans le dreaming",
     "skills": "créer de nouvelles compétences",
     "host": "diagnostiquer et configurer Maurice",
     "self_update": "signaler des bugs Maurice et préparer des améliorations",
     "dev": "piloter un projet de développement",
+    "daily": "préparer le récap quotidien",
 }
 
 PERMISSIONS = {

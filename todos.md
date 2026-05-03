@@ -1,0 +1,22 @@
+- [x] je suis sur l'ide de codex et je vois que mon context est de 250k or tu as prévu une moyenne de 120k il me semble > change pour 250k si le provider est chatgpt ou openai.
+  - Fait: défaut à 250k côté config, compaction et jauge; les configs legacy OpenAI/ChatGPT à 100k sont normalisées à 250k au chargement.
+- [x] est ce qu'on peut faire un /compact auto a 90% de la jauge? et prevenir l'user biensur de cette démarche.(skill-system?)
+  - Déjà présent côté compaction auto à 90%; ajouté: message visible quand un RESET auto compacte la session.
+- [x] actuellement la commande compact efface les messages pour l'utilisateur dans la version web. j'aimerais que ça ne soit pas le cas.je pense qu'actuellement on recharge toutes les x secondes l'entiereté des messages si c ça la solution pourrait être d'ajouter la nouveaté au lieu de remplacer l'ensemble.
+  - Fait: le refresh automatique du web ajoute les nouveaux messages au lieu de remplacer tout l'historique rendu.
+- [x] dans telegram je n'ai pas les commandes. je vois dans hermes et botfather qu'on peut avoir un menu mais il faut surement le déclarer. fais une recherche web et  vois comment il faut faire dans la doc.
+  - Fait: commandes exportées au format Telegram et synchronisées via `setMyCommands`.
+- [x] Met en avant les dream.md et la notion d'open space dans le readme ce sont 2 concept nouveaux par rapport a openclaw ou Hermes-agent . vois tu d'autres concept nouveau dans notre approche?
+  - Fait: README enrichi avec open space, mémoire/routines par agent, projet actif par conversation, projets connus comme historique de contribution, dream attachments et daily.
+- [x] j'aimerais officialiser le daily comme un skill system et le structurer: dans chaque skills on pourrait dire qu'est ce qui en découle dans le daily. exemple chaque nuit le dreaming il va consolider la memoire de l'agent et chercher a créer des liens entre les different projets, des actions, des idées pour avancer > le daily affiche le recap des projets en cours, les idées et les actions proposés qui en découle
+  - Fait proprement: `daily` est un skill system optionnel avec l'outil `daily.digest`; les skills peuvent ajouter un `daily.md` comme `dreams.md`, chargé génériquement par le registry.
+- [x] j'aimerais créer un skills user purement orienté dreaming. tous les matin il ajouterais au daily un récap de ce qu'on fait chaque agent en allant voir la memoire de chacun.
+  - Fait: skill optionnel `workspace_dreaming` avec `dreams.md`/`daily.md`; son input builder lit les mémoires récentes de chaque agent et produit des signaux multi-agents pour le dreaming puis le daily.
+- [x] j'aimerais ajouter un skill user veille purement orienté dreaming aussi : l'utilisateur rentre ses sujet de veille et une veille est faite chaque jouravant le dreaming> le dream.md propose d'utiliser la veille dans le dreaming. objectif faire des liens entre l'actualité et les projets en cours, faire emergé une nouvelle techno qui pourrait être utile ou une faille de sécu dans une lib qu'on utilise ...etc
+  - Fait: skill optionnel `veille` avec gestion de sujets, stockage agent-scoped dans `<workspace>/agents/<id>/veille/topics.json`, recherche SearxNG si configurée, input builder `dreaming` et contribution `daily.md`.
+- [x] vérifier le dreaming de bout en bout après le passage agent-scoped: chargement des `dreams.md`, input builders, écriture dans `<workspace>/agents/<id>/dreams/`, daily qui lit le bon rapport agent, scheduler et digest.
+  - Fait: tests ciblés sur dreaming/daily/scheduler + suite complète OK; `daily.digest` lit le dernier rapport dans `<workspace>/agents/<id>/dreams/`.
+- [x] corriger le bug reminders vu dans Telegram: l'agent a envoyé `interval_seconds: 0`, l'outil l'a rejeté, puis des rappels simples ont été créés avec `interval_seconds: 1` et `60`, donc transformés en rappels récurrents.
+  - Fait: `interval_seconds: 0` est maintenant traité comme absent; le prompt rappelle d'omettre `interval_seconds` pour un rappel simple.
+- [x] inspecter logs et self_update autour du bug reminders pour comprendre si une proposition/bug report existe déjà et éviter de dupliquer.
+  - Fait: les logs confirment le scénario Telegram; les deux rappels parasites avaient été annulés. Aucune proposition/report self_update existant pour ce bug.

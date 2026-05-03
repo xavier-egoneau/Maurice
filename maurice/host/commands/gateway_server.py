@@ -76,6 +76,7 @@ from maurice.host.telegram import (
     _telegram_channel_for_agent, _telegram_offset_path, _validate_telegram_first_message,
     _telegram_get_updates, _telegram_bot_username, _telegram_send_message,
     _telegram_send_chat_action, _telegram_api_json, _telegram_update_to_inbound,
+    _telegram_set_my_commands,
     _int_list, _read_int_file, _write_int_file, _redact_secret,
     _telegram_sender_ids, _telegram_start_chat_action,
 )
@@ -323,6 +324,7 @@ def _gateway_telegram_poll(
     offset_path = _telegram_offset_path(Path(bundle.host.workspace_root), agent.id, channel_name)
     allowed_users = _int_list(telegram.get("allowed_users"))
     allowed_chats = _int_list(telegram.get("allowed_chats"))
+    _sync_telegram_commands(token, router)
     print(f"Maurice Telegram polling for @{_telegram_bot_username(token) or 'bot'} -> agent {agent.id}")
     try:
         while True:
@@ -545,6 +547,7 @@ def _telegram_poll_until_stopped(
     offset_path = _telegram_offset_path(Path(bundle.host.workspace_root), agent.id, channel_name)
     allowed_users = _int_list(telegram.get("allowed_users"))
     allowed_chats = _int_list(telegram.get("allowed_chats"))
+    _sync_telegram_commands(token, router)
     print(f"Telegram polling started for @{_telegram_bot_username(token) or 'bot'} -> agent {agent.id}")
     while not stop_event.is_set():
         try:
@@ -571,6 +574,16 @@ def _telegram_poll_until_stopped(
             print(f"Telegram polling error: {_redact_secret(str(exc), token)}")
         stop_event.wait(poll_seconds)
     print("Telegram polling stopped")
+
+
+def _sync_telegram_commands(token: str, router: MessageRouter) -> None:
+    try:
+        _telegram_set_my_commands(
+            token,
+            router.command_registry.telegram_bot_commands(scope="global"),
+        )
+    except Exception as exc:
+        print(f"Telegram command menu sync failed: {_redact_secret(str(exc), token)}")
 
 
 class _WebTelegramPollers:

@@ -130,7 +130,7 @@ def test_session_reset_keeps_skill_storage_untouched(tmp_path) -> None:
         correlation_id=turn.correlation_id,
     )
 
-    skill_storage = tmp_path / "skills" / "memory" / "memory.sqlite"
+    skill_storage = tmp_path / "memory" / "memory.sqlite"
     skill_storage.parent.mkdir(parents=True)
     skill_storage.write_text("memory data", encoding="utf-8")
 

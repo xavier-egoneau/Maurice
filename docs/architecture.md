@@ -37,7 +37,7 @@ It carries:
 - `content_root`: user-facing files for that context
 - `active_project_root`: project folder used for relative work, when one is
   active
-- sessions, events, approvals, memory, server pid/socket/meta paths
+- sessions, events, approvals, agent memory, server pid/socket/meta paths
 - config, enabled skills, skill config, skill roots
 
 The central rule is simple: once a context is resolved, host wiring should use
@@ -121,14 +121,15 @@ the state root, while the folder where the command was launched is captured as
   agents/
     <agent-id>/
       content/
+      dreams/
+      memory/
+        memory.sqlite
+      reminders/
       events.jsonl
       approvals.json
       jobs.json
-  content/
   sessions/
   skills/
-    memory/
-      memory.sqlite
   skills.yaml
   run/
     server.socket
@@ -159,7 +160,11 @@ At this level:
   for the current chat window, channel session, or API session.
 - sessions are shared under `<workspace>/sessions`.
 - per-agent events and approvals live under `<workspace>/agents/<agent-id>/`.
-- memory is `<workspace>/skills/memory/memory.sqlite`.
+- memory is agent-scoped:
+  `<workspace>/agents/<agent-id>/memory/memory.sqlite`.
+- dreams and reminders are also agent-scoped under
+  `<workspace>/agents/<agent-id>/dreams/` and
+  `<workspace>/agents/<agent-id>/reminders/`.
 - the daemon server writes compatibility metadata to
   `<workspace>/run/server.meta`.
 

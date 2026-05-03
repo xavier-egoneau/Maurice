@@ -1,0 +1,44 @@
+name: daily
+version: 0.1.0
+origin: system
+mutable: false
+required: false
+description: Morning digest contract built from agent-scoped dream reports and skill signals.
+config_namespace: skills.daily
+requires:
+  binaries: []
+  credentials: []
+dependencies:
+  skills: []
+  optional_skills:
+    - dreaming
+    - memory
+permissions:
+  - class: fs.read
+    scope:
+      paths:
+        - "$agent_workspace/dreams/**"
+tools:
+  - name: daily.digest
+    description: Build the agent morning digest from the latest dream report and loaded skill daily contributions.
+    input_schema:
+      type: object
+      properties: {}
+      required: []
+    permission_class: fs.read
+    permission_scope:
+      paths:
+        - "$agent_workspace/dreams/**"
+    trust:
+      input: local_mutable
+      output: skill_generated
+    executor: maurice.system_skills.daily.tools.digest
+backend: null
+storage: null
+dreams:
+  attachment: dreams.md
+daily:
+  attachment: daily.md
+events:
+  state_publisher: null
+tools_module: maurice.system_skills.daily.tools

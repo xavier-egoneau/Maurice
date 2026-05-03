@@ -222,7 +222,7 @@ def _init_db(connection: sqlite3.Connection) -> None:
 def _db_path(context: PermissionContext, *, memory_path: str | Path | None = None) -> Path:
     if memory_path:
         return Path(memory_path).expanduser().resolve()
-    return Path(context.variables()["$workspace"]) / "skills" / "memory" / "memory.sqlite"
+    return Path(context.variables()["$agent_workspace"]) / "memory" / "memory.sqlite"
 
 
 def _row_to_memory(row: sqlite3.Row) -> dict[str, Any]:

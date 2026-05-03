@@ -186,7 +186,15 @@ def test_skill_manifest_agent_subagent_and_dream_contracts_validate() -> None:
             "config_namespace": "skills.memory",
             "requires": {"binaries": [], "credentials": []},
             "permissions": [
-                {"class": "fs.read", "scope": {"paths": ["$workspace/skills/memory/**"]}}
+                {
+                    "class": "fs.read",
+                    "scope": {
+                        "paths": [
+                            "$agent_workspace/memory/**",
+                            "$workspace/.maurice/memory.sqlite",
+                        ]
+                    },
+                }
             ],
             "tools": [
                 {
@@ -198,7 +206,7 @@ def test_skill_manifest_agent_subagent_and_dream_contracts_validate() -> None:
             "backend": None,
             "storage": {
                 "engine": "sqlite",
-                "path": "$workspace/skills/memory/memory.sqlite",
+                "path": "$agent_workspace/memory/memory.sqlite",
                 "schema_version": 1,
                 "migrations": ["migrations/001_init.sql"],
             },
@@ -206,6 +214,7 @@ def test_skill_manifest_agent_subagent_and_dream_contracts_validate() -> None:
                 "attachment": "dreams.md",
                 "input_builder": "dreams.build_inputs",
             },
+            "daily": {"attachment": "daily.md"},
             "events": {"state_publisher": "state.publish"},
         }
     )
@@ -262,6 +271,7 @@ def test_skill_manifest_agent_subagent_and_dream_contracts_validate() -> None:
     )
 
     assert manifest.name == "memory"
+    assert manifest.daily.attachment == "daily.md"
     assert agent.id == "main"
     assert agent.credentials == []
     assert run.state == "created"

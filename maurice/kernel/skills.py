@@ -77,6 +77,7 @@ class LoadedSkill(MauriceModel):
     manifest: SkillManifest | None = None
     prompt: str = ""
     dreams: str = ""
+    daily: str = ""
     tools: list[ToolDeclaration] = []
     commands: list[CommandDeclaration] = []
     errors: list[str] = []
@@ -318,6 +319,11 @@ class SkillLoader:
                     skill_dir / manifest.dreams.attachment
                     if manifest.dreams and manifest.dreams.attachment
                     else skill_dir / "dreams.md"
+                ),
+                daily=self._read_optional_text(
+                    skill_dir / manifest.daily.attachment
+                    if manifest.daily and manifest.daily.attachment
+                    else skill_dir / "daily.md"
                 ),
                 tools=self._tool_declarations(manifest),
                 commands=self._command_declarations(manifest),

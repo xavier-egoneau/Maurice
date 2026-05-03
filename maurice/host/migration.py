@@ -163,7 +163,12 @@ def _migrate_memory(
     *,
     dry_run: bool,
 ) -> None:
-    context = PermissionContext(workspace_root=str(workspace), runtime_root=str(runtime))
+    agent_workspace = workspace / "agents" / "main"
+    context = PermissionContext(
+        workspace_root=str(workspace),
+        runtime_root=str(runtime),
+        agent_workspace_root=str(agent_workspace),
+    )
     for path in _memory_export_paths(root):
         memories = _load_memory_export(path)
         imported = 0
@@ -188,7 +193,7 @@ def _migrate_memory(
             MigrationItem(
                 kind="memory",
                 source=str(path),
-                destination=str(workspace / "skills" / "memory" / "memory.sqlite"),
+                destination=str(agent_workspace / "memory" / "memory.sqlite"),
                 status="dry_run" if dry_run else "migrated",
                 reason=f"{imported} memories imported through explicit export",
                 provenance={"origin": "jarvis", "format": "explicit_export"},
@@ -215,7 +220,7 @@ def _migrate_artifacts(root: Path, workspace: Path, report: MigrationReport, *, 
     artifacts = root / "artifacts"
     if not artifacts.is_dir():
         return
-    destination_root = workspace / "content" / "jarvis"
+    destination_root = workspace / "agents" / "main" / "content" / "jarvis"
     for path in sorted(item for item in artifacts.iterdir() if item.is_file()):
         destination = destination_root / path.name
         if not dry_run:
@@ -291,7 +296,7 @@ def _load_memory_export(path: Path) -> list[dict[str, Any]]:
 def _write_report(workspace: Path, report: MigrationReport, *, dry_run: bool) -> None:
     if dry_run:
         return
-    path = workspace / "content" / "migrations" / "jarvis_migration_report.json"
+    path = workspace / "agents" / "main" / "content" / "migrations" / "jarvis_migration_report.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
 

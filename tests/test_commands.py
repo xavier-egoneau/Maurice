@@ -103,6 +103,14 @@ def test_default_help_hides_host_commands_in_local_scope() -> None:
     assert "/edit_agent -" not in text
 
 
+def test_command_registry_exports_telegram_bot_commands() -> None:
+    exported = default_command_registry().telegram_bot_commands(scope="global")
+
+    assert {"command": "help", "description": "afficher cette aide"} in exported
+    assert {"command": "add_agent", "description": "creer un nouvel agent"} in exported
+    assert all(not item["command"].startswith("/") for item in exported)
+
+
 def test_setup_command_points_to_unified_setup() -> None:
     commands = default_command_registry()
 

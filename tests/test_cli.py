@@ -17,7 +17,7 @@ from maurice.host.cli import (
     run_one_turn,
 )
 from maurice.host.credentials import load_workspace_credentials
-from maurice.host.paths import host_config_path
+from maurice.host.paths import host_config_path, kernel_config_path
 from maurice.host.project import global_config_path
 from maurice.host.project_registry import list_known_projects
 from maurice.host.secret_capture import request_secret_capture
@@ -83,6 +83,10 @@ def test_cli_interactive_onboard_configures_basics(tmp_path, capsys, monkeypatch
             "http://localhost:11434",
             "llama3.2",
         ]
+    )
+    monkeypatch.setattr(
+        "maurice.host.commands.gateway_server._telegram_set_my_commands",
+        lambda token, commands: calls.append(("commands", token, commands)),
     )
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
@@ -450,6 +454,10 @@ credentials:
         "maurice.host.commands.gateway_server._telegram_send_message",
         lambda token, chat_id, text: calls.append(("message", token, chat_id, text)),
     )
+    monkeypatch.setattr(
+        "maurice.host.commands.gateway_server._telegram_set_my_commands",
+        lambda token, commands: calls.append(("commands", token, commands)),
+    )
 
     assert main(["gateway", "telegram-poll", "--workspace", str(workspace), "--once"]) == 0
     output = capsys.readouterr().out
@@ -457,9 +465,13 @@ credentials:
     assert "Telegram poll complete: 1 message(s) routed." in output
     # chat action fires in a background thread — verify message was sent
     assert any(c[0] == "message" for c in calls)
-    assert calls[-1][:3] == ("message", "test-token", 222)
-    assert calls[-1][3].startswith("Mock response: salut")
-    assert "context" in calls[-1][3]
+    messages = [call for call in calls if call[0] == "message"]
+    assert messages[-1][:3] == ("message", "test-token", 222)
+    assert messages[-1][3].startswith("Mock response: salut")
+    assert "context" in messages[-1][3]
+    command_sync = [call for call in calls if call[0] == "commands"]
+    assert command_sync
+    assert {"command": "help", "description": "afficher cette aide"} in command_sync[0][2]
     assert (workspace / "agents" / "main" / "telegram.offset").read_text(encoding="utf-8") == "8\n"
 
 
@@ -1827,7 +1839,7 @@ def test_cli_scheduler_runs_due_dream_job(tmp_path, capsys) -> None:
     run_output = capsys.readouterr().out
     assert "dreaming.run" in run_output
     assert "completed" in run_output
-    assert list((workspace / "content" / "dreams").glob("dream_*.json"))
+    assert list((workspace / "agents" / "main" / "dreams").glob("dream_*.json"))
 
 
 def test_scheduler_handlers_use_global_context(tmp_path, monkeypatch) -> None:
@@ -1859,7 +1871,7 @@ def test_scheduler_handlers_use_global_context(tmp_path, monkeypatch) -> None:
     assert captured["skill_ctx"].hooks.scope == "global"
     assert captured["skill_ctx"].hooks.lifecycle == "daemon"
     assert captured["skill_ctx"].hooks.memory_path == str(
-        workspace / "skills" / "memory" / "memory.sqlite"
+        workspace / "agents" / "main" / "memory" / "memory.sqlite"
     )
     assert {Path(root.path) for root in captured["roots"]} == {
         Path(root.path) for root in captured["skill_ctx"].skill_roots
@@ -1906,6 +1918,21 @@ def test_scheduler_defaults_create_dream_and_daily_jobs(tmp_path) -> None:
     assert by_kind["system.daily.digest"].name == "daily.digest"
     assert by_kind["system.daily.digest"].payload["time"] == "09:30"
     assert by_kind["system.daily.digest"].interval_seconds == 86400
+
+
+def test_scheduler_does_not_create_daily_job_when_daily_skill_disabled(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
+    kernel_data = read_yaml_file(kernel_config_path(workspace))
+    kernel_data["kernel"]["skills"] = ["dreaming", "memory"]
+    write_yaml_file(kernel_config_path(workspace), kernel_data)
+
+    _ensure_configured_scheduler_jobs(workspace, "main")
+
+    jobs = JobStore(workspace / "agents" / "main" / "jobs.json").list(status=JobStatus.SCHEDULED)
+    by_kind = {job.payload.get("kind"): job for job in jobs}
+    assert by_kind["system.dreaming.daily"].name == "dreaming.run"
+    assert "system.daily.digest" not in by_kind
 
 
 def test_daily_digest_delivers_to_configured_telegram_chats(tmp_path, monkeypatch) -> None:

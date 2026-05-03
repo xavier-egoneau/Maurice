@@ -6,14 +6,39 @@ Maurice is one AI assistant with two context levels:
   focused on that folder, stores state in `./.maurice`, and keeps memory scoped
   to that folder.
 - **Desktop context**: choose global assistant usage during setup, then run
-  `maurice start`. Maurice stays available in the background, uses a central
-  workspace and memory, and can serve the browser chat, scheduler, dashboard,
-  channels, and durable agents. When launched from a folder, the central
+  `maurice start`. Maurice stays available in the background, uses a shared
+  workspace with agent-scoped memory, and can serve the browser chat, scheduler,
+  dashboard, channels, and durable agents. When launched from a folder, the
   workspace stays the assistant's state root while that folder is treated as the
   active project.
 
 These are not two products. They share the same agent runtime, permissions,
 memory, sessions, approvals, and skills; only the context boundary changes.
+
+## Core Concepts
+
+- **Open space workspace**: desktop mode is an open workspace, not a private
+  silo. Each agent owns its files under `<workspace>/agents/<agent-id>/`, but
+  another agent can still inspect them when the user explicitly asks.
+- **Agent-scoped memory and routines**: memory, reminders, dreams, notes, and
+  todos belong to an agent. The default memory path is
+  `<workspace>/agents/<agent-id>/memory/memory.sqlite`.
+- **One active project per conversation**: every chat window, Telegram thread,
+  or API session has one current project target. Multiple surfaces can still
+  work on different projects at the same time.
+- **Known projects are contribution history**: each agent keeps
+  `<workspace>/agents/<agent-id>/projects.json`, meaning “projects this agent
+  has touched”, not “all projects currently open on disk”.
+- **Dream and daily attachments**: skills can ship `dreams.md` and `daily.md`.
+  `dreams.md` says what the skill can surface during background synthesis;
+  `daily.md` says what that skill wants the morning digest to consider.
+- **Daily as optional synthesis**: the `daily` system skill turns the latest
+  agent dream report plus loaded skill `daily.md` contributions into a morning
+  digest. If the `daily` skill is not enabled for an agent, no daily job is
+  scheduled for that agent.
+- **Collective dreaming and watch topics**: optional skills can contribute
+  multi-agent memory summaries (`workspace_dreaming`) or external watch signals
+  (`veille`) without changing the core scheduler contract.
 
 ## Requirements
 
@@ -72,8 +97,8 @@ maurice setup
 During setup:
 
 - choose **global** when asked for the starting context level
-- choose the workspace folder Maurice will use for central memory, sessions,
-  agents, and assistant-owned content
+- choose the workspace folder Maurice will use for sessions, agents, and
+  agent-owned content, reminders, dreams, and memory
 - choose a permission profile for what Maurice can do inside the workspace and
   the active project folder
 - connect a provider: OpenAI-compatible API, OpenAI/ChatGPT browser auth,
@@ -122,6 +147,8 @@ maurice stop           # stop daemon services
 
 Use `maurice start --no-browser` on headless machines or when you only want the
 daemon.
+When Telegram is enabled, Maurice syncs the available slash commands to the bot
+menu with Telegram's `setMyCommands` API.
 
 Use an explicit workspace only when you want to bypass the workspace configured
 during setup:

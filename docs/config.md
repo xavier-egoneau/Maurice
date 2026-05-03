@@ -126,7 +126,7 @@ kernel:
   sessions:
     retention_days: 30
     compaction: true
-    context_window_tokens: 100000
+    context_window_tokens: 250000
     trim_threshold: 0.60
     summarize_threshold: 0.75
     reset_threshold: 0.90
@@ -178,6 +178,10 @@ skills:
 | `openai` | — | OpenAI SDK; `credential: openai` |
 | `ollama` | — | Local Ollama; `base_url: http://localhost:11434` |
 | `auth` | `chatgpt_codex` | ChatGPT Codex stored auth token |
+
+OpenAI-compatible and ChatGPT setups default to a 250k token context budget for
+the local context meter and automatic compaction. You can lower or raise it with
+`kernel.sessions.context_window_tokens`.
 
 ## Credentials Store
 

@@ -12,6 +12,7 @@ my_skill/
   commands.py      — slash command handlers (if the skill declares commands)
   prompt.md        — prompt fragment injected each turn (optional)
   dreams.md        — dream context injected during dreaming sessions (optional)
+  daily.md         — daily digest contribution instructions (optional)
 ```
 
 ## skill.yaml
@@ -222,6 +223,9 @@ local project writes under its own `./skills` when that root exists.
 | `vision` | image description |
 | `reminders` | schedule one-off reminders |
 | `dreaming` | background LLM reflection runs |
+| `workspace_dreaming` | cross-agent dreaming inputs from agent memories |
+| `veille` | watch topics that feed dreaming and daily synthesis |
+| `daily` | morning digest synthesis from agent dream reports |
 | `self_update` | report runtime bugs and propose changes to the runtime (proposal-only) |
 | `skills` | inspect and author skills |
 | `host` | inspect host state (processes, dashboard data) |
@@ -230,3 +234,29 @@ local project writes under its own `./skills` when that root exists.
 `self_update` also exposes channel-neutral commands:
 `/auto_update_list`, `/auto_update_show <id>`, `/auto_update_validate <id>`,
 and `/auto_update_apply <id> confirm`.
+
+## Dream And Daily Contributions
+
+`dreams.md` is the cross-skill hook for background synthesis. A skill uses it to
+say what signals it can contribute during `dreaming.run`: stale memory, overdue
+reminders, project risks, ideas, links between projects, or candidate actions.
+
+`daily.md` is the matching hook for the morning digest. A skill uses it to say
+which parts of its dream signals, state, or summaries should matter in the
+daily. The `daily` system skill loads those fragments from currently enabled
+skills, consumes the latest agent-scoped dream report from
+`<workspace>/agents/<agent-id>/dreams/`, and renders the digest through the
+scheduler. Because `daily` is a normal optional system skill, disabling it for an
+agent also prevents that agent's scheduled `daily.digest` job from being
+created.
+
+Two optional dreaming-oriented skills are shipped as concrete examples of this
+pattern:
+
+- `workspace_dreaming` reads recent memories from each agent workspace and
+  contributes a multi-agent recap to dreaming and daily
+- `veille` stores watch topics under
+  `<workspace>/agents/<agent-id>/veille/topics.json`, researches them through
+  the configured SearxNG endpoint when available, and contributes signals such
+  as useful new technology, security issues in known dependencies, or news
+  connected to active projects

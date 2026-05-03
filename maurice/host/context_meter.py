@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-DEFAULT_CONTEXT_WINDOW = 128_000
+DEFAULT_CONTEXT_WINDOW = 250_000
 MAX_BAR_FRACTION = 0.8
 
 

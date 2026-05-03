@@ -742,6 +742,19 @@ class AgentLoop:
             )
             for m in compacted
         ]
+        if level == CompactionLevel.RESET:
+            session.messages.append(
+                SessionMessage(
+                    role="assistant",
+                    content=(
+                        "J'ai compacté automatiquement la session parce que le contexte "
+                        f"a atteint {int(self.compaction_config.reset_threshold * 100)}% "
+                        "de la jauge. Je garde un résumé interne pour continuer proprement."
+                    ),
+                    metadata={"compaction_notice": True},
+                    correlation_id=correlation_id,
+                )
+            )
         self.session_store.save(session)
         self.event_store.emit(
             name="session.compacted",

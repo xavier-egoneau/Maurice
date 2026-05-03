@@ -1016,6 +1016,7 @@ let activeAgent = localStorage.getItem(AGENT_KEY) || "main";
 let sessionId = sessionFor(activeAgent);
 let busy = false;
 let thinking = null;
+let renderedMessageKeys = new Set();
 let commandChoices = [];
 let suggestionIndex = 0;
 let lastCommandQuery = "";
@@ -1481,19 +1482,39 @@ async function loadHistory(options = {}) {
     const res = await apiFetch(url);
     if (!res.ok) return;
     const data = await res.json();
-    messages.innerHTML = "";
+    if (!auto) {
+      messages.innerHTML = "";
+      renderedMessageKeys = new Set();
+    }
     for (const msg of data.messages || []) {
-      if (msg.role === "user") {
-        addUser(msg.metadata?.visible_user_message ?? msg.content ?? "", msg.metadata?.attachments || [], {scroll: false});
-      } else if (msg.role === "assistant") {
-        addAssistant(msg.content || "", msg.tools || [], msg.metadata?.context || null, {scroll: false});
-      }
-      else if (msg.content) addNotice(msg.content);
+      const key = messageKey(msg);
+      if (renderedMessageKeys.has(key)) continue;
+      renderHistoryMessage(msg);
+      renderedMessageKeys.add(key);
     }
     if (wasNearBottom && options.keepPosition !== true) scrollBottom();
     else messages.scrollTop = previousScrollTop;
   } catch (error) {
     console.error(error);
+  }
+}
+
+function messageKey(msg) {
+  return [
+    msg.created_at || "",
+    msg.role || "",
+    msg.content || "",
+    JSON.stringify(msg.metadata || {}),
+  ].join("\u001f");
+}
+
+function renderHistoryMessage(msg) {
+  if (msg.role === "user") {
+    addUser(msg.metadata?.visible_user_message ?? msg.content ?? "", msg.metadata?.attachments || [], {scroll: false});
+  } else if (msg.role === "assistant") {
+    addAssistant(msg.content || "", msg.tools || [], msg.metadata?.context || null, {scroll: false});
+  } else if (msg.content) {
+    addNotice(msg.content);
   }
 }
 
@@ -1596,6 +1617,7 @@ async function newSession() {
   sessionId = `web:${activeAgent}:${Date.now()}`;
   localStorage.setItem(SESSION_PREFIX + activeAgent, sessionId);
   messages.innerHTML = "";
+  renderedMessageKeys = new Set();
   addNotice("Nouvelle session demarree.");
   if (previous) {
     try {
@@ -1911,6 +1933,7 @@ agentSelect.onchange = async () => {
   localStorage.setItem(AGENT_KEY, activeAgent);
   sessionId = sessionFor(activeAgent);
   messages.innerHTML = "";
+  renderedMessageKeys = new Set();
   await loadHistory();
   await refreshCommands();
   await loadGitChanges();

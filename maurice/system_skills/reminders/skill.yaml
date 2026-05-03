@@ -15,7 +15,7 @@ permissions:
   - class: fs.write
     scope:
       paths:
-        - "$workspace/content/reminders/**"
+        - "$agent_workspace/reminders/**"
 tools:
   - name: reminders.create
     description: Create a scheduled reminder. Prefer trigger_type/trigger_value for natural reminders; keep run_at for exact ISO datetimes.
@@ -36,12 +36,12 @@ tools:
           description: "'20m', '2h', '1d', '08:00', '1h08', or an ISO datetime for at; '20m', '2h', '1d' for every."
         interval_seconds:
           type: integer
-          description: Optional repeat interval in seconds after the first run_at.
+          description: Optional repeat interval in seconds after the first run_at. Omit for one-shot reminders; 0 is treated as omitted.
       required: ["text"]
     permission_class: fs.write
     permission_scope:
       paths:
-        - "$workspace/content/reminders/**"
+        - "$agent_workspace/reminders/**"
     trust:
       input: local_mutable
       output: local_mutable
@@ -57,7 +57,7 @@ tools:
     permission_class: fs.read
     permission_scope:
       paths:
-        - "$workspace/content/reminders/**"
+        - "$agent_workspace/reminders/**"
     trust:
       input: local_mutable
       output: local_mutable
@@ -73,7 +73,7 @@ tools:
     permission_class: fs.write
     permission_scope:
       paths:
-        - "$workspace/content/reminders/**"
+        - "$agent_workspace/reminders/**"
     trust:
       input: local_mutable
       output: local_mutable
@@ -81,7 +81,7 @@ tools:
 backend: null
 storage:
   engine: json
-  path: "$workspace/content/reminders/reminders.json"
+  path: "$agent_workspace/reminders/reminders.json"
   schema_version: 1
   migrations: []
 dreams:

@@ -1,0 +1,32 @@
+name: workspace_dreaming
+version: 0.1.0
+origin: system
+mutable: false
+required: false
+description: Cross-agent dreaming input that summarizes each agent's recent memory.
+config_namespace: skills.workspace_dreaming
+available_in: ["global"]
+requires:
+  binaries: []
+  credentials: []
+dependencies:
+  skills: []
+  optional_skills:
+    - memory
+    - daily
+permissions:
+  - class: fs.read
+    scope:
+      paths:
+        - "$workspace/agents/*/memory/**"
+        - "$workspace/agents/*/projects.json"
+tools: []
+backend: null
+storage: null
+dreams:
+  attachment: dreams.md
+  input_builder: maurice.system_skills.workspace_dreaming.tools.build_dream_input
+daily:
+  attachment: daily.md
+events:
+  state_publisher: null

@@ -16,6 +16,7 @@ from maurice.host.project import (
     global_config_path,
     sessions_dir,
 )
+from maurice.host.workspace import ensure_agent_memory_migrated
 from maurice.kernel.config import ConfigBundle, load_workspace_config
 from maurice.kernel.session import SessionStore
 from maurice.kernel.skills import SkillRoot
@@ -119,6 +120,16 @@ def resolve_global_context(
     active_project_root = active_project.expanduser().resolve() if active_project is not None else None
     cfg = bundle or load_workspace_config(workspace)
     agent_id = str(getattr(agent, "id", "main"))
+    agent_workspace = (
+        Path(agent.workspace).expanduser().resolve()
+        if agent is not None and getattr(agent, "workspace", None)
+        else workspace / "agents" / agent_id
+    )
+    memory_path = ensure_agent_memory_migrated(
+        workspace,
+        agent_id=agent_id,
+        agent_workspace=agent_workspace,
+    )
     event_stream = (
         Path(agent.event_stream).expanduser().resolve()
         if agent is not None and getattr(agent, "event_stream", None)
@@ -134,8 +145,8 @@ def resolve_global_context(
         config=cfg,
         sessions_path=workspace / "sessions",
         events_path=event_stream,
-        approvals_path=workspace / "agents" / agent_id / "approvals.json",
-        memory_path=workspace / "skills" / "memory" / "memory.sqlite",
+        approvals_path=agent_workspace / "approvals.json",
+        memory_path=memory_path,
         skill_roots=[
             root if isinstance(root, SkillRoot) else SkillRoot.from_config(root)
             for root in cfg.host.skill_roots

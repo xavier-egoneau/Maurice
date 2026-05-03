@@ -301,6 +301,10 @@ class SkillDreams(MauriceModel):
     input_builder: str | None = None
 
 
+class SkillDaily(MauriceModel):
+    attachment: str | None = None
+
+
 class SkillEvents(MauriceModel):
     state_publisher: str | None = None
 
@@ -334,6 +338,7 @@ class SkillManifest(MauriceModel):
     backend: dict[str, Any] | str | None = None
     storage: SkillStorage | None = None
     dreams: SkillDreams | None = None
+    daily: SkillDaily | None = None
     events: SkillEvents | None = None
     tools_module: str | None = None
     docker: SkillDocker | None = None

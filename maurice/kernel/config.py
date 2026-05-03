@@ -65,7 +65,7 @@ class KernelEventsConfig(ConfigModel):
 class KernelSessionsConfig(ConfigModel):
     retention_days: int = Field(default=30, ge=1)
     compaction: bool = True
-    context_window_tokens: int = Field(default=100_000, ge=1_000)
+    context_window_tokens: int = Field(default=250_000, ge=1_000)
     trim_threshold: float = Field(default=0.60, gt=0.0, lt=1.0)
     summarize_threshold: float = Field(default=0.75, gt=0.0, lt=1.0)
     reset_threshold: float = Field(default=0.90, gt=0.0, lt=1.0)
@@ -162,9 +162,30 @@ def load_workspace_config(workspace_root: str | Path) -> ConfigBundle:
     agents_data = read_yaml_file(agents_config_path(root))
     skills_data = read_yaml_file(workspace_skills_config_path(root))
 
-    return ConfigBundle(
+    bundle = ConfigBundle(
         host=HostConfig.model_validate(host_data),
         kernel=KernelConfig.model_validate(kernel_data),
         agents=AgentsConfig.model_validate(agents_data),
         skills=SkillsConfig.model_validate(skills_data),
     )
+    _normalize_context_window(bundle)
+    return bundle
+
+
+def _normalize_context_window(bundle: ConfigBundle) -> None:
+    sessions = bundle.kernel.sessions
+    if sessions.context_window_tokens != 100_000:
+        return
+    model = bundle.kernel.model
+    provider = (model.provider or "").lower()
+    protocol = (model.protocol or "").lower()
+    credential = (model.credential or "").lower()
+    base_url = (model.base_url or "").lower()
+    if (
+        provider in {"openai", "auth", "chatgpt"}
+        or protocol == "chatgpt_codex"
+        or credential in {"openai", "chatgpt"}
+        or "api.openai.com" in base_url
+        or "chatgpt.com" in base_url
+    ):
+        sessions.context_window_tokens = 250_000

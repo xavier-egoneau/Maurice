@@ -29,7 +29,7 @@ class CompactionLevel(IntEnum):
 
 @dataclass
 class CompactionConfig:
-    context_window_tokens: int = 100_000
+    context_window_tokens: int = 250_000
     trim_threshold: float = 0.60
     summarize_threshold: float = 0.75
     reset_threshold: float = 0.90

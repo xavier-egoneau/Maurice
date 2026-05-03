@@ -253,7 +253,7 @@ def _ensure_configured_scheduler_jobs(workspace_root: Path, agent_id: str) -> No
         )
     else:
         _cancel_recurring_job_kind(store, "system.dreaming.daily")
-    if scheduler.daily_enabled:
+    if scheduler.daily_enabled and (enabled_skills is None or "daily" in enabled_skills):
         _ensure_recurring_job(
             store,
             name="daily.digest",
@@ -387,17 +387,25 @@ def _scheduler_handlers(workspace_root: Path, agent_id: str):
             vision_backend=build_vision_backend(ctx.skills_config.get("vision")),
         ),
     )
-    dreaming = registry.build_executor_map(skill_ctx)
+    executors = registry.build_executor_map(skill_ctx)
 
     def run_dream(job):
         arguments = job.payload.get("arguments", {})
-        result = dreaming["dreaming.run"](arguments if isinstance(arguments, dict) else {})
+        result = executors["dreaming.run"](arguments if isinstance(arguments, dict) else {})
         if not result.ok:
             raise RuntimeError(result.summary)
         return result
 
     def run_daily(job):
-        text = _build_daily_digest(workspace, agent.id)
+        arguments = job.payload.get("arguments", {})
+        daily = executors.get("daily.digest")
+        if daily is None:
+            text = _build_daily_digest(workspace, agent.id)
+        else:
+            result = daily(arguments if isinstance(arguments, dict) else {})
+            if not result.ok:
+                raise RuntimeError(result.summary)
+            text = result.summary
         _deliver_daily_digest(workspace, job.payload, text, event_store=event_store)
         return text
 

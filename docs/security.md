@@ -64,7 +64,7 @@ Available in `permission_scope` rules and resolved at runtime:
 | Variable | Resolves to |
 |---|---|
 | `$workspace` | Current context content root: folder context or assistant workspace context |
-| `$agent_workspace` | Agent-specific workspace, or the local folder when there is no separate agent workspace |
+| `$agent_workspace` | Agent-specific workspace; in local folder context this is the local folder |
 | `$agent_content` | Agent content directory |
 | `$project` | Active project root: folder context root, global web launch folder, or selected agent-content project |
 | `$runtime` | Runtime installation directory |

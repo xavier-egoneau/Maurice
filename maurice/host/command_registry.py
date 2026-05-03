@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib import import_module
+import re
 from typing import Any, Literal
 
 from maurice.kernel.skills import SkillRegistry
@@ -96,6 +97,24 @@ class CommandRegistry:
             for command in sorted(commands, key=lambda item: item.name):
                 lines.append(f"{command.name} - {command.description}")
         return "\n".join(lines)
+
+    def telegram_bot_commands(self, *, scope: str | None = None) -> list[dict[str, str]]:
+        unique: dict[str, RuntimeCommand] = {}
+        for command in self._commands.values():
+            if command.available_for(scope):
+                unique[command.name] = command
+        commands = []
+        for command in sorted(unique.values(), key=lambda item: item.name):
+            name = command.name.removeprefix("/")
+            if not re.fullmatch(r"[a-z0-9_]{1,32}", name):
+                continue
+            commands.append(
+                {
+                    "command": name,
+                    "description": command.description[:256],
+                }
+            )
+        return commands[:100]
 
     @classmethod
     def from_skill_registry(

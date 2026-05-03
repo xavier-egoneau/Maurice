@@ -294,7 +294,7 @@ def fire_reminder(
 
 
 def _store_path(context: PermissionContext) -> Path:
-    return Path(context.variables()["$workspace"]) / "content" / "reminders" / "reminders.json"
+    return Path(context.variables()["$agent_workspace"]) / "reminders" / "reminders.json"
 
 
 def _parse_datetime(value: Any) -> datetime:
@@ -375,7 +375,7 @@ def _parse_interval(value: str) -> int | None:
 
 
 def _optional_positive_int(value: Any, *, field: str) -> int | None:
-    if value is None:
+    if value is None or value == 0:
         return None
     if not isinstance(value, int) or value <= 0:
         raise ValueError(f"{field} must be a positive integer.")

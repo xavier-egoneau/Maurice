@@ -16,7 +16,7 @@ permissions:
   - class: fs.write
     scope:
       paths:
-        - "$workspace/content/dreams/**"
+        - "$agent_workspace/dreams/**"
 tools:
   - name: dreaming.run
     description: Run a structured dream review over active skill inputs.
@@ -31,11 +31,11 @@ tools:
           type: integer
         include_memory:
           type: boolean
-          description: Include Maurice global memory as a first-class dream source when available. Defaults to true.
+          description: Include the current agent memory as a first-class dream source when available. Defaults to true.
     permission_class: fs.write
     permission_scope:
       paths:
-        - "$workspace/content/dreams/**"
+        - "$agent_workspace/dreams/**"
     trust:
       input: local_mutable
       output: skill_generated

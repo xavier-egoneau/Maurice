@@ -52,7 +52,7 @@ def test_reminder_create_persists_and_schedules_job(tmp_path) -> None:
     assert reminder["job_id"] == jobs[0].id
     assert result.summary.startswith("Ok, le rappel est prêt pour ")
     assert [event.name for event in events.read_all()] == ["reminder.created"]
-    assert (tmp_path / "workspace" / "content" / "reminders" / "reminders.json").is_file()
+    assert (tmp_path / "workspace" / "agents" / "main" / "reminders" / "reminders.json").is_file()
 
 
 def test_reminder_list_cancel_and_fire(tmp_path) -> None:
@@ -82,7 +82,7 @@ def test_reminder_list_cancel_and_fire(tmp_path) -> None:
     assert fired.ok is True
     assert fired.summary == "🔔 Stand up"
     assert fired.data["reminder"]["status"] == "delivered"
-    assert ReminderStore(tmp_path / "workspace" / "content" / "reminders" / "reminders.json").list(
+    assert ReminderStore(tmp_path / "workspace" / "agents" / "main" / "reminders" / "reminders.json").list(
         status="delivered"
     )[0].text == "Stand up"
 
@@ -137,6 +137,32 @@ def test_reminder_create_accepts_jarvis_like_at_trigger(tmp_path) -> None:
     assert reminder["trigger_type"] == "at"
     assert reminder["trigger_value"] == "10m"
     assert datetime.fromisoformat(reminder["run_at"]) > datetime.now(UTC)
+
+
+def test_reminder_create_treats_zero_interval_as_one_shot(tmp_path) -> None:
+    permission_context = context(tmp_path)
+    job_store = JobStore(tmp_path / "workspace" / "agents" / "main" / "jobs.json")
+
+    def schedule(payload):
+        job = job_store.schedule(
+            name="reminders.fire",
+            run_at=payload["run_at"],
+            owner="skill:reminders",
+            payload={"arguments": {"reminder_id": payload["reminder_id"]}},
+            interval_seconds=payload.get("interval_seconds"),
+        )
+        return job.id
+
+    created = create(
+        {"text": "Faire a manger", "trigger_type": "at", "trigger_value": "10m", "interval_seconds": 0},
+        permission_context,
+        schedule_reminder=schedule,
+    )
+
+    assert created.ok
+    assert created.data["reminder"]["interval_seconds"] is None
+    assert job_store.list()[0].interval_seconds is None
+    assert "puis toutes" not in created.summary
 
 
 def test_recurring_reminder_uses_interval_and_stays_scheduled_after_fire(tmp_path) -> None:
