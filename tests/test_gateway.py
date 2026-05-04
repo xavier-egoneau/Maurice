@@ -1801,6 +1801,46 @@ def test_gateway_web_session_history_hides_internal_system_messages(tmp_path) ->
     ]
 
 
+def test_gateway_web_session_history_survives_compaction(tmp_path) -> None:
+    """ui_messages preserves pre-compaction history; post-compaction messages are merged in."""
+    from datetime import UTC, datetime, timedelta
+    from maurice.host.cli import _gateway_web_session_history
+    from maurice.kernel.session import SessionMessage
+
+    sessions = SessionStore(tmp_path / "sessions")
+    sessions.create("main", session_id="web:main:1")
+
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    old_user = SessionMessage(role="user", content="Message avant compaction", created_at=t0)
+    old_asst = SessionMessage(role="assistant", content="Reponse avant compaction", created_at=t0 + timedelta(seconds=1))
+    notice = SessionMessage(
+        role="assistant",
+        content="Session automatically compacted.",
+        created_at=t0 + timedelta(seconds=2),
+        metadata={"compaction_notice": True},
+    )
+    new_user = SessionMessage(role="user", content="Message apres compaction", created_at=t0 + timedelta(seconds=3))
+    new_asst = SessionMessage(role="assistant", content="Reponse apres compaction", created_at=t0 + timedelta(seconds=4))
+
+    session = sessions.load("main", "web:main:1")
+    # Simulate post-compaction state: ui_messages has old history + notice,
+    # session.messages has only recent content.
+    session.ui_messages = [old_user, old_asst, notice]
+    session.messages = [new_user, new_asst]
+    sessions.save(session)
+
+    history = _gateway_web_session_history(tmp_path, "main", "web:main:1")
+
+    roles = [m["role"] for m in history]
+    contents = [m["content"] for m in history]
+    assert roles == ["user", "assistant", "system", "user", "assistant"]
+    assert "Message avant compaction" in contents
+    assert "Reponse avant compaction" in contents
+    assert "Session automatically compacted." in contents
+    assert "Message apres compaction" in contents
+    assert "Reponse apres compaction" in contents
+
+
 def test_gateway_web_session_history_attaches_tool_activity(tmp_path) -> None:
     from maurice.host.cli import _gateway_web_session_history
 

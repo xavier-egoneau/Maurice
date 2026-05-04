@@ -464,9 +464,16 @@ def _session_history(store: SessionStore, agent_id: str, session_id: str) -> lis
     except FileNotFoundError:
         return []
     tool_activity = _session_tool_activity(session.messages)
-    # ui_messages preserves full history across compactions; fall back to session.messages
-    # for sessions that predate this feature (ui_messages will be empty).
-    source = session.ui_messages if session.ui_messages else session.messages
+    # ui_messages is append-only and preserves pre-compaction history.
+    # session.messages holds current (possibly compacted) content.
+    # Merge: ui_messages has old messages; append anything from session.messages
+    # not already there (messages added after the last compaction).
+    if session.ui_messages:
+        ui_ts = {m.created_at for m in session.ui_messages}
+        extra = [m for m in session.messages if m.created_at not in ui_ts]
+        source = session.ui_messages + extra
+    else:
+        source = session.messages
     messages = []
     for message in source:
         if (
