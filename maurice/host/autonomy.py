@@ -6,9 +6,12 @@ import sys
 from time import monotonic
 from typing import Any, Callable
 
+from maurice.host.autonomy_progress import AutonomyProgress, ProgressCallback, combine_callbacks
 from maurice.kernel.loop import TurnResult
 
 RunTurn = Callable[..., TurnResult]
+
+_WRITE_MARKERS = ("écrit", "ecrit", "deplace", "déplacé", "cree", "créé", "mkdir", "wrote", "created", "moved")
 
 _DEFAULT_CONTINUE_PROMPT = (
     "Continue en mode autonome. Tu viens d'annoncer une action sans la realiser. "
@@ -32,6 +35,7 @@ def run_autonomous_command(
     autonomy_config: dict[str, Any],
     original_text: str,
     cancel_event: Any | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[TurnResult, bool]:
     """Run the autonomous continuation loop after an initial command turn.
 
@@ -40,6 +44,9 @@ def run_autonomous_command(
     """
     max_continuations = _positive_int(autonomy_config.get("max_continuations"), default=0)
     max_seconds = _positive_int(autonomy_config.get("max_seconds"), default=0)
+    max_consecutive_announce = _positive_int(
+        autonomy_config.get("max_consecutive_announce"), default=3
+    )
     continue_without_activity = autonomy_config.get("continue_without_activity") is True
     continue_prompt = autonomy_config.get("continue_prompt") or ""
     if not isinstance(continue_prompt, str) or not continue_prompt.strip():
@@ -50,11 +57,13 @@ def run_autonomous_command(
     any_tool_activity = tool_activity
     _log_autonomy_turn(command_name, 0, turn)
     continuation_count = 0
+    consecutive_no_action = 0 if tool_activity else 1
     started_at = monotonic()
 
     while (
         continuation_count < max_continuations
         and (not tool_activity or continue_without_activity)
+        and consecutive_no_action < max_consecutive_announce
         and (max_seconds <= 0 or monotonic() - started_at < max_seconds)
         and should_continue_autonomous_command(
             turn.assistant_text,
@@ -86,7 +95,29 @@ def run_autonomous_command(
         )
         tool_activity = bool(turn.tool_results)
         any_tool_activity = any_tool_activity or tool_activity
+        consecutive_no_action = 0 if tool_activity else consecutive_no_action + 1
         _log_autonomy_turn(command_name, continuation_count, turn)
+        if progress_callback is not None:
+            _emit_progress(
+                progress_callback, turn, continuation_count,
+                max_turns=max_continuations,
+                started_at=started_at,
+                command_name=command_name,
+                session_id=session_id,
+                agent_id=agent_id,
+                is_done=False,
+            )
+
+    if progress_callback is not None:
+        _emit_progress(
+            progress_callback, turn, continuation_count,
+            max_turns=max_continuations,
+            started_at=started_at,
+            command_name=command_name,
+            session_id=session_id,
+            agent_id=agent_id,
+            is_done=True,
+        )
 
     return turn, any_tool_activity
 
@@ -111,7 +142,12 @@ def should_continue_autonomous_command(
         return False
     if any(
         marker in normalized
-        for marker in ("bloque", "blocked", "besoin de", "il manque", "je ne peux pas")
+        for marker in (
+            "bloque", "blocage", "blocked", "blocking",
+            "besoin de", "il manque", "je ne peux pas",
+            "il n'y a plus", "il n y a plus", "no more tasks",
+            "pas de tache", "pas de tâche", "aucune tache", "aucune tâche",
+        )
     ):
         return False
     done_markers = (
@@ -151,15 +187,19 @@ def _positive_int(value: Any, *, default: int = 0) -> int:
     return parsed if parsed > 0 else default
 
 
+def _turn_write_count(turn: Any) -> int:
+    return sum(
+        1 for r in turn.tool_results
+        if r.ok and any(w in (r.summary or "").lower() for w in _WRITE_MARKERS)
+    )
+
+
 def _log_autonomy_turn(command: str, turn_number: int, turn: Any) -> None:
     tool_count = len(turn.tool_results)
     ok_count = sum(1 for r in turn.tool_results if r.ok)
     err_count = tool_count - ok_count
     error_codes = [r.error.code for r in turn.tool_results if r.error and r.error.code]
-    write_count = sum(
-        1 for r in turn.tool_results
-        if r.ok and any(w in (r.summary or "") for w in ("écrit", "deplace", "cree", "mkdir"))
-    )
+    write_count = _turn_write_count(turn)
     text_preview = (turn.assistant_text or "").strip().replace("\n", " ")[:80]
     parts = [f"[autonomy] {command} tour={turn_number} outils={ok_count}/{tool_count}"]
     if write_count:
@@ -169,3 +209,39 @@ def _log_autonomy_turn(command: str, turn_number: int, turn: Any) -> None:
     if text_preview:
         parts.append(f"texte={text_preview!r}")
     print(" ".join(parts), file=sys.stderr, flush=True)
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback,
+    turn: Any,
+    turn_number: int,
+    *,
+    max_turns: int,
+    started_at: float,
+    command_name: str,
+    session_id: str,
+    agent_id: str,
+    is_done: bool,
+) -> None:
+    tool_count = len(turn.tool_results)
+    ok_count = sum(1 for r in turn.tool_results if r.ok)
+    text = (turn.assistant_text or "").strip().replace("\n", " ")
+    is_blocked = not should_continue_autonomous_command(turn.assistant_text)
+    try:
+        progress_callback(AutonomyProgress(
+            command=command_name,
+            turn=turn_number,
+            max_turns=max_turns,
+            elapsed_seconds=monotonic() - started_at,
+            tool_count=tool_count,
+            tool_ok_count=ok_count,
+            write_count=_turn_write_count(turn),
+            error_count=tool_count - ok_count,
+            assistant_text_preview=text[:120],
+            is_blocked=is_blocked,
+            is_done=is_done,
+            session_id=session_id,
+            agent_id=agent_id,
+        ))
+    except Exception:
+        pass

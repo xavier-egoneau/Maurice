@@ -471,6 +471,26 @@ body.tools-hidden .tool-activity { display: none; }
 }
 .thinking span:nth-child(2) { animation-delay: .2s; }
 .thinking span:nth-child(3) { animation-delay: .4s; }
+.progress-bubble {
+  font-size: 0.82rem;
+  color: var(--text-2);
+  line-height: 1.5;
+  padding: 10px 14px !important;
+  border-left: 2px solid var(--accent-2);
+  opacity: 0.9;
+}
+.progress-bubble .progress-header {
+  font-weight: 600;
+  color: var(--accent-2);
+  margin-bottom: 4px;
+}
+.progress-bubble .progress-event {
+  font-size: 0.78rem;
+  opacity: 0.75;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 #bar {
   padding: 14px 16px;
   border-top: 1px solid #1e1b17;
@@ -1670,6 +1690,52 @@ async function refreshCommands() {
   updateAutocomplete();
 }
 
+function _openProgressStream(sid) {
+  const url = `/api/message/stream?session_id=${encodeURIComponent(sid)}`;
+  let bubble = null;
+  let eventsEl = null;
+  let sse = null;
+  try { sse = new EventSource(url); } catch(e) { return null; }
+  sse.onmessage = (e) => {
+    let data;
+    try { data = JSON.parse(e.data); } catch { return; }
+    if (data.done || data.error) { sse.close(); return; }
+    if (!bubble) {
+      hideThinking();
+      bubble = mkMsg("assistant progress-bubble");
+      const hdr = document.createElement("div");
+      hdr.className = "progress-header";
+      hdr.textContent = `⟳ ${data.command || "run"}`;
+      eventsEl = document.createElement("div");
+      bubble.appendChild(hdr);
+      bubble.appendChild(eventsEl);
+      messages.appendChild(bubble);
+      scrollBottom();
+    }
+    const hdr = bubble.querySelector(".progress-header");
+    if (hdr) {
+      const el = data.elapsed_seconds || 0;
+      const m = Math.floor(el / 60), s = Math.floor(el % 60);
+      const elapsed = m > 0 ? `${m}m ${String(s).padStart(2,"0")}s` : `${s}s`;
+      hdr.textContent = `⟳ ${data.command || "run"} — tour ${data.turn}/${data.max_turns} · ${elapsed}`;
+    }
+    if (eventsEl) {
+      const line = document.createElement("div");
+      line.className = "progress-event";
+      const writes = data.write_count > 0 ? ` · ${data.write_count} fichier(s)` : "";
+      const errs = data.error_count > 0 ? ` · ${data.error_count} erreur(s)` : "";
+      const preview = data.assistant_text_preview ? ` · "${data.assistant_text_preview.slice(0, 60)}"` : "";
+      line.textContent = `${data.tool_ok_count}/${data.tool_count} outils${writes}${errs}${preview}`;
+      eventsEl.appendChild(line);
+      // Keep only last 3 progress lines
+      while (eventsEl.children.length > 3) eventsEl.removeChild(eventsEl.firstChild);
+      scrollBottom();
+    }
+  };
+  sse.onerror = () => { sse.close(); };
+  return { close: () => { sse.close(); if (bubble) { bubble.remove(); bubble = null; } } };
+}
+
 async function sendMessage(text, options = {}) {
   const attachments = Array.isArray(options.attachments) ? options.attachments : [];
   if ((!text && !attachments.length) || busy) return "";
@@ -1680,6 +1746,8 @@ async function sendMessage(text, options = {}) {
     showThinking();
   }
   setBusy(true);
+  // Open SSE stream in parallel for progress feedback during long runs
+  const _stream = options.silent ? null : _openProgressStream(sessionId);
   try {
     const res = await apiFetch("/api/message", {
       method: "POST",
@@ -1718,6 +1786,7 @@ async function sendMessage(text, options = {}) {
     if (!options.silent) addAssistant("Erreur : " + (error instanceof Error ? error.message : String(error)));
     return "";
   } finally {
+    if (_stream) _stream.close();
     hideThinking();
     setBusy(false);
     if (!options.silent) void loadGitChanges();

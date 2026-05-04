@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from urllib import error as urlerror
 from urllib import request as urlrequest
+
+from maurice.host.autonomy_progress import AutonomyProgress, ProgressCallback
 
 from maurice.kernel.config import ConfigBundle, load_workspace_config
 from maurice.host.credentials import load_workspace_credentials
@@ -281,4 +284,58 @@ def _telegram_start_chat_action(token: str, chat_id: int):
         stop_event.set()
         thread.join(timeout=0.2)
 
+    return stop
+
+
+def make_telegram_progress_callback(
+    token: str,
+    chat_id: int,
+    *,
+    min_interval_seconds: float = 60.0,
+    heartbeat_seconds: float = 120.0,
+) -> ProgressCallback:
+    """Return a ProgressCallback that sends Telegram messages during long autonomous runs.
+
+    Sending strategy:
+    - Always on is_done or is_blocked (final states)
+    - When write_count > 0 AND enough time has passed since last send
+    - Heartbeat if no message sent in heartbeat_seconds (shows the run is alive)
+    """
+    last_sent: list[float] = [0.0]
+
+    def _fmt_elapsed(seconds: float) -> str:
+        m = int(seconds) // 60
+        s = int(seconds) % 60
+        return f"{m}m {s:02d}s" if m else f"{s}s"
+
+    def callback(progress: AutonomyProgress) -> None:
+        now = monotonic()
+        elapsed_since = now - last_sent[0]
+        force = progress.is_done or progress.is_blocked
+        significant = progress.write_count > 0 and elapsed_since >= min_interval_seconds
+        heartbeat = elapsed_since >= heartbeat_seconds and last_sent[0] > 0
+        if not (force or significant or heartbeat):
+            return
+        elapsed = _fmt_elapsed(progress.elapsed_seconds)
+        if progress.is_done:
+            files = f" · {progress.write_count} fichier(s)" if progress.write_count else ""
+            text = f"✓ {progress.command} terminé · {progress.turn} tour(s){files} · {elapsed}"
+        elif progress.is_blocked:
+            preview = progress.assistant_text_preview[:80]
+            text = f"⚠ {progress.command} — blocage : \"{preview}\""
+        else:
+            writes = f" · {progress.write_count} fichier(s) modifié(s)" if progress.write_count else ""
+            errors = f" · {progress.error_count} erreur(s)" if progress.error_count else ""
+            preview = f"\n\"{progress.assistant_text_preview[:80]}\"" if progress.assistant_text_preview else ""
+            text = (
+                f"⟳ {progress.command} — tour {progress.turn}/{progress.max_turns} · {elapsed}"
+                f"\n{progress.tool_ok_count}/{progress.tool_count} outil(s){writes}{errors}{preview}"
+            )
+        try:
+            _telegram_send_message(token, chat_id, text)
+            last_sent[0] = now
+        except Exception:
+            pass
+
+    return callback
     return stop

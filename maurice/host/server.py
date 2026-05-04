@@ -603,6 +603,7 @@ class MauriceServer:
             _send(conn, {
                 "type": "done",
                 "status": result.status,
+                "status_code": result.status_code,
                 "correlation_id": result.correlation_id,
                 "assistant_text": result.assistant_text,
                 "input_tokens": result.input_tokens,

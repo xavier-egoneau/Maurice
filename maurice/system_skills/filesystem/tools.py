@@ -269,10 +269,15 @@ def _list_summary(entries: list[dict[str, Any]]) -> str:
 def _not_found_summary(raw_path: Any, context: PermissionContext) -> str:
     requested = str(raw_path or "").strip() or "ce chemin"
     variables = context.variables()
-    project = Path(variables.get("$project") or "")
-    if project.name:
+    project_root = Path(variables.get("$project") or "")
+    try:
+        resolved = _resolve_path({"path": requested}, context)
+        under_project = project_root.name and resolved.is_relative_to(project_root)
+    except Exception:
+        under_project = bool(project_root.name)
+    if under_project:
         return (
-            f"Je ne trouve pas `{requested}` dans le projet actif `{project.name}`. "
+            f"Je ne trouve pas `{requested}` dans le projet actif `{project_root.name}`. "
             "Pour parler du dossier du projet lui-même, utilise `.`."
         )
     return f"Je ne trouve pas `{requested}`."

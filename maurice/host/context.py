@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -238,6 +239,22 @@ def build_command_callbacks(
             "Derniers éléments conservés :\n" + "\n".join(recent)
         )
 
+    _agent_workspace_root = ctx.agent_workspace_root
+
+    def _has_active_project(_agent_id: str, _session_id: str) -> bool:
+        if ctx.active_project_root is not None:
+            return True
+        if _agent_workspace_root is None:
+            return False
+        state_path = Path(_agent_workspace_root) / ".dev_state.json"
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return False
+            return bool(data.get("active_project_path") or data.get("active_project"))
+        except Exception:
+            return False
+
     callbacks: dict[str, Any] = {
         "workspace": ctx.content_root,
         "context_root": ctx.context_root,
@@ -249,6 +266,7 @@ def build_command_callbacks(
         "compact_session": compact_session,
         "reset_session": reset_session,
         "new_session": reset_session,
+        "has_active_project": _has_active_project,
     }
     if ctx.active_project_root is not None:
         callbacks["active_project_path"] = ctx.active_project_root

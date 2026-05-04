@@ -101,6 +101,17 @@ def set_active_project(arguments: dict[str, Any], context: PermissionContext) ->
                     if candidate.is_dir():
                         project = candidate
                     break
+        # Fallback: scan $agent_content and its immediate subdirectories
+        if project is None:
+            agent_content = agent_workspace / "content"
+            subdirs = sorted(agent_content.iterdir()) if agent_content.is_dir() else []
+            for search_root in [agent_content, *subdirs]:
+                if not search_root.is_dir():
+                    continue
+                candidate = search_root / name
+                if candidate.is_dir():
+                    project = candidate.resolve()
+                    break
         if project is None:
             known = [
                 e["name"]

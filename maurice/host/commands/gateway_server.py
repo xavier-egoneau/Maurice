@@ -47,6 +47,7 @@ from maurice.host.delivery import (
     _deliver_daily_digest, _emit_daily_event, _cancel_job_callback,
     _latest_dream_report, _human_datetime,
 )
+from maurice.host.autonomy_progress import ProgressCallback, SessionProgressStore
 from maurice.host.gateway import GatewayHttpServer, MessageRouter
 from maurice.host.git_status import git_changes, git_diff
 from maurice.host.migration import inspect_jarvis_workspace, migrate_jarvis_workspace
@@ -75,6 +76,7 @@ from maurice.host.service import check_install, inspect_service_status, read_ser
 from maurice.host.telegram import (
     _credential_value, _telegram_channel_configured, _telegram_channel_configs,
     _telegram_channel_for_agent, _telegram_offset_path, _validate_telegram_first_message,
+    make_telegram_progress_callback,
     _telegram_get_updates, _telegram_bot_username, _telegram_send_message,
     _telegram_send_chat_action, _telegram_api_json, _telegram_update_to_inbound,
     _telegram_set_my_commands,
@@ -896,6 +898,32 @@ def _gateway_rate_limit_config(ctx: MauriceContext) -> GatewayRateLimitConfig:
     return GatewayRateLimitConfig()
 
 
+def _make_telegram_progress_factory(workspace: Path, bundle: ConfigBundle, agent_id: str):
+    """Return a make_channel_progress_callback factory for Telegram, or None if unconfigured."""
+    def factory(channel: str, peer_id: str, source_metadata: dict) -> "ProgressCallback | None":
+        if channel != "telegram":
+            return None
+        chat_id = source_metadata.get("chat_id")
+        if not isinstance(chat_id, int):
+            try:
+                chat_id = int(chat_id)
+            except (TypeError, ValueError):
+                return None
+        telegram_cfg = _telegram_channel_for_agent(bundle, agent_id)
+        if telegram_cfg is None:
+            return None
+        _cred_name, cfg = telegram_cfg
+        credential_name = cfg.get("credential") or "telegram_bot"
+        try:
+            token = _credential_value(workspace, credential_name)
+        except Exception:
+            return None
+        if not token:
+            return None
+        return make_telegram_progress_callback(token, chat_id)
+    return factory
+
+
 
 def _gateway_router_for_local_context(ctx: MauriceContext) -> MessageRouter:
     event_store = EventStore(ctx.events_path)
@@ -927,6 +955,7 @@ def _gateway_router_for_local_context(ctx: MauriceContext) -> MessageRouter:
     ).load()
     command_registry = CommandRegistry.from_skill_registry(skill_registry)
 
+    _progress_store = SessionProgressStore()
     return MessageRouter(
         run_turn=run_gateway_turn,
         event_store=event_store,
@@ -960,6 +989,7 @@ def _gateway_router_for_local_context(ctx: MauriceContext) -> MessageRouter:
             },
         ),
         rate_limit=_gateway_rate_limit_config(ctx),
+        progress_store=_progress_store,
     )
 
 
@@ -1022,6 +1052,7 @@ def _gateway_router_for(
             )
         return None
 
+    _progress_store = SessionProgressStore()
     return (
         MessageRouter(
             run_turn=run_gateway_turn,
@@ -1069,6 +1100,8 @@ def _gateway_router_for(
                 },
             ),
             rate_limit=_gateway_rate_limit_config(ctx),
+            progress_store=_progress_store,
+            make_channel_progress_callback=_make_telegram_progress_factory(workspace, bundle, agent.id),
         ),
         agent,
         bundle,
@@ -1107,6 +1140,7 @@ def _run_turn_via_global_server(
     client.connect()
     assistant_text = ""
     status = "failed"
+    status_code: str | None = None
     turn_correlation_id = ""
     input_tokens = 0
     output_tokens = 0
@@ -1152,6 +1186,7 @@ def _run_turn_via_global_server(
                 error_message = str(event.get("message") or "")
             elif kind == "done":
                 status = str(event.get("status") or status)
+                status_code = event.get("status_code") or None
                 turn_correlation_id = str(event.get("correlation_id") or turn_correlation_id)
                 if not assistant_text and event.get("assistant_text"):
                     assistant_text = str(event.get("assistant_text") or "")
@@ -1171,6 +1206,7 @@ def _run_turn_via_global_server(
         assistant_text=assistant_text,
         tool_results=tool_results,
         status=status,
+        status_code=status_code,
         error=error_message,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -1207,6 +1243,7 @@ def _run_turn_via_local_server(
     client.connect()
     assistant_text = ""
     status = "failed"
+    status_code: str | None = None
     turn_correlation_id = ""
     input_tokens = 0
     output_tokens = 0
@@ -1252,6 +1289,7 @@ def _run_turn_via_local_server(
                 error_message = str(event.get("message") or "")
             elif kind == "done":
                 status = str(event.get("status") or status)
+                status_code = event.get("status_code") or None
                 turn_correlation_id = str(event.get("correlation_id") or turn_correlation_id)
                 if not assistant_text and event.get("assistant_text"):
                     assistant_text = str(event.get("assistant_text") or "")
@@ -1271,6 +1309,7 @@ def _run_turn_via_local_server(
         assistant_text=assistant_text,
         tool_results=tool_results,
         status=status,
+        status_code=status_code,
         error=error_message,
         input_tokens=input_tokens,
         output_tokens=output_tokens,

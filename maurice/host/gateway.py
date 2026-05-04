@@ -18,6 +18,11 @@ from uuid import uuid4
 from pydantic import Field
 
 from maurice.host.autonomy import run_autonomous_command, should_continue_autonomous_command
+from maurice.host.autonomy_progress import (
+    ProgressCallback,
+    SessionProgressStore,
+    combine_callbacks,
+)
 from maurice.host.command_registry import CommandContext, CommandRegistry, default_command_registry
 from maurice.host.context_meter import context_usage
 from maurice.kernel.config import GatewayRateLimitConfig
@@ -131,6 +136,8 @@ class MessageRouter:
         command_callbacks: dict[str, Callable[..., Any]] | None = None,
         record_exchange: RecordExchange | None = None,
         rate_limit: GatewayRateLimitConfig | None = None,
+        progress_store: SessionProgressStore | None = None,
+        make_channel_progress_callback: Callable[[str, str, dict], ProgressCallback | None] | None = None,
     ) -> None:
         self.run_turn = run_turn
         self.event_store = event_store
@@ -142,6 +149,8 @@ class MessageRouter:
         self.command_callbacks = command_callbacks or {}
         self.record_exchange = record_exchange
         self._rate_limit = rate_limit or GatewayRateLimitConfig()
+        self.progress_store = progress_store
+        self.make_channel_progress_callback = make_channel_progress_callback
         # (agent_id, session_id) → (cancel_event, started_at)
         self._active_turns: dict[tuple[str, str], tuple[threading.Event, float]] = {}
         self._active_turns_lock = threading.Lock()
@@ -229,6 +238,20 @@ class MessageRouter:
                 if not isinstance(autonomy, dict):
                     autonomy = {}
                 cancel_event = self._begin_turn(agent_id, session_id, peer_key=peer_key)
+                # Assemble progress callbacks (SSE store + channel-specific)
+                _progress_cbs: list[ProgressCallback] = []
+                if self.progress_store is not None:
+                    self.progress_store.open(session_id)
+                    _store = self.progress_store
+                    _sid = session_id
+                    _progress_cbs.append(lambda p, _s=_store, _i=_sid: _s.push(_i, p))
+                if self.make_channel_progress_callback is not None:
+                    _chan_cb = self.make_channel_progress_callback(
+                        message.channel, message.peer_id, dict(message.metadata)
+                    )
+                    if _chan_cb is not None:
+                        _progress_cbs.append(_chan_cb)
+                _progress_callback = combine_callbacks(*_progress_cbs) if _progress_cbs else None
                 try:
                     initial_turn = self.run_turn(
                         message=agent_prompt,
@@ -264,9 +287,12 @@ class MessageRouter:
                         autonomy_config=autonomy,
                         original_text=message.text,
                         cancel_event=cancel_event,
+                        progress_callback=_progress_callback,
                     )
                 finally:
                     self._finish_turn(agent_id, session_id, cancel_event, peer_key=peer_key)
+                    if self.progress_store is not None:
+                        self.progress_store.close(session_id)
                 text = _turn_response_text(turn)
                 if autonomy.get("requires_activity") is True and not any_tool_activity:
                     no_activity_text = autonomy.get("no_activity_text")
@@ -706,6 +732,7 @@ class GatewayHttpServer:
     ):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
+                import queue as _queue
                 parsed = urlparse(self.path)
                 if parsed.path == "/":
                     if not self._authorized(parsed):
@@ -715,6 +742,52 @@ class GatewayHttpServer:
                     return
                 if parsed.path == "/health":
                     self._write_json(200, {"ok": True, "status": "ready"})
+                    return
+                if parsed.path == "/api/message/stream":
+                    if not self._authorized(parsed):
+                        self._write_json(403, {"ok": False, "error": "forbidden"})
+                        return
+                    if router.progress_store is None:
+                        self._write_json(404, {"ok": False, "error": "progress_store_unavailable"})
+                        return
+                    query = parse_qs(parsed.query)
+                    session_id = query.get("session_id", [""])[0]
+                    if not session_id:
+                        self._write_json(400, {"ok": False, "error": "missing_session_id"})
+                        return
+                    q = router.progress_store.get_queue(session_id)
+                    if q is None:
+                        # No active run — send a done event immediately
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.send_header("Cache-Control", "no-cache")
+                        self.end_headers()
+                        self.wfile.write(b'data: {"done":true,"reason":"no_active_run"}\n\n')
+                        self.wfile.flush()
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "keep-alive")
+                    self.end_headers()
+                    try:
+                        while True:
+                            try:
+                                progress = q.get(timeout=30)
+                            except _queue.Empty:
+                                # SSE keep-alive comment
+                                self.wfile.write(b": keep-alive\n\n")
+                                self.wfile.flush()
+                                continue
+                            if progress is None:  # sentinel = run ended
+                                self.wfile.write(b'data: {"done":true}\n\n')
+                                self.wfile.flush()
+                                break
+                            payload = json.dumps(progress.to_dict())
+                            self.wfile.write(f"data: {payload}\n\n".encode())
+                            self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
                     return
                 if parsed.path == "/api/agents":
                     if not self._authorized(parsed):

@@ -66,6 +66,9 @@ If a tool fails, explain why before retrying or escalating.
 Do not silently change arguments and retry — state what you are changing and why.
 If you reach a dead end, name the blocker and propose the next move.
 Approval-gated actions that are denied end the attempt — do not find another path around the denial.
+Never claim to have taken an action you did not confirm with a tool call.
+"I logged a bug", "I left a trace", "I sent a notification" — these are only true if a tool confirmed it.
+If no tool is available for the action, say so explicitly instead of pretending to act.
 
 
 ## Language
@@ -150,6 +153,9 @@ def _path_rules(*, agent_content: str, active_project: str | None, known_project
     lines += [
         f"Agent content directory: {agent_content}",
         "Use it for user-facing files, drafts, exports, and produced content when no project is active.",
+        "Projects can be organized anywhere under the agent content directory, including in subdirectories. "
+        "When searching for a project by name, list $agent_content first to discover its structure — "
+        "do not assume the project is directly at the root of $agent_content.",
         "Do not put secrets or host configuration in the content directory.",
         "Project memory lives in `<project>/.maurice/` "
         "(AGENTS.md, DECISIONS.md, PLAN.md, dreams.md), but these files are auxiliary.",
