@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from collections import deque
 import functools
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import sys
+import time
 import threading
 from urllib.parse import parse_qs, urlparse
 from typing import Any
@@ -18,6 +20,7 @@ from pydantic import Field
 from maurice.host.autonomy import run_autonomous_command, should_continue_autonomous_command
 from maurice.host.command_registry import CommandContext, CommandRegistry, default_command_registry
 from maurice.host.context_meter import context_usage
+from maurice.kernel.config import GatewayRateLimitConfig
 from maurice.kernel.contracts import MauriceModel
 from maurice.kernel.events import EventStore
 from maurice.kernel.loop import TurnResult
@@ -94,10 +97,20 @@ def _turn_context_usage(turn: TurnResult) -> dict[str, Any] | None:
     )
 
 
+_STATUS_CODE_MESSAGES: dict[str, str] = {
+    "cancelled": "Réponse interrompue (annulée).",
+    "provider_failed": "Réponse interrompue : erreur du modèle.",
+    "provider_no_status": "Réponse interrompue : le modèle n'a pas répondu.",
+}
+
+
 def _turn_response_text(turn: TurnResult) -> str:
     text = turn.assistant_text or "\n".join(result.summary for result in turn.tool_results)
-    if turn.status != "completed" and turn.error:
-        warning = f"Réponse interrompue : {turn.error}"
+    if turn.status != "completed":
+        status_code = getattr(turn, "status_code", None)
+        warning = _STATUS_CODE_MESSAGES.get(status_code or "") or (
+            f"Réponse interrompue : {turn.error}" if turn.error else "Réponse interrompue."
+        )
         return f"{text}\n\n{warning}".strip() if text else warning
     return text
 
@@ -117,6 +130,7 @@ class MessageRouter:
         command_registry: CommandRegistry | None = None,
         command_callbacks: dict[str, Callable[..., Any]] | None = None,
         record_exchange: RecordExchange | None = None,
+        rate_limit: GatewayRateLimitConfig | None = None,
     ) -> None:
         self.run_turn = run_turn
         self.event_store = event_store
@@ -127,16 +141,26 @@ class MessageRouter:
         self.command_registry = command_registry or default_command_registry()
         self.command_callbacks = command_callbacks or {}
         self.record_exchange = record_exchange
-        self._active_turns: dict[tuple[str, str], threading.Event] = {}
+        self._rate_limit = rate_limit or GatewayRateLimitConfig()
+        # (agent_id, session_id) → (cancel_event, started_at)
+        self._active_turns: dict[tuple[str, str], tuple[threading.Event, float]] = {}
         self._active_turns_lock = threading.Lock()
+        # (channel, peer_id) → deque of request timestamps for sliding window
+        self._peer_windows: dict[tuple[str, str], deque[float]] = {}
+        # (channel, peer_id) → count of active turns
+        self._peer_concurrent: dict[tuple[str, str], int] = {}
+        self._peer_lock = threading.Lock()
+        if self._rate_limit.turn_timeout_seconds > 0:
+            t = threading.Thread(target=self._zombie_cleanup_loop, daemon=True)
+            t.start()
 
     def cancel(self, agent_id: str | None, session_id: str | None) -> bool:
         key = (agent_id or self.default_agent_id, session_id or "")
         with self._active_turns_lock:
-            event = self._active_turns.get(key)
-        if event is None:
+            entry = self._active_turns.get(key)
+        if entry is None:
             return False
-        event.set()
+        entry[0].set()
         return True
 
     def handle(self, inbound: InboundMessage | dict[str, Any]) -> GatewayResult:
@@ -151,6 +175,23 @@ class MessageRouter:
             session_id=session_id,
             correlation_id=correlation_id,
         )
+
+        is_internal = bool(message.metadata.get("autonomy_internal"))
+        peer_key: tuple[str, str] | None = None
+        if not is_internal:
+            peer_key = (message.channel, message.peer_id)
+            rate_error = self._rate_limit_check(message.channel, message.peer_id)
+            if rate_error:
+                outbound = OutboundMessage(
+                    channel=message.channel,
+                    peer_id=message.peer_id,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    text=rate_error,
+                    metadata={"rate_limited": True},
+                )
+                return GatewayResult(inbound=message, outbound=outbound, status="rate_limited")
 
         command_result = self.command_registry.dispatch(
             CommandContext(
@@ -187,7 +228,7 @@ class MessageRouter:
                 autonomy = command_result.metadata.get("autonomy")
                 if not isinstance(autonomy, dict):
                     autonomy = {}
-                cancel_event = self._begin_turn(agent_id, session_id)
+                cancel_event = self._begin_turn(agent_id, session_id, peer_key=peer_key)
                 try:
                     initial_turn = self.run_turn(
                         message=agent_prompt,
@@ -225,7 +266,7 @@ class MessageRouter:
                         cancel_event=cancel_event,
                     )
                 finally:
-                    self._finish_turn(agent_id, session_id, cancel_event)
+                    self._finish_turn(agent_id, session_id, cancel_event, peer_key=peer_key)
                 text = _turn_response_text(turn)
                 if autonomy.get("requires_activity") is True and not any_tool_activity:
                     no_activity_text = autonomy.get("no_activity_text")
@@ -351,7 +392,7 @@ class MessageRouter:
             message_metadata["attachments"] = message.metadata["attachments"]
         if message.metadata.get("visible_user_message") is not None:
             message_metadata["visible_user_message"] = message.metadata.get("visible_user_message")
-        cancel_event = self._begin_turn(agent_id, session_id)
+        cancel_event = self._begin_turn(agent_id, session_id, peer_key=peer_key)
         try:
             turn = self.run_turn(
                 message=message.text,
@@ -366,7 +407,7 @@ class MessageRouter:
                 **({"message_metadata": message_metadata} if message_metadata else {}),
             )
         finally:
-            self._finish_turn(agent_id, session_id, cancel_event)
+            self._finish_turn(agent_id, session_id, cancel_event, peer_key=peer_key)
         text = _turn_response_text(turn)
         outbound = OutboundMessage(
             channel=message.channel,
@@ -394,16 +435,84 @@ class MessageRouter:
             self._record_exchange(message, outbound, include_user=False)
         return GatewayResult(inbound=message, outbound=outbound, status=turn.status)
 
-    def _begin_turn(self, agent_id: str, session_id: str) -> threading.Event:
+    def _begin_turn(
+        self,
+        agent_id: str,
+        session_id: str,
+        peer_key: tuple[str, str] | None = None,
+    ) -> threading.Event:
         event = threading.Event()
         with self._active_turns_lock:
-            self._active_turns[(agent_id, session_id)] = event
+            self._active_turns[(agent_id, session_id)] = (event, time.monotonic())
+        if peer_key is not None:
+            with self._peer_lock:
+                self._peer_concurrent[peer_key] = self._peer_concurrent.get(peer_key, 0) + 1
         return event
 
-    def _finish_turn(self, agent_id: str, session_id: str, event: threading.Event) -> None:
+    def _finish_turn(
+        self,
+        agent_id: str,
+        session_id: str,
+        event: threading.Event,
+        peer_key: tuple[str, str] | None = None,
+    ) -> None:
         with self._active_turns_lock:
-            if self._active_turns.get((agent_id, session_id)) is event:
+            entry = self._active_turns.get((agent_id, session_id))
+            if entry is not None and entry[0] is event:
                 del self._active_turns[(agent_id, session_id)]
+        if peer_key is not None:
+            with self._peer_lock:
+                current = self._peer_concurrent.get(peer_key, 0)
+                if current > 1:
+                    self._peer_concurrent[peer_key] = current - 1
+                else:
+                    self._peer_concurrent.pop(peer_key, None)
+
+    def _rate_limit_check(
+        self, channel: str, peer_id: str
+    ) -> str | None:
+        """Return an error message if the request should be rejected, None if allowed."""
+        cfg = self._rate_limit
+        peer_key = (channel, peer_id)
+        now = time.monotonic()
+        with self._peer_lock:
+            if cfg.max_requests_per_minute > 0:
+                window = self._peer_windows.setdefault(peer_key, deque())
+                cutoff = now - 60.0
+                while window and window[0] < cutoff:
+                    window.popleft()
+                if len(window) >= cfg.max_requests_per_minute:
+                    return "Trop de requêtes. Réessaie dans un moment."
+                window.append(now)
+            if cfg.max_concurrent_per_peer > 0:
+                if self._peer_concurrent.get(peer_key, 0) >= cfg.max_concurrent_per_peer:
+                    return "Une réponse est déjà en cours. Patiente ou annule avec /stop."
+        return None
+
+    def _zombie_cleanup_loop(self) -> None:
+        timeout = self._rate_limit.turn_timeout_seconds
+        while True:
+            time.sleep(60)
+            if timeout <= 0:
+                break
+            deadline = time.monotonic() - timeout
+            with self._active_turns_lock:
+                zombies = [
+                    (key, event)
+                    for key, (event, started_at) in list(self._active_turns.items())
+                    if started_at < deadline
+                ]
+            for key, event in zombies:
+                event.set()
+                if self.event_store is not None:
+                    self.event_store.emit(
+                        name="gateway.turn.timeout",
+                        kind="fact",
+                        origin="host",
+                        agent_id=key[0],
+                        session_id=key[1],
+                        payload={"timeout_seconds": timeout},
+                    )
 
     def _record_exchange(
         self,

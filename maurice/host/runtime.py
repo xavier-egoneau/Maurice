@@ -10,6 +10,7 @@ from typing import Any
 
 from maurice.host.auth import CHATGPT_CREDENTIAL_NAME, get_valid_chatgpt_access_token
 from maurice.host.context import MauriceContext, resolve_global_context
+from maurice.host.errors import AgentError, ProviderError
 from maurice.host.credentials import CredentialsStore, load_workspace_credentials
 from maurice.host.delivery import _cancel_job_callback, _schedule_reminder_callback
 from maurice.host.paths import maurice_home
@@ -42,7 +43,8 @@ from maurice.host.vision_backend import build_vision_backend
 
 def build_global_agent_loop(
     *,
-    ctx: MauriceContext,
+    ctx: MauriceContext | None = None,
+    workspace_root: Path | None = None,
     message: str,
     session_id: str,
     agent_id: str | None = None,
@@ -54,21 +56,40 @@ def build_global_agent_loop(
     tool_started_callback: Any = None,
     _prebuilt_registry: Any = None,
 ) -> tuple[AgentLoop, Any]:
-    if not isinstance(ctx.config, ConfigBundle):
-        raise TypeError("build_global_agent_loop requires a global MauriceContext")
-    bundle = ctx.config
+    if ctx is not None:
+        if not isinstance(ctx.config, ConfigBundle):
+            raise TypeError("build_global_agent_loop requires a global MauriceContext")
+        bundle = ctx.config
+        initial_context_root = ctx.context_root
+        initial_active_project = ctx.active_project_root
+    elif workspace_root is not None:
+        bundle = load_workspace_config(workspace_root)
+        initial_context_root = Path(bundle.host.workspace_root)
+        initial_active_project = None
+    else:
+        raise ValueError("Either ctx or workspace_root must be provided")
     agent = _resolve_agent(bundle, agent_id)
     workspace = Path(bundle.host.workspace_root)
     ctx = resolve_global_context(
-        ctx.context_root,
+        initial_context_root,
         agent=agent,
         bundle=bundle,
-        active_project=ctx.active_project_root,
+        active_project=initial_active_project,
     )
-    active_project_root = _turn_active_project_path(ctx, agent, source_metadata, message=message)
+    event_store = EventStore(ctx.events_path)
+    active_project_root, project_source = _turn_active_project_path(ctx, agent, source_metadata, message=message)
     if active_project_root:
         record_seen_project(agent.workspace, active_project_root)
         _write_active_dev_project_path(agent, active_project_root)
+        if project_source == "inferred":
+            event_store.emit(
+                name="project.inferred",
+                kind="fact",
+                origin="host",
+                agent_id=agent.id,
+                session_id=session_id,
+                payload={"project": active_project_root, "from_message": True},
+            )
     permission_context = PermissionContext(
         workspace_root=str(ctx.content_root),
         runtime_root=str(ctx.runtime_root),
@@ -76,7 +97,6 @@ def build_global_agent_loop(
         agent_workspace_root=agent.workspace,
         active_project_root=active_project_root,
     )
-    event_store = EventStore(ctx.events_path)
     credentials = load_workspace_credentials(workspace).visible_to(agent.credentials)
     if _prebuilt_registry is not None:
         registry = _prebuilt_registry
@@ -188,9 +208,9 @@ def _resolve_agent(bundle: ConfigBundle, agent_id: str | None) -> Any:
         try:
             agent = bundle.agents.agents[agent_id]
         except KeyError as exc:
-            raise SystemExit(f"Unknown agent: {agent_id}") from exc
+            raise AgentError(f"Unknown agent: {agent_id}") from exc
         if agent.status != "active":
-            raise SystemExit(f"Agent is not active: {agent_id} ({agent.status})")
+            raise AgentError(f"Agent is not active: {agent_id} ({agent.status})")
         return agent
     for agent in bundle.agents.agents.values():
         if agent.default and agent.status == "active":
@@ -198,9 +218,9 @@ def _resolve_agent(bundle: ConfigBundle, agent_id: str | None) -> Any:
     try:
         agent = bundle.agents.agents["main"]
     except KeyError as exc:
-        raise SystemExit("No default agent configured") from exc
+        raise AgentError("No default agent configured") from exc
     if agent.status != "active":
-        raise SystemExit("No active default agent configured")
+        raise AgentError("No active default agent configured")
     return agent
 
 
@@ -237,6 +257,8 @@ def _write_active_dev_project_path(agent: Any | None, project_root: str | Path) 
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
+    if payload.get("active_project_path") == str(project) and "active_project" not in payload:
+        return
     payload["active_project_path"] = str(project)
     payload.pop("active_project", None)
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -249,20 +271,21 @@ def _turn_active_project_path(
     source_metadata: dict[str, Any] | None,
     *,
     message: str | None = None,
-) -> str | None:
+) -> tuple[str | None, str]:
+    """Return (path, source) where source is 'metadata', 'ctx', 'inferred', or 'dev_state'."""
     metadata_project = (
         source_metadata.get("active_project_root")
         if isinstance(source_metadata, dict)
         else None
     )
     if isinstance(metadata_project, str) and metadata_project.strip():
-        return str(Path(metadata_project).expanduser().resolve())
+        return str(Path(metadata_project).expanduser().resolve()), "metadata"
     if ctx.active_project_root is not None:
-        return str(ctx.active_project_root)
+        return str(ctx.active_project_root), "ctx"
     inferred = _infer_known_project_from_message(agent, message or "")
     if inferred is not None:
-        return str(inferred)
-    return _active_dev_project_path(agent)
+        return str(inferred), "inferred"
+    return _active_dev_project_path(agent), "dev_state"
 
 
 def _infer_known_project_from_message(agent: Any | None, message: str) -> Path | None:
@@ -300,28 +323,21 @@ def _known_project_candidates(agent: Any) -> list[dict[str, str]]:
     return projects
 
 
+_PROJECT_INTENT_MARKERS: frozenset[str] = frozenset({
+    # français
+    "projet", "dossier", "mets toi", "met toi", "ouvre", "ouvrir",
+    "travaille sur", "critique", "explore", "resume", "résume",
+    # english
+    "project", "folder", "repo", "codebase", "open", "work on",
+    "switch to", "look at", "review", "summarize",
+})
+
+
 def _message_has_project_intent(message: str) -> bool:
     normalized = _normalize_project_text(message)
     if not normalized:
         return False
-    markers = (
-        "projet",
-        "project",
-        "dossier",
-        "folder",
-        "repo",
-        "codebase",
-        "mets toi",
-        "met toi",
-        "ouvre",
-        "ouvrir",
-        "travaille sur",
-        "critique",
-        "explore",
-        "resume",
-        "résume",
-    )
-    return any(marker in normalized for marker in markers)
+    return any(marker in normalized for marker in _PROJECT_INTENT_MARKERS)
 
 
 def _project_message_score(project_name: str, message: str) -> float:
@@ -506,7 +522,7 @@ def _provider_for_model_config(
             base_url=str(model.get("base_url") or "http://localhost:11434"),
             api_key=credential.value if credential is not None else "",
         )
-    raise SystemExit(f"Unsupported provider: {provider_name}")
+    raise ProviderError(f"Unsupported provider: {provider_name}")
 
 
 def run_one_turn(
@@ -522,15 +538,11 @@ def run_one_turn(
     message_metadata: dict[str, Any] | None = None,
     cancel_event: Any | None = None,
 ) -> TurnResult:
-    bundle = load_workspace_config(workspace_root)
-    agent = _resolve_agent(bundle, agent_id)
-    workspace = Path(bundle.host.workspace_root)
-    ctx = resolve_global_context(workspace, agent=agent, bundle=bundle)
     loop, agent = build_global_agent_loop(
-        ctx=ctx,
+        workspace_root=workspace_root,
         message=message,
         session_id=session_id,
-        agent_id=agent.id,
+        agent_id=agent_id,
         source_channel=source_channel,
         source_peer_id=source_peer_id,
         source_metadata=source_metadata,

@@ -9,6 +9,12 @@ from maurice.host.agents import create_agent, delete_agent, list_agents, update_
 from maurice.host.credentials import load_workspace_credentials
 from maurice.host.paths import host_config_path
 from maurice.host.project import global_config_path
+from maurice.host.project_registry import (
+    known_project_by_name,
+    list_known_projects,
+    list_machine_projects,
+    record_seen_project,
+)
 from maurice.host.secret_capture import request_secret_capture
 from maurice.host.service import inspect_doctor, inspect_service_status, read_service_logs
 from maurice.host.telegram import _telegram_allowed_chats_with_private_users
@@ -32,6 +38,7 @@ def host_tool_executors(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     return {
+        "host.set_active_project": lambda arguments: set_active_project(arguments, context),
         "host.status": lambda arguments: status(arguments, context),
         "host.doctor": lambda arguments: doctor(arguments, context),
         "host.logs": lambda arguments: logs(arguments, context),
@@ -48,6 +55,7 @@ def host_tool_executors(
             agent_id=agent_id,
             session_id=session_id,
         ),
+        "maurice.system_skills.host.tools.set_active_project": lambda arguments: set_active_project(arguments, context),
         "maurice.system_skills.host.tools.status": lambda arguments: status(arguments, context),
         "maurice.system_skills.host.tools.doctor": lambda arguments: doctor(arguments, context),
         "maurice.system_skills.host.tools.logs": lambda arguments: logs(arguments, context),
@@ -65,6 +73,71 @@ def host_tool_executors(
             session_id=session_id,
         ),
     }
+
+
+def set_active_project(arguments: dict[str, Any], context: PermissionContext) -> ToolResult:
+    raw_path = arguments.get("path")
+    raw_name = arguments.get("name")
+    if not raw_path and not raw_name:
+        return _error("invalid_arguments", "host.set_active_project requires path or name.")
+
+    agent_workspace = Path(context.agent_workspace_root).expanduser().resolve()
+    project: Path | None = None
+
+    if raw_path and isinstance(raw_path, str):
+        candidate = Path(raw_path).expanduser().resolve()
+        if candidate.is_dir():
+            project = candidate
+        else:
+            return _error("not_found", f"Path does not exist or is not a directory: {raw_path}")
+
+    if project is None and raw_name and isinstance(raw_name, str):
+        name = raw_name.strip()
+        project = known_project_by_name(agent_workspace, name)
+        if project is None:
+            for entry in list_machine_projects():
+                if entry.get("name") == name:
+                    candidate = Path(entry["path"]).expanduser().resolve()
+                    if candidate.is_dir():
+                        project = candidate
+                    break
+        if project is None:
+            known = [
+                e["name"]
+                for e in [*list_known_projects(agent_workspace), *list_machine_projects()]
+                if e.get("name")
+            ]
+            hint = f" Known projects: {', '.join(dict.fromkeys(known)[:10])}." if known else ""
+            return _error("not_found", f"No known project named '{name}'.{hint}")
+
+    state_path = agent_workspace / ".dev_state.json"
+    try:
+        import json as _json
+        payload = _json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+
+    if payload.get("active_project_path") != str(project):
+        payload["active_project_path"] = str(project)
+        payload.pop("active_project", None)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            __import__("json").dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        )
+
+    record_seen_project(agent_workspace, project)
+
+    return ToolResult(
+        ok=True,
+        summary=f"Active project set to: {project}. Takes effect from the next message.",
+        data={"project": str(project), "name": project.name},
+        trust="local_mutable",
+        artifacts=[],
+        events=[{"name": "host.active_project.set", "payload": {"project": str(project)}}],
+        error=None,
+    )
 
 
 def status(arguments: dict[str, Any], context: PermissionContext) -> ToolResult:

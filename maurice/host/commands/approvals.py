@@ -48,6 +48,7 @@ from maurice.host.paths import (
     agents_config_path, ensure_workspace_config_migrated, host_config_path,
     kernel_config_path, maurice_home, workspace_skills_config_path,
 )
+from maurice.host.errors import AgentError
 from maurice.host.runtime import (
     run_one_turn, _resolve_agent, _agent_system_prompt, _active_dev_project_path,
     _provider_for_config, _effective_model_config, _model_credential,
@@ -124,7 +125,10 @@ def _approvals_resolve(
 
 def _approval_store_for(workspace_root: Path, agent_id: str | None):
     bundle = load_workspace_config(workspace_root)
-    agent = _resolve_agent(bundle, agent_id)
+    try:
+        agent = _resolve_agent(bundle, agent_id)
+    except AgentError as exc:
+        raise SystemExit(str(exc)) from exc
     workspace = Path(bundle.host.workspace_root)
     event_stream = (
         Path(agent.event_stream)

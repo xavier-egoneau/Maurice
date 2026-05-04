@@ -49,7 +49,8 @@ class TurnResult:
     assistant_text: str
     tool_results: list[ToolResult]
     status: str
-    error: str | None = None
+    status_code: str | None = None   # machine-readable: "cancelled", "provider_failed", "provider_no_status"
+    error: str | None = None         # technical diagnostic (English, not shown to user directly)
     input_tokens: int = 0
     output_tokens: int = 0
     tool_activity: list[dict[str, Any]] = field(default_factory=list)
@@ -187,6 +188,7 @@ class AgentLoop:
         tool_results: list[ToolResult] = []
         tool_activity: list[dict[str, Any]] = []
         status = "completed"
+        status_code: str | None = None
         provider_error: str | None = None
         max_tool_iterations = _max_tool_iterations(limits)
         total_input_tokens = 0
@@ -195,7 +197,8 @@ class AgentLoop:
             for iteration in range(max_tool_iterations):
                 if _cancel_requested(cancel_event):
                     status = "cancelled"
-                    provider_error = "annulé par l'utilisateur"
+                    status_code = "cancelled"
+                    provider_error = "cancelled by user"
                     break
                 iteration_text = ""
                 iteration_tool_results: list[ToolResult] = []
@@ -210,7 +213,8 @@ class AgentLoop:
                     chunk = ProviderChunk.model_validate(chunk)
                     if _cancel_requested(cancel_event):
                         status = "cancelled"
-                        provider_error = "annulé par l'utilisateur"
+                        status_code = "cancelled"
+                        provider_error = "cancelled by user"
                         break
                     if chunk.type == ProviderChunkType.TEXT_DELTA:
                         iteration_text += chunk.delta
@@ -251,12 +255,14 @@ class AgentLoop:
                         terminal_status_seen = True
                         if chunk.status == ProviderStatus.FAILED:
                             status = "failed"
+                            status_code = "provider_failed"
                             if chunk.error is not None:
                                 provider_error = f"{chunk.error.code}: {chunk.error.message}"
                         continue
                 if status != "cancelled" and not terminal_status_seen:
                     status = "failed"
-                    provider_error = "provider_error: Provider stream ended without terminal status."
+                    status_code = "provider_no_status"
+                    provider_error = "provider stream ended without terminal status"
                 if status != "cancelled" and limits and limits.get("allow_text_tool_calls") and iteration_text:
                     text_tool_calls = self._text_tool_calls(iteration_text)
                     if text_tool_calls:
@@ -264,7 +270,8 @@ class AgentLoop:
                         for tool_call in text_tool_calls:
                             if _cancel_requested(cancel_event):
                                 status = "cancelled"
-                                provider_error = "annulé par l'utilisateur"
+                                status_code = "cancelled"
+                                provider_error = "cancelled by user"
                                 break
                             self.session_store.append_message(
                                 agent_id,
@@ -352,6 +359,11 @@ class AgentLoop:
             total_input_tokens = estimate_tokens(msgs, self._system_prompt())
         if not total_output_tokens:
             total_output_tokens = len(assistant_text) // 4
+        # Persist actual token count so next turn's compaction decision is accurate
+        if total_input_tokens > 0:
+            _session = self.session_store.load(agent_id, session.id)
+            _session.metadata["last_known_input_tokens"] = total_input_tokens
+            self.session_store.save(_session)
 
         return TurnResult(
             session=self.session_store.load(agent_id, session.id),
@@ -359,6 +371,7 @@ class AgentLoop:
             assistant_text=assistant_text,
             tool_results=tool_results,
             status=status,
+            status_code=status_code,
             error=provider_error,
             input_tokens=total_input_tokens,
             output_tokens=total_output_tokens,
@@ -469,7 +482,7 @@ class AgentLoop:
                         if not approved:
                             action_label = tool_action_label(declaration.name, tool_call.arguments)
                             result = self._failed_tool_result(
-                                f"{action_label} refusé.",
+                                f"{action_label} denied.",
                                 code="approval_denied",
                                 retryable=False,
                             )
@@ -486,12 +499,12 @@ class AgentLoop:
                                 permission_class=declaration.permission.permission_class,
                                 scope=self._requested_permission_scope(declaration, tool_call),
                                 arguments=tool_call.arguments,
-                                summary=f"Autoriser : {action_label}",
+                                summary=f"Authorize: {action_label}",
                                 reason=evaluation.reason,
                                 rememberable=evaluation.rememberable,
                             )
                         result = self._failed_tool_result(
-                            f"Autorisation requise pour {action_label}. Reponds `ok` pour approuver, `session` pour approuver cette action dans cette session, ou `non` pour refuser.",
+                            f"Approval required for {action_label}. Reply `ok` to approve, `session` to approve for this session, or `no` to deny.",
                             code="approval_required",
                             retryable=True,
                         )
@@ -587,8 +600,8 @@ class AgentLoop:
         )
         if parsed.risk_level == "critical":
             msg = (
-                f"Commande bloquée (risque critique) : {parsed.reason} "
-                "Cette commande ne peut pas être approuvée automatiquement."
+                f"Command blocked (critical risk): {parsed.reason} "
+                "This command cannot be auto-approved."
             )
             result = self._failed_tool_result(msg, code="shell_blocked")
         else:
@@ -604,10 +617,10 @@ class AgentLoop:
                 )
                 if approved is not None:
                     return None
-            label = "trop complexe à analyser" if parsed.too_complex else "risquée"
+            label = "too complex to analyze" if parsed.too_complex else "risky"
             msg = (
-                f"Commande {label} : {parsed.reason} "
-                "Réponds `ok` pour confirmer explicitement ou `non` pour refuser."
+                f"Command {label}: {parsed.reason} "
+                "Reply `ok` to confirm explicitly or `no` to deny."
             )
             if self.approval_store is not None:
                 self.approval_store.request(
@@ -754,18 +767,20 @@ class AgentLoop:
     def _compact_if_needed(self, agent_id: str, session_id: str, correlation_id: str) -> None:
         if not self.compaction_config:
             return
+        session = self.session_store.load(agent_id, session_id)
+        known_tokens = int(session.metadata.get("last_known_input_tokens") or 0)
         messages = self._provider_messages(agent_id, session_id)
         system = self._system_prompt()
         compacted, level = compact_messages(
             messages,
             config=self.compaction_config,
+            known_tokens=known_tokens,
             system=system,
             provider=self.provider,
             model=self.model,
         )
         if level == CompactionLevel.NONE:
             return
-        session = self.session_store.load(agent_id, session_id)
         session.messages = [
             SessionMessage(
                 role=m["role"],
@@ -779,9 +794,9 @@ class AgentLoop:
                 SessionMessage(
                     role="assistant",
                     content=(
-                        "J'ai compacté automatiquement la session parce que le contexte "
-                        f"a atteint {int(self.compaction_config.reset_threshold * 100)}% "
-                        "de la jauge. Je garde un résumé interne pour continuer proprement."
+                        "Session automatically compacted: context reached "
+                        f"{int(self.compaction_config.reset_threshold * 100)}% of the limit. "
+                        "Continuing from an internal summary."
                     ),
                     metadata={"compaction_notice": True},
                     correlation_id=correlation_id,

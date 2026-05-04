@@ -27,6 +27,29 @@ permissions:
         - dev_workers.configure
         - telegram.configure
 tools:
+  - name: host.set_active_project
+    description: >
+      Set the active project for this session. The project must exist as a directory.
+      Provide an absolute path or a project name from the known projects list.
+      The change takes effect from the next message — confirm to the user after calling this.
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Absolute path to the project directory.
+        name:
+          type: string
+          description: Project name as it appears in the known projects list.
+      required: []
+    permission_class: fs.write
+    permission_scope:
+      paths:
+        - $agent_workspace/**
+    trust:
+      input: local_mutable
+      output: local_mutable
+    executor: maurice.system_skills.host.tools.set_active_project
   - name: host.status
     description: Inspect local Maurice service status for the current workspace.
     input_schema:

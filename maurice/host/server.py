@@ -580,6 +580,7 @@ class MauriceServer:
                 approval_callback=approval_handler,
                 text_delta_callback=text_delta_callback,
                 tool_started_callback=tool_started_callback,
+                _prebuilt_registry=getattr(self, "registry", None),
             )
             result = loop.run_turn(
                 agent_id=agent.id,

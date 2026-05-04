@@ -105,6 +105,7 @@ from maurice.host.delivery import (
     _build_daily_digest, _latest_dream_report, _human_datetime,
     _deliver_daily_digest, _emit_daily_event, _cancel_job_callback,
 )
+from maurice.host.errors import AgentError, ProviderError
 from maurice.host.runtime import (
     run_one_turn, _resolve_agent, _agent_system_prompt,
     _active_dev_project_path, _provider_for_config,
@@ -740,17 +741,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         active_project = resolve_project_root(Path.cwd(), confirm=False)
-        result = run_one_turn(
-            workspace_root=Path(args.workspace),
-            message=args.message,
-            session_id=args.session,
-            agent_id=args.agent,
-            source_metadata=(
-                {"active_project_root": str(active_project)}
-                if active_project is not None
-                else None
-            ),
-        )
+        try:
+            result = run_one_turn(
+                workspace_root=Path(args.workspace),
+                message=args.message,
+                session_id=args.session,
+                agent_id=args.agent,
+                source_metadata=(
+                    {"active_project_root": str(active_project)}
+                    if active_project is not None
+                    else None
+                ),
+            )
+        except (AgentError, ProviderError) as exc:
+            raise SystemExit(str(exc)) from exc
         if result.assistant_text:
             print(result.assistant_text)
         for tool_result in result.tool_results:

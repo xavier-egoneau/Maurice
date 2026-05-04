@@ -144,6 +144,8 @@ def _path_rules(*, agent_content: str, active_project: str | None, known_project
             "If the user asks which projects are in context or known, answer from the active project "
             "and Known projects list. Do not claim there are no projects just because no workspace-owned "
             "project is selected.",
+            "To switch to a different project, call host.set_active_project with the project name or "
+            "its absolute path. The change takes effect from the next message — confirm this to the user.",
         ]
     lines += [
         f"Agent content directory: {agent_content}",

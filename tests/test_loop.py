@@ -129,7 +129,7 @@ def test_loop_preserves_provider_failure_error(tmp_path) -> None:
     result = loop.run_turn(agent_id="main", session_id="sess_1", message="Bonjour")
 
     assert result.status == "failed"
-    assert result.error == "provider_error: Bad model."
+    assert result.error == "provider_error: Bad model."  # provider-reported error, kept as-is
     failed_event = loop.event_store.read_all()[-1]
     assert failed_event.name == "turn.failed"
     assert failed_event.payload["error"] == "provider_error: Bad model."
@@ -154,7 +154,7 @@ def test_loop_can_cancel_before_provider_turn(tmp_path) -> None:
     )
 
     assert result.status == "cancelled"
-    assert result.error == "annulé par l'utilisateur"
+    assert result.error == "cancelled by user"
     assert result.assistant_text == ""
     assert provider.calls == []
     assert loop.event_store.read_all()[-1].name == "turn.cancelled"
@@ -172,7 +172,7 @@ def test_loop_marks_missing_terminal_provider_status_as_failed(tmp_path) -> None
 
     assert result.status == "failed"
     assert result.assistant_text == "Phrase incomplete"
-    assert result.error == "provider_error: Provider stream ended without terminal status."
+    assert result.error == "provider stream ended without terminal status"
     failed_event = loop.event_store.read_all()[-1]
     assert failed_event.name == "turn.failed"
 
@@ -545,10 +545,10 @@ def test_tool_execution_goes_through_permission_and_requests_approval(tmp_path) 
 
     assert not executed
     assert result.tool_results[0].error.code == "approval_required"
-    assert "Autorisation requise pour modifier un fichier `notes.md`" in result.tool_results[0].summary
+    assert "Approval required for modifier un fichier `notes.md`" in result.tool_results[0].summary
     assert "filesystem.write" not in result.tool_results[0].summary
     assert approvals.list(status="pending")[0].tool_name == "filesystem.write"
-    assert approvals.list(status="pending")[0].summary == "Autoriser : modifier un fichier `notes.md`"
+    assert approvals.list(status="pending")[0].summary == "Authorize: modifier un fichier `notes.md`"
 
 
 def test_network_tool_approval_scope_uses_url_host(tmp_path) -> None:

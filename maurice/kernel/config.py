@@ -115,9 +115,16 @@ def _normalize_time(value: str) -> str | None:
     return f"{hour_int:02d}:{minute_int:02d}"
 
 
+class GatewayRateLimitConfig(ConfigModel):
+    max_requests_per_minute: int = Field(default=20, ge=0)   # per (channel, peer_id); 0 = disabled
+    max_concurrent_per_peer: int = Field(default=3, ge=0)    # simultaneous turns; 0 = disabled
+    turn_timeout_seconds: int = Field(default=600, ge=0)     # zombie cleanup; 0 = disabled
+
+
 class GatewayConfig(ConfigModel):
     host: str = "127.0.0.1"
     port: int = Field(default=18791, ge=1, le=65535)
+    rate_limit: GatewayRateLimitConfig = Field(default_factory=GatewayRateLimitConfig)
 
 
 class HostDevelopmentConfig(ConfigModel):

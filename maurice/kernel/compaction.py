@@ -61,9 +61,14 @@ def compact_messages(
     system: str = "",
     provider: Any = None,
     model: str = "",
+    known_tokens: int = 0,
 ) -> tuple[list[dict[str, Any]], CompactionLevel]:
-    """Return (compacted messages, level applied). NONE means no change."""
-    tokens = estimate_tokens(messages, system)
+    """Return (compacted messages, level applied). NONE means no change.
+
+    known_tokens: provider-reported input token count from the previous turn.
+    When > 0, used directly instead of the character-based estimate.
+    """
+    tokens = known_tokens if known_tokens > 0 else estimate_tokens(messages, system)
     level = needed_level(tokens, config)
     if level == CompactionLevel.NONE:
         return messages, CompactionLevel.NONE

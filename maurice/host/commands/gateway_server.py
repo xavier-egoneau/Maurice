@@ -87,6 +87,7 @@ from maurice.kernel.approvals import ApprovalStore
 from maurice.kernel.compaction import CompactionConfig
 from maurice.kernel.config import (
     ConfigBundle,
+    GatewayRateLimitConfig,
     load_workspace_config,
     model_profile_id,
     model_profile_payload,
@@ -888,6 +889,13 @@ def _cancel_turn_for_context(ctx: MauriceContext, agent_id: str, session_id: str
     return MauriceClient(ctx).cancel_turn(agent_id=agent_id, session_id=session_id)
 
 
+def _gateway_rate_limit_config(ctx: MauriceContext) -> GatewayRateLimitConfig:
+    bundle = ctx.config
+    if isinstance(bundle, ConfigBundle):
+        return bundle.host.gateway.rate_limit
+    return GatewayRateLimitConfig()
+
+
 
 def _gateway_router_for_local_context(ctx: MauriceContext) -> MessageRouter:
     event_store = EventStore(ctx.events_path)
@@ -951,6 +959,7 @@ def _gateway_router_for_local_context(ctx: MauriceContext) -> MessageRouter:
                 ),
             },
         ),
+        rate_limit=_gateway_rate_limit_config(ctx),
     )
 
 
@@ -1059,6 +1068,7 @@ def _gateway_router_for(
                     ),
                 },
             ),
+            rate_limit=_gateway_rate_limit_config(ctx),
         ),
         agent,
         bundle,
