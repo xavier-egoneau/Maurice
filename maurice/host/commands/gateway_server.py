@@ -464,13 +464,27 @@ def _session_history(store: SessionStore, agent_id: str, session_id: str) -> lis
     except FileNotFoundError:
         return []
     tool_activity = _session_tool_activity(session.messages)
+    # ui_messages preserves full history across compactions; fall back to session.messages
+    # for sessions that predate this feature (ui_messages will be empty).
+    source = session.ui_messages if session.ui_messages else session.messages
     messages = []
-    for message in session.messages:
+    for message in source:
         if (
             message.metadata.get("internal") is True
             or message.metadata.get("autonomy_internal") is True
             or _looks_like_internal_gateway_message(message.content)
         ):
+            continue
+        # compaction_notice: show as a system notice, not filtered out
+        if message.metadata.get("compaction_notice"):
+            messages.append(
+                {
+                    "role": "system",
+                    "content": message.content,
+                    "created_at": message.created_at.isoformat(),
+                    "metadata": message.metadata,
+                }
+            )
             continue
         if message.role not in {"user", "assistant"}:
             continue
@@ -1121,6 +1135,8 @@ def _run_turn_via_global_server(
     limits: dict[str, Any] | None = None,
     message_metadata: dict[str, Any] | None = None,
     cancel_event: Any | None = None,
+    text_delta_callback: Any | None = None,
+    **_extra: Any,
 ) -> TurnResult:
     source_metadata = _source_metadata_with_active_project(ctx, source_metadata)
     client = MauriceClient(ctx)
@@ -1136,6 +1152,7 @@ def _run_turn_via_global_server(
             limits=limits,
             message_metadata=message_metadata,
             cancel_event=cancel_event,
+            text_delta_callback=text_delta_callback,
         )
     client.connect()
     assistant_text = ""
@@ -1162,7 +1179,13 @@ def _run_turn_via_global_server(
                 MauriceClient(ctx).cancel_turn(agent_id=agent_id, session_id=session_id)
             kind = event.get("type")
             if kind == "text_delta":
-                assistant_text += str(event.get("delta") or "")
+                delta = str(event.get("delta") or "")
+                assistant_text += delta
+                if text_delta_callback is not None:
+                    try:
+                        text_delta_callback(delta)
+                    except Exception:
+                        pass
             elif kind == "tool_result":
                 error_code = event.get("error")
                 tool_results.append(
@@ -1237,6 +1260,8 @@ def _run_turn_via_local_server(
     limits: dict[str, Any] | None = None,
     message_metadata: dict[str, Any] | None = None,
     cancel_event: Any | None = None,
+    text_delta_callback: Any | None = None,
+    **_extra: Any,
 ) -> TurnResult:
     client = MauriceClient(ctx)
     client.ensure_running()
@@ -1265,7 +1290,13 @@ def _run_turn_via_local_server(
                 MauriceClient(ctx).cancel_turn(agent_id=agent_id, session_id=session_id)
             kind = event.get("type")
             if kind == "text_delta":
-                assistant_text += str(event.get("delta") or "")
+                delta = str(event.get("delta") or "")
+                assistant_text += delta
+                if text_delta_callback is not None:
+                    try:
+                        text_delta_callback(delta)
+                    except Exception:
+                        pass
             elif kind == "tool_result":
                 error_code = event.get("error")
                 tool_results.append(

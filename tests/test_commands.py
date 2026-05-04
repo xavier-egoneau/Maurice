@@ -497,7 +497,7 @@ def test_dev_plan_with_pitch_delegates_framing_to_model(tmp_path) -> None:
     assert "cadrage du plan" in result.text
     prompt = result.metadata["agent_prompt"]
     assert 'Demande utilisateur : "ajouter un dashboard"' in prompt
-    assert "pose 1 a 3 questions de cadrage utiles" in prompt
+    assert "pose 1 a 2 questions de cadrage" in prompt
     assert "## Critique" in prompt
     assert "## Taches" in prompt
 
@@ -515,8 +515,8 @@ def test_dev_plan_prompt_keeps_user_feature_in_expected_tasks(tmp_path) -> None:
     assert result is not None
     prompt = result.metadata["agent_prompt"]
     assert "ajouter une lib d'icones" in prompt
-    assert "taches ordonnees, concretes, verifiables, centrees sur la demande utilisateur" in prompt
-    assert "- [ ] Description. [ non parallellisable ]" in prompt
+    assert "precise et verifiable" in prompt
+    assert "- [ ] Description precise et verifiable. [ non parallellisable ]" in prompt
 
 
 def test_dev_plan_prompt_warns_before_overwriting_existing_tasks(tmp_path) -> None:
@@ -538,7 +538,7 @@ def test_dev_plan_prompt_warns_before_overwriting_existing_tasks(tmp_path) -> No
     assert result is not None
     prompt = result.metadata["agent_prompt"]
     assert "Plan existant" in prompt
-    assert "validation remplacera les taches existantes" in prompt
+    assert "validation remplacera ces taches" in prompt
     assert "- [ ] Ancienne tache. [ non parallellisable ]" in prompt
 
 

@@ -66,6 +66,8 @@ class AgentRuntime:
         limits: dict[str, Any] | None = None,
         message_metadata: dict[str, Any] | None = None,
         cancel_event: Any | None = None,
+        text_delta_callback: Any | None = None,
+        **_extra: Any,
     ) -> TurnResult:
         with self._lock:
             if self._bundle is None:
@@ -80,6 +82,7 @@ class AgentRuntime:
                 source_peer_id=source_peer_id,
                 source_metadata=source_metadata,
                 _prebuilt_registry=self._registry,
+                text_delta_callback=text_delta_callback,
             )
             return loop.run_turn(
                 agent_id=agent.id,

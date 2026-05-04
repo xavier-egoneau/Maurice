@@ -42,8 +42,14 @@ Tasks in `.maurice/PLAN.md` must use checkbox syntax and a parallelization tag:
 - `- [ ] Example blocking task. [ non parallellisable ]`
 
 When `/plan` is triggered, treat it as a planning skill instruction, not as implementation work.
-If the user did not provide a demand, ask one short question to get it. If the demand is provided but underspecified, ask only the useful framing questions. Then present the plan structure before writing files.
+Start by exploring the project — read the structure, relevant config files, and files directly touched by
+the demand before proposing anything. A plan built without reading the project is a generic plan.
+If the user did not provide a demand, ask one short question to get it. If the demand is provided but
+underspecified after exploration, ask 1-2 focused framing questions.
 If `.maurice/PLAN.md` already contains tasks, warn that validation will replace the existing task list.
+Task granularity: one task = what an agent can execute in one autonomous pass without mid-task decisions.
+For complex chantiers (migrations, refactors, architecture changes), 20-40 tasks is normal and expected.
+Do not artificially group tasks to appear concise — that is a planning defect, not a virtue.
 After explicit validation, write `.maurice/PLAN.md` with:
 
 - `# Plan`
@@ -51,6 +57,7 @@ After explicit validation, write `.maurice/PLAN.md` with:
 - `## Usage vise`
 - `## Contraintes`
 - `## Definition de fini`
+- `## Decouverte`
 - `## Critique`
 - `## Approche`
 - `## Taches`

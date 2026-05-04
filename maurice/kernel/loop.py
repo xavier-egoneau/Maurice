@@ -781,6 +781,15 @@ class AgentLoop:
         )
         if level == CompactionLevel.NONE:
             return
+
+        # Preserve UI history before discarding messages.
+        # ui_messages is append-only: dedup by created_at so re-compactions don't duplicate.
+        existing_ts = {m.created_at for m in session.ui_messages}
+        for msg in session.messages:
+            if msg.role in {"user", "assistant"} and msg.created_at not in existing_ts:
+                session.ui_messages.append(msg)
+                existing_ts.add(msg.created_at)
+
         session.messages = [
             SessionMessage(
                 role=m["role"],
@@ -789,19 +798,17 @@ class AgentLoop:
             )
             for m in compacted
         ]
-        if level == CompactionLevel.RESET:
-            session.messages.append(
-                SessionMessage(
-                    role="assistant",
-                    content=(
-                        "Session automatically compacted: context reached "
-                        f"{int(self.compaction_config.reset_threshold * 100)}% of the limit. "
-                        "Continuing from an internal summary."
-                    ),
-                    metadata={"compaction_notice": True},
-                    correlation_id=correlation_id,
-                )
-            )
+        notice = SessionMessage(
+            role="assistant",
+            content=(
+                "Session automatically compacted: context reached "
+                f"{int(self.compaction_config.reset_threshold * 100 if level == CompactionLevel.RESET else self.compaction_config.trim_threshold * 100)}% "
+                "of the limit. Older messages are still visible in the chat history."
+            ),
+            metadata={"compaction_notice": True, "compaction_level": level.name},
+            correlation_id=correlation_id,
+        )
+        session.ui_messages.append(notice)
         self.session_store.save(session)
         self.event_store.emit(
             name="session.compacted",

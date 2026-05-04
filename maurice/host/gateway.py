@@ -419,6 +419,15 @@ class MessageRouter:
         if message.metadata.get("visible_user_message") is not None:
             message_metadata["visible_user_message"] = message.metadata.get("visible_user_message")
         cancel_event = self._begin_turn(agent_id, session_id, peer_key=peer_key)
+        if self.progress_store is not None:
+            self.progress_store.open(session_id)
+        _store_ref = self.progress_store
+        _sid_ref = session_id
+
+        def _text_delta_cb(delta: str) -> None:
+            if _store_ref is not None:
+                _store_ref.push(_sid_ref, {"type": "text_delta", "delta": delta})
+
         try:
             turn = self.run_turn(
                 message=message.text,
@@ -430,10 +439,13 @@ class MessageRouter:
                 source_metadata=message.metadata,
                 limits={"max_tool_iterations": 8},
                 cancel_event=cancel_event,
+                text_delta_callback=_text_delta_cb,
                 **({"message_metadata": message_metadata} if message_metadata else {}),
             )
         finally:
             self._finish_turn(agent_id, session_id, cancel_event, peer_key=peer_key)
+            if self.progress_store is not None:
+                self.progress_store.close(session_id)
         text = _turn_response_text(turn)
         outbound = OutboundMessage(
             channel=message.channel,
@@ -783,7 +795,10 @@ class GatewayHttpServer:
                                 self.wfile.write(b'data: {"done":true}\n\n')
                                 self.wfile.flush()
                                 break
-                            payload = json.dumps(progress.to_dict())
+                            if isinstance(progress, dict):
+                                payload = json.dumps(progress)
+                            else:
+                                payload = json.dumps({"type": "progress", **progress.to_dict()})
                             self.wfile.write(f"data: {payload}\n\n".encode())
                             self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError):

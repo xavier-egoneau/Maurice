@@ -56,13 +56,14 @@ class SessionProgressStore:
         with self._lock:
             return self._queues.get(session_id)
 
-    def push(self, session_id: str, progress: AutonomyProgress) -> None:
-        """Push a progress update. No-op if the session queue is full or closed."""
+    def push(self, session_id: str, event: "AutonomyProgress | dict[str, Any]") -> None:
+        """Push a progress update or a raw dict event (e.g. text_delta).
+        No-op if the session queue is full or closed."""
         with self._lock:
             q = self._queues.get(session_id)
         if q is not None:
             try:
-                q.put_nowait(progress)
+                q.put_nowait(event)
             except queue.Full:
                 pass
 

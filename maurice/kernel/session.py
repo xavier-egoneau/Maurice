@@ -52,6 +52,7 @@ class SessionRecord(MauriceModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     messages: list[SessionMessage] = Field(default_factory=list)
+    ui_messages: list[SessionMessage] = Field(default_factory=list)
     turns: list[TurnRecord] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

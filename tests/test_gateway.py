@@ -180,6 +180,7 @@ def test_gateway_routes_inbound_message_to_turn_runner(tmp_path) -> None:
     )
 
     cancel_event = calls[0].pop("cancel_event")
+    calls[0].pop("text_delta_callback", None)
     assert callable(cancel_event.is_set)
     assert calls == [
             {
