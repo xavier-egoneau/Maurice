@@ -73,6 +73,42 @@ def test_filesystem_relative_paths_use_active_project_when_available(tmp_path) -
     assert "notes.md" in list_result.summary
 
 
+def test_filesystem_workspace_like_relative_dirs_stay_inside_active_project(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    project = workspace / "agents" / "main" / "content" / "sentinelle_refonte"
+    project.mkdir(parents=True)
+    runtime.mkdir()
+    permission_context = PermissionContext(
+        workspace_root=str(workspace),
+        runtime_root=str(runtime),
+        agent_workspace_root=str(workspace / "agents" / "main"),
+        active_project_root=str(project),
+    )
+
+    write_result = write_text(
+        {"path": "skills/sentinelle_v2/skill.md", "content": "# Skill\n"},
+        permission_context,
+    )
+
+    assert write_result.ok
+    assert (project / "skills" / "sentinelle_v2" / "skill.md").read_text(encoding="utf-8") == "# Skill\n"
+    assert not (workspace / "skills" / "sentinelle_v2" / "skill.md").exists()
+
+
+def test_filesystem_explicit_workspace_variable_resolves_from_workspace(tmp_path) -> None:
+    permission_context = context(tmp_path)
+    workspace = tmp_path / "workspace"
+
+    write_result = write_text(
+        {"path": "$workspace/skills/sentinelle_v2/skill.md", "content": "# Skill\n"},
+        permission_context,
+    )
+
+    assert write_result.ok
+    assert (workspace / "skills" / "sentinelle_v2" / "skill.md").read_text(encoding="utf-8") == "# Skill\n"
+
+
 def test_filesystem_move_directory_inside_active_project(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     runtime = tmp_path / "runtime"
@@ -167,7 +203,7 @@ def test_filesystem_explicit_workspace_dirs_still_resolve_from_workspace(tmp_pat
     (workspace / "config").mkdir()
     (workspace / "config" / "note.md").write_text("config note", encoding="utf-8")
 
-    result = read_text({"path": "config/note.md"}, permission_context)
+    result = read_text({"path": "$workspace/config/note.md"}, permission_context)
 
     assert result.ok
     assert result.data["path"] == str((workspace / "config" / "note.md").resolve())

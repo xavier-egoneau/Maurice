@@ -188,14 +188,8 @@ def _resolve_path(arguments: dict[str, Any], context: PermissionContext) -> Path
     candidate = Path(raw_path).expanduser()
     if not candidate.is_absolute():
         first_part = candidate.parts[0] if candidate.parts else ""
-        if first_part == "$project":
-            candidate = Path(variables["$project"]).joinpath(*candidate.parts[1:])
-        elif first_part == "$agent_content":
-            candidate = Path(variables["$agent_content"]).joinpath(*candidate.parts[1:])
-        elif first_part == "$agent_workspace":
-            candidate = Path(variables["$agent_workspace"]).joinpath(*candidate.parts[1:])
-        elif first_part in {"agents", "config", "sessions", "skills"}:
-            candidate = workspace / candidate
+        if first_part in variables:
+            candidate = Path(variables[first_part]).joinpath(*candidate.parts[1:])
         elif _looks_like_current_project_name(candidate, variables):
             candidate = Path(variables["$project"])
         else:

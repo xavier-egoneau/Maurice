@@ -540,14 +540,16 @@ def _session_history(store: SessionStore, agent_id: str, session_id: str) -> lis
             continue
         # compaction_notice: show as a system notice, not filtered out
         if message.metadata.get("compaction_notice"):
-            messages.append(
-                {
-                    "role": "system",
-                    "content": message.content,
-                    "created_at": message.created_at.isoformat(),
-                    "metadata": message.metadata,
-                }
-            )
+            notice = {
+                "role": "system",
+                "content": message.content,
+                "created_at": message.created_at.isoformat(),
+                "metadata": message.metadata,
+            }
+            if messages and (messages[-1].get("metadata") or {}).get("compaction_notice"):
+                messages[-1] = notice
+            else:
+                messages.append(notice)
             continue
         if message.role not in {"user", "assistant"}:
             continue

@@ -725,14 +725,8 @@ def _resolve_requested_path(path: str, context: PermissionContext) -> str:
     if not candidate.is_absolute():
         variables = context.variables()
         first_part = candidate.parts[0] if candidate.parts else ""
-        if first_part == "$project":
-            candidate = Path(variables["$project"]).joinpath(*candidate.parts[1:])
-        elif first_part == "$agent_content":
-            candidate = Path(variables["$agent_content"]).joinpath(*candidate.parts[1:])
-        elif first_part == "$agent_workspace":
-            candidate = Path(variables["$agent_workspace"]).joinpath(*candidate.parts[1:])
-        elif first_part in {"agents", "config", "content", "sessions", "skills"}:
-            candidate = Path(variables["$workspace"]) / candidate
+        if first_part in variables:
+            candidate = Path(variables[first_part]).joinpath(*candidate.parts[1:])
         else:
             candidate = Path(variables["$project"]) / candidate
     return str(candidate.resolve())

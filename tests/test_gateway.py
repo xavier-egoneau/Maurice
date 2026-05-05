@@ -27,7 +27,9 @@ from maurice.host.commands.gateway_server import (
     _WebTelegramPollers,
 )
 from maurice.host.context import resolve_global_context, resolve_local_context
-from maurice.host.gateway import InboundMessage, MessageRouter, OutboundMessage
+from maurice.host.gateway import (
+    InboundMessage, MessageRouter, OutboundMessage, _autonomy_turn_timeout_seconds,
+)
 from maurice.host.gateway import GatewayHttpServer
 from maurice.host.telegram import _telegram_update_to_inbound
 from maurice.host.agents import create_agent
@@ -587,6 +589,51 @@ def test_gateway_agent_prompt_command_can_continue_until_activity() -> None:
     assert "Continue en mode autonome" in calls[1]["message"]
     assert calls[1]["source_metadata"]["autonomy_continuation"] == 1
     assert result.outbound.text == "Listed 3 entries: AGENTS.md, DECISIONS.md, PLAN.md"
+
+
+def test_gateway_agent_prompt_command_stops_autonomy_after_cancelled_turn() -> None:
+    calls = []
+
+    class IntentTurn:
+        assistant_text = "Je vais verifier le projet."
+        tool_results = []
+        status = "completed"
+
+    def run_turn(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return IntentTurn()
+        return CancelledTurn()
+
+    registry = CommandRegistry()
+    registry.register(
+        RuntimeCommand(
+            name="/dev",
+            description="executer le plan",
+            owner="dev",
+            handler=lambda _context: CommandResult(
+                text="Je lance le dev.",
+                metadata={
+                    "command": "/dev",
+                    "agent_prompt": "Execute le plan maintenant.",
+                    "autonomy": {"requires_activity": True, "max_continuations": 4},
+                },
+            ),
+        )
+    )
+
+    result = MessageRouter(run_turn=run_turn, command_registry=registry).handle(
+        {"channel": "web", "peer_id": "peer_1", "text": "/dev", "agent_id": "main"}
+    )
+
+    assert len(calls) == 2
+    assert result.status == "cancelled"
+    assert "Réponse interrompue" in result.outbound.text
+
+
+def test_autonomy_timeout_extends_gateway_timeout_budget() -> None:
+    assert _autonomy_turn_timeout_seconds({"max_seconds": 3600}, 600) == 3660
+    assert _autonomy_turn_timeout_seconds({"max_seconds": 60}, 600) == 600
 
 
 def test_gateway_agent_prompt_command_can_continue_on_non_action_text() -> None:

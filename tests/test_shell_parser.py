@@ -44,6 +44,11 @@ class TestSafeCommands:
     def test_find(self):
         assert parse("find . -name '*.py' -type f").safe
 
+    def test_safe_and_conditional_chain(self):
+        r = parse("git init && git status --short && git branch --show-current")
+        assert r.safe
+        assert not r.too_complex
+
 
 class TestCriticalCommands:
     def test_curl_pipe_bash(self):
@@ -185,8 +190,15 @@ class TestTooComplex:
         assert not r.safe
         assert r.too_complex
 
-    def test_and_conditional(self):
-        r = parse("mkdir test && cd test")
+    def test_and_conditional_with_risky_command(self):
+        r = parse("mkdir test && rm test")
+        assert not r.safe
+        assert r.risk_level == "elevated"
+        assert not r.too_complex
+        assert "AND-conditional contains risky command" in r.reason
+
+    def test_and_conditional_with_complex_segment(self):
+        r = parse("echo start && ls $(pwd)")
         assert not r.safe
         assert r.too_complex
 
@@ -249,6 +261,12 @@ class TestLoopIntegration:
         tool_call = self._make_tool_call("ls -la")
         result = loop._check_shell_command(tool_call, "main", "s1", "corr1")
         assert result is None  # no block
+
+    def test_safe_and_chain_not_blocked(self, tmp_path):
+        loop = self._make_loop_with_session(tmp_path, "s1b")
+        tool_call = self._make_tool_call("git init && git status --short && git branch --show-current")
+        result = loop._check_shell_command(tool_call, "main", "s1b", "corr1b")
+        assert result is None
 
     def test_critical_command_blocked(self, tmp_path):
         loop = self._make_loop_with_session(tmp_path, "s2")

@@ -801,9 +801,9 @@ class AgentLoop:
         notice = SessionMessage(
             role="assistant",
             content=(
-                "Session automatically compacted: context reached "
+                "Contexte compacté automatiquement : la session a atteint "
                 f"{int(self.compaction_config.reset_threshold * 100 if level == CompactionLevel.RESET else self.compaction_config.trim_threshold * 100)}% "
-                "of the limit. Older messages are still visible in the chat history."
+                "de la limite. Les anciens messages restent visibles dans l'historique."
             ),
             metadata={"compaction_notice": True, "compaction_level": level.name},
             correlation_id=correlation_id,

@@ -143,6 +143,10 @@ def parse(command: str) -> ParseResult:
         if re.search(pattern, cmd, re.IGNORECASE):
             return ParseResult(safe=False, risk_level="critical", reason=reason, too_complex=False)
 
+    and_parts = _split_simple_and_chain(cmd)
+    if and_parts is not None:
+        return _parse_and_chain(and_parts)
+
     for pattern, reason in _COMPLEXITY:
         if re.search(pattern, cmd):
             return ParseResult(safe=False, risk_level="elevated", reason=reason, too_complex=True)
@@ -152,3 +156,71 @@ def parse(command: str) -> ParseResult:
             return ParseResult(safe=False, risk_level="elevated", reason=reason, too_complex=False)
 
     return ParseResult(safe=True, risk_level="safe", reason="No hazard detected.", too_complex=False)
+
+
+def _parse_and_chain(parts: list[str]) -> ParseResult:
+    worst: ParseResult | None = None
+    for part in parts:
+        result = parse(part)
+        if result.safe:
+            continue
+        if result.risk_level == "critical":
+            return result
+        if worst is None:
+            worst = result
+    if worst is not None:
+        return ParseResult(
+            safe=False,
+            risk_level=worst.risk_level,
+            reason=f"AND-conditional contains risky command: {worst.reason}",
+            too_complex=worst.too_complex,
+        )
+    return ParseResult(
+        safe=True,
+        risk_level="safe",
+        reason="Safe AND-conditional command chain.",
+        too_complex=False,
+    )
+
+
+def _split_simple_and_chain(command: str) -> list[str] | None:
+    parts: list[str] = []
+    start = 0
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if char == "\\":
+            escaped = True
+            index += 1
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if command.startswith("&&", index):
+            part = command[start:index].strip()
+            if not part:
+                return None
+            parts.append(part)
+            index += 2
+            start = index
+            continue
+        index += 1
+    if not parts:
+        return None
+    tail = command[start:].strip()
+    if not tail:
+        return None
+    parts.append(tail)
+    return parts

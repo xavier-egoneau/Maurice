@@ -25,6 +25,7 @@ class AutonomyProgress:
     is_done: bool           # True only on the final call after the loop
     session_id: str
     agent_id: str
+    status: str = "completed"
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

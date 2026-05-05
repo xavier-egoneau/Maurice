@@ -61,7 +61,9 @@ def run_autonomous_command(
     started_at = monotonic()
 
     while (
-        continuation_count < max_continuations
+        _turn_completed(turn)
+        and not _cancel_requested(cancel_event)
+        and continuation_count < max_continuations
         and (not tool_activity or continue_without_activity)
         and consecutive_no_action < max_consecutive_announce
         and (max_seconds <= 0 or monotonic() - started_at < max_seconds)
@@ -107,6 +109,8 @@ def run_autonomous_command(
                 agent_id=agent_id,
                 is_done=False,
             )
+        if not _turn_completed(turn) or _cancel_requested(cancel_event):
+            break
 
     if progress_callback is not None:
         _emit_progress(
@@ -120,6 +124,17 @@ def run_autonomous_command(
         )
 
     return turn, any_tool_activity
+
+
+def _turn_completed(turn: Any) -> bool:
+    return str(getattr(turn, "status", "completed") or "completed") == "completed"
+
+
+def _cancel_requested(cancel_event: Any | None) -> bool:
+    if cancel_event is None:
+        return False
+    is_set = getattr(cancel_event, "is_set", None)
+    return bool(is_set()) if callable(is_set) else False
 
 
 def should_continue_autonomous_command(
@@ -226,7 +241,8 @@ def _emit_progress(
     tool_count = len(turn.tool_results)
     ok_count = sum(1 for r in turn.tool_results if r.ok)
     text = (turn.assistant_text or "").strip().replace("\n", " ")
-    is_blocked = not should_continue_autonomous_command(turn.assistant_text)
+    status = str(getattr(turn, "status", "completed") or "completed")
+    is_blocked = status == "completed" and not should_continue_autonomous_command(turn.assistant_text)
     try:
         progress_callback(AutonomyProgress(
             command=command_name,
@@ -242,6 +258,7 @@ def _emit_progress(
             is_done=is_done,
             session_id=session_id,
             agent_id=agent_id,
+            status=status,
         ))
     except Exception:
         pass

@@ -317,7 +317,11 @@ def make_telegram_progress_callback(
         if not (force or significant or heartbeat):
             return
         elapsed = _fmt_elapsed(progress.elapsed_seconds)
-        if progress.is_done:
+        if progress.status == "cancelled":
+            text = f"⏹ {progress.command} interrompu · tour {progress.turn}/{progress.max_turns} · {elapsed}"
+        elif progress.status != "completed":
+            text = f"⚠ {progress.command} interrompu · tour {progress.turn}/{progress.max_turns} · {elapsed}"
+        elif progress.is_done:
             files = f" · {progress.write_count} fichier(s)" if progress.write_count else ""
             text = f"✓ {progress.command} terminé · {progress.turn} tour(s){files} · {elapsed}"
         elif progress.is_blocked:

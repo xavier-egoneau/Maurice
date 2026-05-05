@@ -307,7 +307,11 @@ def _path_rules(*, agent_content: str, active_project: str | None, known_project
     if active_project:
         lines += [
             f"Active project is open at: {active_project}",
-            "Relative names resolve there first.",
+            "Relative names resolve there first, including top-level names like `skills/`, `config/`, "
+            "`agents/`, and `sessions/`.",
+            "Do not create, move, or edit files outside the active project unless the user explicitly "
+            "asks for a workspace/runtime/admin change. When that is explicit, target it with an explicit "
+            "root such as `$workspace/...` or `$runtime/...`.",
             "If the user refers to the project itself by name, do not append that name again.",
         ]
     if known_projects:

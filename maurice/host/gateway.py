@@ -121,6 +121,16 @@ def _turn_response_text(turn: TurnResult) -> str:
     return text
 
 
+def _autonomy_turn_timeout_seconds(autonomy: dict[str, Any], default_timeout: int) -> int:
+    try:
+        max_seconds = int(autonomy.get("max_seconds") or 0)
+    except (TypeError, ValueError):
+        max_seconds = 0
+    if max_seconds <= 0:
+        return default_timeout
+    return max(default_timeout, max_seconds + 60)
+
+
 class MessageRouter:
     """Route channel-neutral inbound messages to the configured agent runtime."""
 
@@ -152,7 +162,7 @@ class MessageRouter:
         self._rate_limit = rate_limit or GatewayRateLimitConfig()
         self.progress_store = progress_store
         self.make_channel_progress_callback = make_channel_progress_callback
-        # (agent_id, session_id) → (cancel_event, started_at)
+        # (agent_id, session_id) -> (cancel_event, deadline_monotonic)
         self._active_turns: dict[tuple[str, str], tuple[threading.Event, float]] = {}
         self._active_turns_lock = threading.Lock()
         # (channel, peer_id) → deque of request timestamps for sliding window
@@ -238,7 +248,15 @@ class MessageRouter:
                 autonomy = command_result.metadata.get("autonomy")
                 if not isinstance(autonomy, dict):
                     autonomy = {}
-                cancel_event = self._begin_turn(agent_id, session_id, peer_key=peer_key)
+                cancel_event = self._begin_turn(
+                    agent_id,
+                    session_id,
+                    peer_key=peer_key,
+                    timeout_seconds=_autonomy_turn_timeout_seconds(
+                        autonomy,
+                        self._rate_limit.turn_timeout_seconds,
+                    ),
+                )
                 # Assemble progress callbacks (SSE store + channel-specific)
                 _progress_cbs: list[ProgressCallback] = []
                 if self.progress_store is not None:
@@ -295,7 +313,7 @@ class MessageRouter:
                     if self.progress_store is not None:
                         self.progress_store.close(session_id)
                 text = _turn_response_text(turn)
-                if autonomy.get("requires_activity") is True and not any_tool_activity:
+                if turn.status == "completed" and autonomy.get("requires_activity") is True and not any_tool_activity:
                     no_activity_text = autonomy.get("no_activity_text")
                     if not isinstance(no_activity_text, str) or not no_activity_text.strip():
                         no_activity_text = (
@@ -479,10 +497,13 @@ class MessageRouter:
         agent_id: str,
         session_id: str,
         peer_key: tuple[str, str] | None = None,
+        timeout_seconds: int | None = None,
     ) -> threading.Event:
         event = threading.Event()
+        timeout = self._rate_limit.turn_timeout_seconds if timeout_seconds is None else timeout_seconds
+        deadline = time.monotonic() + timeout if timeout > 0 else 0.0
         with self._active_turns_lock:
-            self._active_turns[(agent_id, session_id)] = (event, time.monotonic())
+            self._active_turns[(agent_id, session_id)] = (event, deadline)
         if peer_key is not None:
             with self._peer_lock:
                 self._peer_concurrent[peer_key] = self._peer_concurrent.get(peer_key, 0) + 1
@@ -534,12 +555,12 @@ class MessageRouter:
             time.sleep(60)
             if timeout <= 0:
                 break
-            deadline = time.monotonic() - timeout
+            now = time.monotonic()
             with self._active_turns_lock:
                 zombies = [
                     (key, event)
-                    for key, (event, started_at) in list(self._active_turns.items())
-                    if started_at < deadline
+                    for key, (event, deadline) in list(self._active_turns.items())
+                    if deadline > 0 and deadline < now
                 ]
             for key, event in zombies:
                 event.set()
