@@ -140,6 +140,8 @@ kernel:
     enabled: true
     dreaming_enabled: true
     dreaming_time: "09:00"
+    sentinelle_enabled: true
+    sentinelle_time: "09:10"
     daily_enabled: true
     daily_time: "09:30"
 
@@ -159,11 +161,13 @@ kernel:
 The scheduler creates agent-scoped recurring jobs under
 `<workspace>/agents/<agent-id>/jobs.json`. `dreaming.run` is scheduled when
 `dreaming_enabled` is true and the agent has the `dreaming` skill enabled;
+`sentinelle.scan` is scheduled when `sentinelle_enabled` is true and the agent
+has the `sentinelle` skill installed and enabled;
 `daily.digest` is scheduled when `daily_enabled` is true and the agent has the
 `daily` skill enabled. `maurice start` runs the scheduler by default in
 persistent assistant mode. Use the Maurice web **Agent > Automatismes** section
 or `maurice scheduler configure --workspace ...` to change times or
-enable/disable either job. See [automations](automations.md).
+enable/disable these jobs. See [automations](automations.md).
 
 ### agents.yaml
 
@@ -193,6 +197,18 @@ because its credential is not allowed or an auth token is missing. Older
 `kernel.model` and `agent.model` blocks are migrated into this structure and
 removed from the YAML; credentials themselves are not moved or rewritten.
 
+Each agent can add a personality layer in `<agent-workspace>/content/SOUL.md`.
+Maurice always includes the packaged default soul first, then appends the
+agent-specific `SOUL.md` when present. Use that file for voice, stance, tone,
+and boundaries; keep operating rules in project or skill instructions.
+
+Each agent has an empty user-approved profile file at
+`<agent-workspace>/USER.md`. Maurice includes it as human context once it has
+content. If it is empty or incomplete, the default prompt tells Maurice to ask
+gently for stable basics only when useful: preferred name, language/tone,
+relationship style, working preferences, and boundaries. When the user answers,
+Maurice should update `USER.md` and keep it concise.
+
 Development workers use `worker_model_chain` when it is configured on the
 parent agent. If it is empty, `/dev` workers inherit the parent agent
 `model_chain`. Users choose the worker provider/model from the agent config or
@@ -215,7 +231,8 @@ maurice models default ollama_gemma4 --workspace /path/to/workspace
 
 Per-skill config, keyed by skill name. Advanced `skill.yaml` manifests can
 override this with `config_namespace`, but lightweight user skills use
-`skills.<skill_name>` by convention:
+`skills.<skill_name>` by convention. If a skill ships a `setup.json`, Maurice
+adds missing default values here and lets Maurice web edit them:
 
 ```yaml
 skills:
@@ -227,6 +244,9 @@ skills:
     base_url: http://localhost:18080
     max_results: 10
   dev: {}
+  sentinelle:
+    daily_audit_enabled: true
+    daily_audit_time: "09:10"
 ```
 
 ## Providers

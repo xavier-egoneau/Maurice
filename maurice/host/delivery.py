@@ -11,6 +11,7 @@ from maurice.kernel.config import load_workspace_config
 from maurice.kernel.events import EventStore
 from maurice.kernel.scheduler import JobStore
 from maurice.kernel.session import SessionStore
+from maurice.host.session_routing import canonical_session_id
 from maurice.host.telegram import (
     _credential_value,
     _int_list,
@@ -108,8 +109,7 @@ def _telegram_reminder_targets(
             telegram = bundle.host.channels.get("telegram")
         if isinstance(telegram, dict):
             token = _credential_value(workspace, str(telegram.get("credential") or "telegram_bot"))
-            peer_id = payload.get("peer_id")
-            source_session = f"telegram:{peer_id}" if isinstance(peer_id, str) and peer_id else None
+            source_session = canonical_session_id(agent_id)
             add_target(token, source_chat_id, source_session)
 
     for _channel_name, telegram in _telegram_channel_configs(bundle):
@@ -119,9 +119,9 @@ def _telegram_reminder_targets(
             continue
         token = _credential_value(workspace, str(telegram.get("credential") or "telegram_bot"))
         for user_id in _int_list(telegram.get("allowed_users")):
-            add_target(token, user_id, f"telegram:{user_id}")
+            add_target(token, user_id, canonical_session_id(agent_id))
         for chat_id in _int_list(telegram.get("allowed_chats")):
-            add_target(token, chat_id, f"telegram:{chat_id}")
+            add_target(token, chat_id, canonical_session_id(agent_id))
     return targets
 
 
@@ -236,8 +236,18 @@ def _deliver_daily_digest(
     token = _credential_value(workspace, credential_name)
     if not token:
         return
-    chat_ids = sorted(set(_int_list(telegram.get("allowed_chats")) + _int_list(telegram.get("allowed_users"))))
-    for chat_id in chat_ids:
+    targets = _telegram_daily_targets(workspace, agent_id, token, telegram)
+    if not targets:
+        _emit_daily_event(
+            event_store,
+            "daily.digest.delivery_skipped",
+            agent_id,
+            session_id,
+            {"channel": "telegram", "reason": "no_telegram_target"},
+        )
+        return
+    for target in targets:
+        chat_id = target["chat_id"]
         try:
             _telegram_send_message(token, chat_id, text)
             _emit_daily_event(
@@ -249,6 +259,44 @@ def _deliver_daily_digest(
                 event_store, "daily.digest.delivery_failed", agent_id, session_id,
                 {"channel": "telegram", "chat_id": chat_id, "error": str(exc)},
             )
+
+
+def _telegram_daily_targets(
+    workspace: Path,
+    agent_id: str,
+    token: str,
+    telegram: dict[str, Any],
+) -> list[dict[str, Any]]:
+    chat_ids = sorted(set(_int_list(telegram.get("allowed_chats")) + _int_list(telegram.get("allowed_users"))))
+    if not chat_ids:
+        remembered = _remembered_telegram_chat_id(workspace, agent_id)
+        if remembered is not None:
+            chat_ids = [remembered]
+    return [{"token": token, "chat_id": chat_id, "session_id": canonical_session_id(agent_id)} for chat_id in chat_ids]
+
+
+def _remembered_telegram_chat_id(workspace: Path, agent_id: str) -> int | None:
+    store = SessionStore(workspace / "sessions")
+    try:
+        session = store.load(agent_id, canonical_session_id(agent_id))
+    except FileNotFoundError:
+        session = None
+    telegram = session.metadata.get("telegram") if session is not None else None
+    if isinstance(telegram, dict) and isinstance(telegram.get("chat_id"), int):
+        return int(telegram["chat_id"])
+
+    legacy_ids: list[int] = []
+    for candidate in store.list(agent_id):
+        prefix, separator, suffix = candidate.id.partition(":")
+        if prefix != "telegram" or not separator or suffix == agent_id:
+            continue
+        try:
+            legacy_ids.append(int(suffix))
+        except ValueError:
+            continue
+    if len(legacy_ids) == 1:
+        return legacy_ids[0]
+    return None
 
 
 def _emit_daily_event(

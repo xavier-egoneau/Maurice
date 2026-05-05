@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from maurice.host.paths import agents_config_path
+from maurice.host.workspace import ensure_agent_user_file
 from maurice.kernel.config import ConfigBundle, load_workspace_config, write_yaml_file
 from maurice.kernel.contracts import AgentConfig
 from maurice.kernel.events import EventStore
@@ -51,6 +52,7 @@ def create_agent(
     agent_workspace.mkdir(parents=True, exist_ok=False)
     for relative in ("content", "memory", "dreams", "reminders"):
         (agent_workspace / relative).mkdir(parents=True, exist_ok=True)
+    ensure_agent_user_file(agent_workspace)
     agent = AgentConfig(
         id=agent_id,
         default=make_default,
@@ -113,6 +115,7 @@ def update_agent(
         _set_only_default(bundle, agent_id)
     _write_agents_config(Path(bundle.host.workspace_root), bundle)
     Path(updated.workspace).mkdir(parents=True, exist_ok=True)
+    ensure_agent_user_file(updated.workspace)
     _emit_agent_event(updated, "agent.updated", {"agent": updated.model_dump(mode="json")})
     return updated
 

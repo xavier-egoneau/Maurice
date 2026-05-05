@@ -1711,6 +1711,53 @@ def test_scheduler_handlers_use_global_context(tmp_path, monkeypatch) -> None:
     }
 
 
+def test_scheduler_handlers_can_run_loaded_skill_tools(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
+    delivered = []
+
+    class Result:
+        ok = True
+        summary = "custom scan ok"
+
+    class FakeRegistry:
+        def build_executor_map(self, _skill_ctx):
+            return {
+                "custom.scan": lambda arguments: delivered.append(("tool", arguments)) or Result(),
+            }
+
+    class FakeSkillLoader:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def load(self):
+            return FakeRegistry()
+
+    class Job:
+        name = "custom.scan"
+        payload = {
+            "agent_id": "main",
+            "session_id": "custom",
+            "arguments": {"fast": True},
+            "deliver": True,
+        }
+
+    monkeypatch.setattr("maurice.host.commands.scheduler.SkillLoader", FakeSkillLoader)
+    monkeypatch.setattr(
+        "maurice.host.commands.scheduler._deliver_daily_digest",
+        lambda _workspace, payload, text, *, event_store=None: delivered.append(("deliver", payload, text)),
+    )
+
+    handlers = _scheduler_handlers(workspace, "main")
+    result = handlers["custom.scan"](Job())
+
+    assert result.summary == "custom scan ok"
+    assert delivered == [
+        ("tool", {"fast": True}),
+        ("deliver", Job.payload, "custom scan ok"),
+    ]
+
+
 def test_cli_scheduler_configure_updates_automation_times(tmp_path, capsys) -> None:
     workspace = tmp_path / "workspace"
     main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
@@ -1726,6 +1773,8 @@ def test_cli_scheduler_configure_updates_automation_times(tmp_path, capsys) -> N
                 "8h45",
                 "--daily-time",
                 "10:15",
+                "--sentinelle-time",
+                "9h10",
             ]
         )
         == 0
@@ -1734,8 +1783,10 @@ def test_cli_scheduler_configure_updates_automation_times(tmp_path, capsys) -> N
     bundle = load_workspace_config(workspace)
     output = capsys.readouterr().out
     assert "dreaming on at 08:45" in output
+    assert "sentinelle on at 09:10" in output
     assert bundle.kernel.scheduler.dreaming_time == "08:45"
     assert bundle.kernel.scheduler.daily_time == "10:15"
+    assert bundle.kernel.scheduler.sentinelle_time == "09:10"
 
 
 def test_scheduler_defaults_create_dream_and_daily_jobs(tmp_path) -> None:
@@ -1751,6 +1802,55 @@ def test_scheduler_defaults_create_dream_and_daily_jobs(tmp_path) -> None:
     assert by_kind["system.daily.digest"].name == "daily.digest"
     assert by_kind["system.daily.digest"].payload["time"] == "09:30"
     assert by_kind["system.daily.digest"].interval_seconds == 86400
+    assert "skill.sentinelle.daily_audit" not in by_kind
+
+
+def test_scheduler_defaults_create_sentinelle_job_when_skill_exists(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
+    skill_dir = workspace / "skills" / "sentinelle"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "skill.md").write_text("---\nname: sentinelle\n---\n# Sentinelle\n", encoding="utf-8")
+    (skill_dir / "tools.py").write_text("def tool_declarations():\n    return []\n", encoding="utf-8")
+    (skill_dir / "setup.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "config": [
+                    {"key": "daily_audit_enabled", "type": "boolean", "default": True},
+                    {"key": "daily_audit_time", "type": "time", "default": "09:10"},
+                ],
+                "scheduler": [
+                    {
+                        "id": "daily_audit",
+                        "tool": "sentinelle.scan",
+                        "enabled_key": "daily_audit_enabled",
+                        "time_key": "daily_audit_time",
+                        "default_time": "09:10",
+                        "session_id": "sentinelle",
+                        "arguments": {"include_raw": False},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _ensure_configured_scheduler_jobs(workspace, "main")
+
+    jobs = JobStore(workspace / "agents" / "main" / "jobs.json").list(status=JobStatus.SCHEDULED)
+    by_kind = {job.payload.get("kind"): job for job in jobs}
+    assert by_kind["skill.sentinelle.daily_audit"].name == "sentinelle.scan"
+    assert by_kind["skill.sentinelle.daily_audit"].payload["time"] == "09:10"
+    assert by_kind["skill.sentinelle.daily_audit"].payload["deliver"] is True
+    assert by_kind["skill.sentinelle.daily_audit"].interval_seconds == 86400
+    assert read_yaml_file(workspace / "skills.yaml")["skills"]["sentinelle"]["daily_audit_time"] == "09:10"
+
+    main(["scheduler", "configure", "--workspace", str(workspace), "--sentinelle-time", "8h20"])
+    jobs = JobStore(workspace / "agents" / "main" / "jobs.json").list(status=JobStatus.SCHEDULED)
+    by_kind = {job.payload.get("kind"): job for job in jobs}
+    assert by_kind["skill.sentinelle.daily_audit"].payload["time"] == "08:20"
+    assert read_yaml_file(workspace / "skills.yaml")["skills"]["sentinelle"]["daily_audit_time"] == "08:20"
 
 
 def test_scheduler_does_not_create_daily_job_when_daily_skill_disabled(tmp_path) -> None:
@@ -1797,6 +1897,37 @@ def test_daily_digest_delivers_to_configured_telegram_chats(tmp_path, monkeypatc
     assert session.messages[-1].content == "Bonjour, voici ton daily Maurice."
 
 
+def test_daily_digest_delivers_to_remembered_canonical_telegram_chat(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
+    host_path = host_config_path(workspace)
+    host_data = read_yaml_file(host_path)
+    host_data["host"]["channels"]["telegram"] = {
+        "adapter": "telegram",
+        "enabled": True,
+        "agent": "main",
+        "credential": "telegram_bot",
+        "allowed_users": [],
+        "allowed_chats": [],
+    }
+    write_yaml_file(host_path, host_data)
+    sessions = SessionStore(workspace / "sessions")
+    session = sessions.create("main", session_id="telegram:main")
+    session.metadata["telegram"] = {"chat_id": 123, "peer_id": "123"}
+    sessions.save(session)
+    sent = []
+    monkeypatch.setattr("maurice.host.delivery._credential_value", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr("maurice.host.delivery._telegram_send_message", lambda token, chat_id, text: sent.append((token, chat_id, text)))
+
+    _deliver_daily_digest(
+        workspace,
+        {"agent_id": "main", "session_id": "daily"},
+        "Bonjour, voici ton daily Maurice.",
+    )
+
+    assert sent == [("token", 123, "Bonjour, voici ton daily Maurice.")]
+
+
 def test_web_created_reminder_delivers_to_configured_telegram_session(tmp_path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     main(["onboard", "--workspace", str(workspace), "--permission-profile", "limited"])
@@ -1828,7 +1959,7 @@ def test_web_created_reminder_delivers_to_configured_telegram_session(tmp_path, 
 
     assert sent == [("token", 123, "🔔 Faire une pause")]
     web_session = SessionStore(workspace / "sessions").load("main", "web:main:1")
-    telegram_session = SessionStore(workspace / "sessions").load("main", "telegram:123")
+    telegram_session = SessionStore(workspace / "sessions").load("main", "telegram:main")
     assert web_session.messages[-1].content == "🔔 Faire une pause"
     assert telegram_session.messages[-1].content == "🔔 Faire une pause"
 

@@ -30,6 +30,8 @@ kernel:
     dreaming_time: "09:00"
     daily_enabled: true
     daily_time: "09:30"
+    sentinelle_enabled: true
+    sentinelle_time: "09:10"
 ```
 
 At scheduler startup, Maurice ensures these recurring jobs for each served
@@ -38,7 +40,12 @@ agent:
 | Job | Skill required | Default time | Storage |
 |---|---|---|---|
 | `dreaming.run` | `dreaming` | `09:00` local time | `<workspace>/agents/<agent-id>/jobs.json` |
+| `sentinelle.scan` | `sentinelle` | `09:10` local time | `<workspace>/agents/<agent-id>/jobs.json` |
 | `daily.digest` | `daily` | `09:30` local time | `<workspace>/agents/<agent-id>/jobs.json` |
+
+Skill-owned jobs such as `sentinelle.scan` come from the skill's `setup.json`.
+Their user-facing variables are stored in `<workspace>/skills.yaml`, not as
+hard-coded scheduler fields.
 
 Jobs repeat every 24 hours. If the configured time has already passed today, the
 next run is scheduled for tomorrow. Times are interpreted in the machine's local
@@ -61,9 +68,11 @@ Use the CLI when you want to script or diagnose the same settings:
 maurice scheduler configure \
   --workspace /path/to/workspace \
   --dream-time 08:45 \
+  --sentinelle-time 09:10 \
   --daily-time 09:15
 
 maurice scheduler configure --workspace /path/to/workspace --disable-dreaming
+maurice scheduler configure --workspace /path/to/workspace --enable-sentinelle
 maurice scheduler configure --workspace /path/to/workspace --enable-daily
 ```
 

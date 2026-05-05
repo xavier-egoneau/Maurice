@@ -110,6 +110,137 @@ def test_agent_system_prompt_lists_known_projects(tmp_path) -> None:
     assert "do not edit runtime files directly" in prompt
 
 
+def test_agent_system_prompt_includes_base_and_agent_soul(tmp_path) -> None:
+    from maurice.host.cli import _agent_system_prompt
+
+    agent_workspace = tmp_path / "workspace" / "agents" / "main"
+    content = agent_workspace / "content"
+    content.mkdir(parents=True)
+    (content / "SOUL.md").write_text("## Local Layer\n\nBe Maurice with extra warmth.\n", encoding="utf-8")
+
+    class Agent:
+        workspace = str(agent_workspace)
+
+    prompt = _agent_system_prompt(tmp_path / "workspace", agent=Agent())
+
+    assert "## Soul" in prompt
+    assert "## Base Soul" in prompt
+    assert "You're not a chatbot" in prompt
+    assert "## Agent Soul" in prompt
+    assert "Be Maurice with extra warmth." in prompt
+
+
+def test_agent_system_prompt_includes_user_onboarding_when_profile_missing(tmp_path) -> None:
+    from maurice.host.cli import _agent_system_prompt
+
+    agent_workspace = tmp_path / "workspace" / "agents" / "main"
+    (agent_workspace / "content").mkdir(parents=True)
+
+    class Agent:
+        workspace = str(agent_workspace)
+
+    prompt = _agent_system_prompt(tmp_path / "workspace", agent=Agent())
+
+    assert "## Human Context" in prompt
+    assert "## User Onboarding" in prompt
+    assert "USER.md" in prompt
+    assert "Preferred relationship style" in prompt
+    assert "chill companion" in prompt
+    assert "critical sparring partner" in prompt
+
+
+def test_agent_system_prompt_mentions_empty_user_profile_file(tmp_path) -> None:
+    from maurice.host.cli import _agent_system_prompt
+
+    agent_workspace = tmp_path / "workspace" / "agents" / "main"
+    agent_workspace.mkdir(parents=True)
+    (agent_workspace / "USER.md").write_text("", encoding="utf-8")
+
+    class Agent:
+        workspace = str(agent_workspace)
+
+    prompt = _agent_system_prompt(tmp_path / "workspace", agent=Agent())
+
+    assert "## User Onboarding" in prompt
+    assert "User profile file exists but is empty at" in prompt
+    assert str(agent_workspace / "USER.md") in prompt
+
+
+def test_agent_system_prompt_includes_agent_user_profile(tmp_path) -> None:
+    from maurice.host.cli import _agent_system_prompt
+
+    agent_workspace = tmp_path / "workspace" / "agents" / "main"
+    agent_workspace.mkdir(parents=True)
+    (agent_workspace / "USER.md").write_text(
+        "# User\n\n- Name: Egza\n- Relationship style: direct and critical.\n",
+        encoding="utf-8",
+    )
+
+    class Agent:
+        workspace = str(agent_workspace)
+
+    prompt = _agent_system_prompt(tmp_path / "workspace", agent=Agent())
+
+    assert "## Human Context" in prompt
+    assert "## User Profile" in prompt
+    assert "User-approved context loaded from" in prompt
+    assert "Name: Egza" in prompt
+    assert "direct and critical" in prompt
+    assert "## User Profile Maintenance" in prompt
+    assert "contains at least one user-provided fact" in prompt
+    assert "Preferred relationship style" in prompt
+
+
+def test_agent_system_prompt_detects_blank_default_user_profile(tmp_path) -> None:
+    from maurice.host.cli import _agent_system_prompt
+
+    agent_workspace = tmp_path / "workspace" / "agents" / "main"
+    agent_workspace.mkdir(parents=True)
+    (agent_workspace / "USER.md").write_text(
+        "# USER.md - About The Human\n\n"
+        "This file stores user-approved context that helps Maurice collaborate with the human.\n\n"
+        "## Profile\n\n"
+        "- Name or preferred address:\n"
+        "- Main language:\n"
+        "- Tone preferences:\n"
+        "- Relationship style:\n",
+        encoding="utf-8",
+    )
+
+    class Agent:
+        workspace = str(agent_workspace)
+
+    prompt = _agent_system_prompt(tmp_path / "workspace", agent=Agent())
+
+    assert "## User Profile" in prompt
+    assert "default blank template" in prompt
+    assert "proactively make a short introduction" in prompt
+    assert "Prioritize name or preferred address" in prompt
+
+
+def test_agent_system_prompt_marks_missing_relationship_style_incomplete(tmp_path) -> None:
+    from maurice.host.cli import _agent_system_prompt
+
+    agent_workspace = tmp_path / "workspace" / "agents" / "main"
+    agent_workspace.mkdir(parents=True)
+    (agent_workspace / "USER.md").write_text(
+        "# User\n\n- Name or preferred address: Egza\n- Relationship style:\n",
+        encoding="utf-8",
+    )
+
+    class Agent:
+        workspace = str(agent_workspace)
+
+    prompt = _agent_system_prompt(tmp_path / "workspace", agent=Agent())
+
+    assert "contains at least one user-provided fact" in prompt
+    assert "Missing onboarding basics: main language, tone preferences, relationship style" in prompt
+    assert "things to avoid, boundaries" in prompt
+    assert "relationship setup as incomplete" not in prompt
+    assert "user profile setup as incomplete" in prompt
+    assert "profile setup instead of waiting indefinitely" in prompt
+
+
 def test_loop_preserves_provider_failure_error(tmp_path) -> None:
     provider = MockProvider(
         [

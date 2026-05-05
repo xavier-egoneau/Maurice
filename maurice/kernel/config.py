@@ -63,8 +63,10 @@ class KernelSchedulerConfig(ConfigModel):
     dreaming_time: str = "09:00"
     daily_enabled: bool = True
     daily_time: str = "09:30"
+    sentinelle_enabled: bool = True
+    sentinelle_time: str = "09:10"
 
-    @field_validator("dreaming_time", "daily_time")
+    @field_validator("dreaming_time", "daily_time", "sentinelle_time")
     @classmethod
     def time_must_be_hhmm(cls, value: str) -> str:
         normalized = _normalize_time(value)

@@ -649,7 +649,8 @@ body.tools-hidden .tool-activity { display: none; }
 #send:disabled,
 #stop:disabled { opacity: .45; cursor: default; }
 #modal-backdrop,
-#agent-modal-backdrop {
+#agent-modal-backdrop,
+#session-modal-backdrop {
   position: fixed;
   inset: 0;
   background: #0009;
@@ -660,9 +661,20 @@ body.tools-hidden .tool-activity { display: none; }
   z-index: 50;
 }
 #modal-backdrop.open,
-#agent-modal-backdrop.open { display: flex; }
+#agent-modal-backdrop.open,
+#session-modal-backdrop.open { display: flex; }
 #model-modal {
   width: min(440px, 100%);
+  background: #181512;
+  border: 1px solid #342b22;
+  border-radius: 8px;
+  box-shadow: 0 22px 50px #000b;
+}
+#session-modal {
+  width: min(620px, 100%);
+  max-height: min(82dvh, 720px);
+  display: flex;
+  flex-direction: column;
   background: #181512;
   border: 1px solid #342b22;
   border-radius: 8px;
@@ -685,6 +697,13 @@ body.tools-hidden .tool-activity { display: none; }
   font-size: 14px;
   font-weight: 650;
 }
+#session-modal header {
+  padding: 14px 16px;
+  border-bottom: 1px solid #28231d;
+  color: var(--bright);
+  font-size: 14px;
+  font-weight: 650;
+}
 #agent-modal header {
   padding: 14px 16px;
   border-bottom: 1px solid #28231d;
@@ -692,11 +711,29 @@ body.tools-hidden .tool-activity { display: none; }
   font-size: 14px;
   font-weight: 650;
 }
+#session-current {
+  padding: 10px 16px;
+  border-bottom: 1px solid #28231d;
+  color: #92877d;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 #model-modal .modal-body {
   padding: 14px 16px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+#session-modal .modal-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 #agent-modal .modal-body {
   min-height: 0;
@@ -704,6 +741,44 @@ body.tools-hidden .tool-activity { display: none; }
   padding: 14px 16px;
   display: grid;
   gap: 14px;
+}
+.session-row {
+  width: 100%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  border-radius: 6px;
+  padding: 10px;
+  display: grid;
+  gap: 5px;
+  text-align: left;
+  cursor: pointer;
+}
+.session-row:hover,
+.session-row.active {
+  background: #211a14;
+  border-color: #3a2d22;
+}
+.session-title {
+  color: var(--bright);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-meta,
+.session-preview {
+  color: #92877d;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-empty {
+  padding: 18px 10px;
+  color: #92877d;
+  text-align: center;
+  font-size: 13px;
 }
 .field {
   display: grid;
@@ -839,6 +914,13 @@ body.tools-hidden .tool-activity { display: none; }
   gap: 8px;
   border-top: 1px solid #28231d;
 }
+#session-modal footer {
+  padding: 12px 16px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid #28231d;
+}
 @keyframes bounce { 0%,80%,100% { transform: scale(.7); opacity:.3; } 40% { transform: scale(1); opacity:.95; } }
 @keyframes pulse { 50% { box-shadow: 0 0 10px #d97706aa; } }
 @media (max-width: 780px) {
@@ -865,6 +947,7 @@ body.tools-hidden .tool-activity { display: none; }
   <button id="tools-toggle" type="button" title="Afficher / masquer les actions" aria-label="Afficher / masquer les actions">
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4.4 4.4 0 0 0-5.4 5.4L4 17v3h3l5.3-5.3a4.4 4.4 0 0 0 5.4-5.4l-3 3-3-3 3-3Z"/></svg>
   </button>
+  <button id="session-button" type="button">Sessions</button>
   <button id="model-button" type="button">Modele</button>
   <button id="agent-button" type="button">Agent</button>
   <select id="agent" title="Agent"></select>
@@ -906,6 +989,17 @@ body.tools-hidden .tool-activity { display: none; }
     <footer>
       <button id="model-cancel" class="mini-btn" type="button">Annuler</button>
       <button id="model-apply" class="mini-btn" type="button">Appliquer</button>
+    </footer>
+  </div>
+</div>
+<div id="session-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="session-title">
+  <div id="session-modal">
+    <header id="session-title">Sessions</header>
+    <div id="session-current"></div>
+    <div id="session-list" class="modal-body"></div>
+    <footer>
+      <button id="session-new" class="mini-btn" type="button">Nouvelle</button>
+      <button id="session-close" class="mini-btn" type="button">Fermer</button>
     </footer>
   </div>
 </div>
@@ -1003,6 +1097,7 @@ body.tools-hidden .tool-activity { display: none; }
           </label>
           <label for="agent-daily-time">Heure daily</label>
           <input id="agent-daily-time" type="time" step="60">
+          <div id="agent-skill-setup-fields"></div>
           <div id="agent-scheduler-current" class="field-hint"></div>
         </div>
       </div>
@@ -1077,6 +1172,12 @@ const diffContent = $("diff-content");
 const refreshChangesBtn = $("refresh-changes");
 const reviewChangesBtn = $("review-changes");
 const toolsToggle = $("tools-toggle");
+const sessionButton = $("session-button");
+const sessionModalBackdrop = $("session-modal-backdrop");
+const sessionCurrent = $("session-current");
+const sessionList = $("session-list");
+const sessionNew = $("session-new");
+const sessionClose = $("session-close");
 const modelButton = $("model-button");
 const agentButton = $("agent-button");
 const modalBackdrop = $("modal-backdrop");
@@ -1113,6 +1214,7 @@ const agentDreamingEnabled = $("agent-dreaming-enabled");
 const agentDreamingTime = $("agent-dreaming-time");
 const agentDailyEnabled = $("agent-daily-enabled");
 const agentDailyTime = $("agent-daily-time");
+const agentSkillSetupFields = $("agent-skill-setup-fields");
 const agentSchedulerCurrent = $("agent-scheduler-current");
 const agentTelegramEnabled = $("agent-telegram-enabled");
 const agentTelegramFields = $("agent-telegram-fields");
@@ -1135,6 +1237,7 @@ let suggestionIndex = 0;
 let lastCommandQuery = "";
 let selectedChangePath = "";
 let pendingAttachments = [];
+let agentSkillSetups = [];
 const MAX_UPLOAD_BYTES = 10_000_000;
 const HISTORY_REFRESH_MS = 15000;
 
@@ -1645,6 +1748,82 @@ async function loadHistory(options = {}) {
   }
 }
 
+function updateSessionButton() {
+  sessionButton.title = `Session courante: ${sessionId}`;
+}
+
+async function openSessionDialog() {
+  sessionModalBackdrop.classList.add("open");
+  sessionCurrent.textContent = `Courante: ${sessionId}`;
+  sessionList.innerHTML = '<div class="session-empty">Chargement...</div>';
+  await loadSessionList();
+}
+
+function closeSessionDialog() {
+  sessionModalBackdrop.classList.remove("open");
+}
+
+async function loadSessionList() {
+  try {
+    const url = `/api/sessions?agent_id=${encodeURIComponent(activeAgent)}`;
+    const res = await apiFetch(url);
+    if (!res.ok) throw new Error("sessions_unavailable");
+    const data = await res.json();
+    renderSessionList(Array.isArray(data.sessions) ? data.sessions : []);
+  } catch (error) {
+    console.error(error);
+    sessionList.innerHTML = '<div class="session-empty">Historique indisponible.</div>';
+  }
+}
+
+function renderSessionList(rows) {
+  sessionList.innerHTML = "";
+  if (!rows.length) {
+    sessionList.innerHTML = '<div class="session-empty">Aucune session enregistree.</div>';
+    return;
+  }
+  for (const row of rows) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "session-row" + (row.id === sessionId ? " active" : "");
+    button.title = row.id || "";
+    const title = document.createElement("div");
+    title.className = "session-title";
+    title.textContent = row.title || row.id || "Session";
+    const meta = document.createElement("div");
+    meta.className = "session-meta";
+    const count = Number(row.message_count || 0);
+    meta.textContent = `${row.channel || "session"} · ${count} message${count > 1 ? "s" : ""} · ${formatSessionDate(row.updated_at)}`;
+    const preview = document.createElement("div");
+    preview.className = "session-preview";
+    preview.textContent = row.last_message || row.id || "";
+    button.append(title, meta, preview);
+    button.onclick = () => { void switchSession(String(row.id || "")); };
+    sessionList.appendChild(button);
+  }
+}
+
+function formatSessionDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "date inconnue";
+  return date.toLocaleString([], {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+async function switchSession(nextSessionId) {
+  if (!nextSessionId || nextSessionId === sessionId || busy) return;
+  sessionId = nextSessionId;
+  localStorage.setItem(SESSION_PREFIX + activeAgent, sessionId);
+  updateSessionButton();
+  closeSessionDialog();
+  clearVisibleConversation();
+  await loadHistory();
+}
+
 function messageKey(msg) {
   return [
     msg.created_at || "",
@@ -1864,17 +2043,11 @@ async function send() {
 }
 
 async function newSession() {
-  const previous = sessionId;
   sessionId = `web:${activeAgent}:${Date.now()}`;
   localStorage.setItem(SESSION_PREFIX + activeAgent, sessionId);
+  updateSessionButton();
+  closeSessionDialog();
   clearVisibleConversation("Nouvelle session demarree.");
-  if (previous) {
-    try {
-      await apiFetch(`/api/session?agent_id=${encodeURIComponent(activeAgent)}&session_id=${encodeURIComponent(previous)}`, {method: "DELETE"});
-    } catch (error) {
-      console.error(error);
-    }
-  }
 }
 
 async function loadGitChanges() {
@@ -2072,6 +2245,8 @@ async function openAgentDialog(targetAgent) {
     agentDreamingTime.value = scheduler.dreaming_time || "09:00";
     agentDailyEnabled.checked = scheduler.daily_enabled !== false;
     agentDailyTime.value = scheduler.daily_time || "09:30";
+    agentSkillSetups = Array.isArray(data.skill_setups) ? data.skill_setups : [];
+    renderSkillSetupFields();
     renderSchedulerFields();
     const telegram = data.telegram || {};
     agentTelegramEnabled.checked = Boolean(telegram.enabled);
@@ -2249,9 +2424,80 @@ function renderTelegramFields() {
 
 function renderSchedulerFields() {
   agentSchedulerFields.style.display = agentSchedulerEnabled.checked ? "grid" : "none";
+  const dreamingLabel = agentDreamingEnabled.checked ? agentDreamingTime.value || "09:00" : "off";
+  const dailyLabel = agentDailyEnabled.checked ? agentDailyTime.value || "09:30" : "off";
   agentSchedulerCurrent.textContent = agentSchedulerEnabled.checked
-    ? `Dreaming ${agentDreamingEnabled.checked ? agentDreamingTime.value || "09:00" : "off"} · Daily ${agentDailyEnabled.checked ? agentDailyTime.value || "09:30" : "off"}`
+    ? `Dreaming ${dreamingLabel} · Daily ${dailyLabel}`
     : "Scheduler inactif.";
+}
+
+function renderSkillSetupFields() {
+  agentSkillSetupFields.innerHTML = "";
+  for (const setup of agentSkillSetups) {
+    if (!Array.isArray(setup.fields) || !setup.fields.length) continue;
+    const title = document.createElement("div");
+    title.className = "field-title";
+    title.textContent = setup.title || setup.skill;
+    agentSkillSetupFields.appendChild(title);
+    for (const field of setup.fields) {
+      const id = `skill-setup-${setup.skill}-${field.key}`;
+      if (field.type === "boolean") {
+        const label = document.createElement("label");
+        label.className = "switch-row";
+        label.htmlFor = id;
+        label.innerHTML = `<span class="switch-copy"><strong>${esc(field.label || field.key)}</strong><span>${esc(field.description || "")}</span></span>`;
+        const input = document.createElement("input");
+        input.id = id;
+        input.type = "checkbox";
+        input.checked = field.value !== false;
+        input.dataset.skill = setup.skill;
+        input.dataset.key = field.key;
+        label.appendChild(input);
+        agentSkillSetupFields.appendChild(label);
+      } else {
+        const label = document.createElement("label");
+        label.htmlFor = id;
+        label.textContent = field.label || field.key;
+        const input = document.createElement(field.type === "choice" ? "select" : "input");
+        input.id = id;
+        input.dataset.skill = setup.skill;
+        input.dataset.key = field.key;
+        if (field.type === "time") {
+          input.type = "time";
+          input.step = "60";
+        } else if (field.type === "integer" || field.type === "number") {
+          input.type = "number";
+        } else if (field.type !== "choice") {
+          input.type = "text";
+        }
+        if (field.type === "choice") {
+          for (const option of field.options || []) {
+            const opt = document.createElement("option");
+            opt.value = option.value;
+            opt.textContent = option.label || option.value;
+            input.appendChild(opt);
+          }
+        }
+        input.value = field.value ?? field.default ?? "";
+        agentSkillSetupFields.appendChild(label);
+        agentSkillSetupFields.appendChild(input);
+      }
+    }
+  }
+}
+
+function collectSkillSetupPayload() {
+  const payload = {};
+  for (const setup of agentSkillSetups) {
+    payload[setup.skill] = {};
+  }
+  for (const input of agentSkillSetupFields.querySelectorAll("[data-skill][data-key]")) {
+    const skill = input.dataset.skill;
+    const key = input.dataset.key;
+    payload[skill] ||= {};
+    payload[skill][key] = input.type === "checkbox" ? input.checked : input.value;
+  }
+  return payload;
 }
 
 function closeAgentDialog() {
@@ -2291,6 +2537,7 @@ async function applyAgentConfig() {
         dreaming_time: agentDreamingTime.value || "09:00",
         daily_enabled: agentDailyEnabled.checked,
         daily_time: agentDailyTime.value || "09:30",
+        skill_setup: collectSkillSetupPayload(),
         telegram_enabled: agentTelegramEnabled.checked,
         telegram_token: agentTelegramToken.value,
         telegram_allowed_users: agentTelegramUsers.value,
@@ -2325,6 +2572,7 @@ agentSelect.onchange = async () => {
   activeAgent = agentSelect.value || "main";
   localStorage.setItem(AGENT_KEY, activeAgent);
   sessionId = await sessionForGlobalSurface(activeAgent);
+  updateSessionButton();
   messages.innerHTML = "";
   renderedMessageKeys = new Set();
   await loadHistory();
@@ -2334,6 +2582,12 @@ agentSelect.onchange = async () => {
 
 sendBtn.onclick = () => { void send(); };
 stopBtn.onclick = () => { void requestStop(); };
+sessionButton.onclick = () => { void openSessionDialog(); };
+sessionClose.onclick = () => closeSessionDialog();
+sessionNew.onclick = () => { void newSession(); };
+sessionModalBackdrop.onclick = event => {
+  if (event.target === sessionModalBackdrop) closeSessionDialog();
+};
 uploadBtn.onclick = () => imageUpload.click();
 imageUpload.onchange = async () => {
   const files = imageUpload.files;
@@ -2511,6 +2765,7 @@ function closeAutocomplete() {
 (async function init() {
   await loadAgents();
   sessionId = await sessionForGlobalSurface(activeAgent);
+  updateSessionButton();
   await loadHistory();
   await refreshCommands();
   await loadGitChanges();

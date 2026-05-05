@@ -53,7 +53,7 @@ from maurice.host.commands.scheduler import (
 from maurice.host.commands.gateway_server import (
     _gateway_local_message, _gateway_serve, _gateway_serve_until_stopped,
     _build_gateway_http_server, _build_gateway_http_server_for_context, _gateway_telegram_poll,
-    _gateway_web_agents, _gateway_web_session_history,
+    _gateway_web_agents, _gateway_web_session_list, _gateway_web_session_history,
     _looks_like_internal_gateway_message, _gateway_web_session_reset,
     _telegram_poll_until_stopped, _telegram_poll_once,
     _gateway_router_for, _reset_gateway_session, _record_gateway_exchange,
@@ -559,10 +559,13 @@ def build_parser() -> argparse.ArgumentParser:
     scheduler_configure.add_argument("--workspace", required=True, help="Workspace root to use.")
     scheduler_configure.add_argument("--dream-time", help="Local dreaming time, for example 09:00 or 9h.")
     scheduler_configure.add_argument("--daily-time", help="Local daily time, for example 09:30 or 9h30.")
+    scheduler_configure.add_argument("--sentinelle-time", help="Local Sentinelle audit time, for example 09:10 or 9h10.")
     scheduler_configure.add_argument("--disable-dreaming", action="store_true", help="Disable scheduled dreaming.")
     scheduler_configure.add_argument("--disable-daily", action="store_true", help="Disable scheduled daily.")
+    scheduler_configure.add_argument("--disable-sentinelle", action="store_true", help="Disable scheduled Sentinelle audit.")
     scheduler_configure.add_argument("--enable-dreaming", action="store_true", help="Enable scheduled dreaming.")
     scheduler_configure.add_argument("--enable-daily", action="store_true", help="Enable scheduled daily.")
+    scheduler_configure.add_argument("--enable-sentinelle", action="store_true", help="Enable scheduled Sentinelle audit.")
     scheduler_run_once = scheduler_subparsers.add_parser("run-once", help="Run due scheduler jobs once.")
     scheduler_run_once.add_argument("--workspace", required=True, help="Workspace root to use.")
     scheduler_run_once.add_argument("--agent", help="Agent id to use. Defaults to the configured default agent.")
@@ -949,10 +952,13 @@ def main(argv: list[str] | None = None) -> int:
                 Path(args.workspace),
                 dream_time=args.dream_time,
                 daily_time=args.daily_time,
+                sentinelle_time=args.sentinelle_time,
                 enable_dreaming=args.enable_dreaming,
                 disable_dreaming=args.disable_dreaming,
                 enable_daily=args.enable_daily,
                 disable_daily=args.disable_daily,
+                enable_sentinelle=args.enable_sentinelle,
+                disable_sentinelle=args.disable_sentinelle,
             )
             return 0
         if args.scheduler_command == "run-once":

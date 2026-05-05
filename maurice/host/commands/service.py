@@ -260,7 +260,7 @@ def _start_services_daemon(
     with log_path.open("ab") as log_file:
         process = subprocess.Popen(
             command,
-            cwd=str(Path(__file__).resolve().parents[2]),
+            cwd=str(Path(__file__).resolve().parents[3]),
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,

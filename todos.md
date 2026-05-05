@@ -1,0 +1,2 @@
+- [] sessions compactés supprimer l'historique pour l'user. pourquoi ?
+- [] sessions historique : j'ai 2 fenetres sous les yeux qui n'ont pas le meme contenu. ça laisse une impression de bug l'user comprend pas bien la logique des historique de session dans maurice web. idealement je me dis qu'il serait bon d'envisager de lister les sessions dans un historique qu'on puisse voir une ancienne session

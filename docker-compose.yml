@@ -12,4 +12,4 @@ services:
       - CHOWN
       - SETGID
       - SETUID
-    restart: unless-stopped
+    restart: "no"

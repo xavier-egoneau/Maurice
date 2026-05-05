@@ -33,7 +33,8 @@ def test_initialize_workspace_creates_expected_shape(tmp_path) -> None:
     assert host_config_path(workspace).is_file()
     assert kernel_config_path(workspace).is_file()
     assert agents_config_path(workspace).is_file()
-
+    assert (workspace / "agents" / "main" / "USER.md").read_text(encoding="utf-8") == ""
+    assert not (workspace / "agents" / "main" / "content" / "USER.md").exists()
     bundle = load_workspace_config(workspace)
     assert bundle.host.runtime_root == str(runtime.resolve())
     assert bundle.host.workspace_root == str(workspace.resolve())

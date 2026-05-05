@@ -69,6 +69,7 @@ from maurice.host.runtime import (
     _effective_model_label, _default_agent,
 )
 from maurice.host.secret_capture import capture_pending_secret, clear_secret_capture
+from maurice.host.session_routing import canonical_session_id, is_canonical_session
 from maurice.host.self_update import (
     apply_runtime_proposal, list_runtime_proposals, run_proposal_tests, validate_runtime_proposal,
 )
@@ -106,6 +107,7 @@ from maurice.kernel.providers import (
 from maurice.kernel.scheduler import JobRunner, JobStatus, JobStore, SchedulerService, utc_now
 from maurice.kernel.session import SessionStore
 from maurice.kernel.contracts import ToolError, ToolResult
+from maurice.kernel.skill_setup import apply_skill_setup_updates, skill_setup_status
 from maurice.kernel.skills import SkillContext, SkillLoader
 from maurice.host.agent_runtime import global_registry as _agent_runtime_registry
 from maurice.kernel.tool_labels import tool_action_label
@@ -223,6 +225,10 @@ def _build_gateway_http_server(
         channels=channels,
         event_store=EventStore(event_stream),
         web_agents=lambda: _gateway_web_agents(workspace),
+        web_session_list=lambda agent_id: _gateway_web_session_list(
+            workspace,
+            agent_id,
+        ),
         web_session_history=lambda agent_id, session_id: _gateway_web_session_history(
             workspace,
             agent_id,
@@ -296,6 +302,10 @@ def _build_gateway_http_server_for_context(
         router=router,
         event_store=EventStore(ctx.events_path),
         web_agents=lambda: _gateway_web_agents_for_context(ctx),
+        web_session_list=lambda agent_id: _gateway_web_session_list_for_context(
+            ctx,
+            agent_id,
+        ),
         web_session_history=lambda agent_id, session_id: _gateway_web_session_history_for_context(
             ctx,
             agent_id,
@@ -450,12 +460,58 @@ def _gateway_web_session_history(workspace: Path, agent_id: str, session_id: str
     return _session_history(SessionStore(workspace / "sessions"), agent_id, session_id)
 
 
+def _gateway_web_session_list(workspace: Path, agent_id: str) -> list[dict[str, Any]]:
+    return _session_list(SessionStore(workspace / "sessions"), agent_id)
+
+
 def _gateway_web_session_history_for_context(
     ctx: MauriceContext,
     agent_id: str,
     session_id: str,
 ) -> list[dict[str, Any]]:
     return _session_history(SessionStore(ctx.sessions_path), agent_id, session_id)
+
+
+def _gateway_web_session_list_for_context(ctx: MauriceContext, agent_id: str) -> list[dict[str, Any]]:
+    return _session_list(SessionStore(ctx.sessions_path), agent_id)
+
+
+def _session_list(store: SessionStore, agent_id: str, *, limit: int = 60) -> list[dict[str, Any]]:
+    rows = []
+    for session in store.list(agent_id):
+        if not is_canonical_session(session.id, agent_id):
+            continue
+        messages = _session_history(store, agent_id, session.id)
+        visible = [m for m in messages if m.get("role") in {"user", "assistant"}]
+        channel = session.id.split(":", 1)[0] if ":" in session.id else "session"
+        first_user = next((m for m in visible if m.get("role") == "user" and m.get("content")), None)
+        last_visible = next((m for m in reversed(visible) if m.get("content")), None)
+        title = _session_title(session.id, first_user, last_visible)
+        last_message = str((last_visible or {}).get("content") or "").strip()
+        rows.append(
+            {
+                "id": session.id,
+                "created_at": session.created_at.isoformat(),
+                "updated_at": session.updated_at.isoformat(),
+                "message_count": len(visible),
+                "title": title,
+                "last_message": _compact_text(last_message, 140),
+                "channel": channel,
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _session_title(session_id: str, first_user: dict[str, Any] | None, last_visible: dict[str, Any] | None) -> str:
+    for message in (first_user, last_visible):
+        content = str((message or {}).get("content") or "").strip()
+        if content:
+            first_line = content.splitlines()[0].strip()
+            if first_line:
+                return _compact_text(first_line, 64)
+    return session_id
 
 
 def _session_history(store: SessionStore, agent_id: str, session_id: str) -> list[dict[str, Any]]:
@@ -765,13 +821,24 @@ def _telegram_poll_once(
         if inbound is None:
             continue
         chat_id = int(inbound["metadata"]["chat_id"])
-        session_id = f"{inbound['channel']}:{inbound['peer_id']}"
+        session_id = canonical_session_id(agent_id)
+        inbound["session_id"] = session_id
+        _remember_telegram_session_target(workspace, agent_id, session_id, inbound)
         captured = capture_pending_secret(
             workspace,
             agent_id=agent_id,
             session_id=session_id,
             value=str(inbound["text"]),
         )
+        if captured is None:
+            legacy_session_id = f"{inbound['channel']}:{inbound['peer_id']}"
+            if legacy_session_id != session_id:
+                captured = capture_pending_secret(
+                    workspace,
+                    agent_id=agent_id,
+                    session_id=legacy_session_id,
+                    value=str(inbound["text"]),
+                )
         if captured is not None:
             _telegram_send_message(
                 token,
@@ -807,6 +874,29 @@ def _telegram_poll_once(
     if max_update_id >= offset:
         _write_int_file(offset_path, max_update_id + 1)
     return handled
+
+
+def _remember_telegram_session_target(
+    workspace: Path,
+    agent_id: str,
+    session_id: str,
+    inbound: dict[str, Any],
+) -> None:
+    metadata = inbound.get("metadata") if isinstance(inbound.get("metadata"), dict) else {}
+    chat_id = metadata.get("chat_id")
+    if not isinstance(chat_id, int):
+        return
+    store = SessionStore(workspace / "sessions")
+    try:
+        session = store.load(agent_id, session_id)
+    except FileNotFoundError:
+        session = store.create(agent_id, session_id=session_id)
+    session.metadata["telegram"] = {
+        "chat_id": chat_id,
+        "peer_id": str(inbound.get("peer_id") or ""),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    store.save(session)
 
 
 def _telegram_response_text(text: str, metadata: dict[str, Any]) -> str:
@@ -1607,7 +1697,7 @@ def _gateway_agent_config_status(workspace: Path, agent_id: str) -> dict[str, An
             "credential": channel_config.get("credential"),
             "allowed_users": allowed_users,
             "allowed_chats": allowed_chats,
-            "default_session_id": _default_web_session_for_telegram(allowed_users, allowed_chats),
+            "default_session_id": canonical_session_id(agent.id),
             "status": channel_config.get("status"),
         }
     return {
@@ -1655,6 +1745,11 @@ def _gateway_agent_config_status(workspace: Path, agent_id: str) -> dict[str, An
         },
         "web_search": web_search,
         "scheduler": _gateway_scheduler_status(bundle),
+        "skill_setups": skill_setup_status(
+            workspace,
+            bundle.host.skill_roots,
+            enabled_skills=enabled_skills,
+        ),
         "telegram": telegram_payload,
     }
 
@@ -1730,14 +1825,9 @@ def _gateway_scheduler_status(bundle: ConfigBundle) -> dict[str, Any]:
         "dreaming_time": scheduler.dreaming_time,
         "daily_enabled": bool(scheduler.daily_enabled),
         "daily_time": scheduler.daily_time,
+        "sentinelle_enabled": bool(scheduler.sentinelle_enabled),
+        "sentinelle_time": scheduler.sentinelle_time,
     }
-
-
-def _default_web_session_for_telegram(allowed_users: list[int], allowed_chats: list[int]) -> str | None:
-    targets = [*allowed_users, *allowed_chats]
-    if len(targets) != 1:
-        return None
-    return f"telegram:{targets[0]}"
 
 
 def _gateway_agent_config_update(workspace: Path, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1788,6 +1878,7 @@ def _gateway_agent_config_update(workspace: Path, agent_id: str, payload: dict[s
     try:
         _apply_web_search_config(workspace, payload)
         _apply_gateway_scheduler_config(workspace, payload)
+        _apply_gateway_skill_setup_config(workspace, bundle.host.skill_roots, skills, payload)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -1816,6 +1907,22 @@ def _gateway_agent_config_update(workspace: Path, agent_id: str, payload: dict[s
         worker_model_chain=worker_model_chain,
         confirmed_permission_elevation=True,
     )
+    if any(
+        key in payload
+        for key in {
+            "scheduler_enabled",
+            "dreaming_enabled",
+            "dreaming_time",
+            "daily_enabled",
+            "daily_time",
+            "sentinelle_enabled",
+            "sentinelle_time",
+            "skill_setup",
+        }
+    ):
+        from maurice.host.commands.scheduler import _ensure_configured_scheduler_jobs
+
+        _ensure_configured_scheduler_jobs(workspace, updated.id)
     _apply_web_telegram_config(workspace, updated, payload)
     return {
         **_gateway_agent_config_status(workspace, updated.id),
@@ -2165,6 +2272,8 @@ def _apply_gateway_scheduler_config(workspace: Path, payload: dict[str, Any]) ->
         "dreaming_time",
         "daily_enabled",
         "daily_time",
+        "sentinelle_enabled",
+        "sentinelle_time",
     }
     if not any(key in payload for key in scheduler_keys):
         return
@@ -2178,11 +2287,46 @@ def _apply_gateway_scheduler_config(workspace: Path, payload: dict[str, Any]) ->
         scheduler["dreaming_enabled"] = bool(payload.get("dreaming_enabled"))
     if "daily_enabled" in payload:
         scheduler["daily_enabled"] = bool(payload.get("daily_enabled"))
+    if "sentinelle_enabled" in payload:
+        scheduler["sentinelle_enabled"] = bool(payload.get("sentinelle_enabled"))
     if "dreaming_time" in payload:
         scheduler["dreaming_time"] = _web_local_time(payload.get("dreaming_time"), "dreaming_time")
     if "daily_time" in payload:
         scheduler["daily_time"] = _web_local_time(payload.get("daily_time"), "daily_time")
+    if "sentinelle_time" in payload:
+        scheduler["sentinelle_time"] = _web_local_time(payload.get("sentinelle_time"), "sentinelle_time")
     write_yaml_file(path, data)
+
+
+def _apply_gateway_skill_setup_config(
+    workspace: Path,
+    skill_roots: list[Any],
+    enabled_skills: list[str],
+    payload: dict[str, Any],
+) -> None:
+    raw = payload.get("skill_setup")
+    updates: dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
+    if raw is not None and not isinstance(raw, dict):
+        raise ValueError("invalid_skill_setup")
+    sentinelle_updates: dict[str, Any] = {}
+    if "sentinelle_enabled" in payload:
+        sentinelle_updates["daily_audit_enabled"] = bool(payload.get("sentinelle_enabled"))
+    if "sentinelle_time" in payload:
+        sentinelle_updates["daily_audit_time"] = _web_local_time(payload.get("sentinelle_time"), "sentinelle_time")
+    if sentinelle_updates:
+        existing = updates.get("sentinelle")
+        if not isinstance(existing, dict):
+            existing = {}
+        existing.update(sentinelle_updates)
+        updates["sentinelle"] = existing
+    if not updates:
+        return
+    apply_skill_setup_updates(
+        workspace,
+        skill_roots,
+        updates,
+        enabled_skills=enabled_skills,
+    )
 
 
 def _web_local_time(value: Any, name: str) -> str:

@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sys
 import time
-from typing import Any
+from typing import Any, Iterable
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
@@ -80,6 +80,7 @@ from maurice.kernel.providers import (
 )
 from maurice.kernel.scheduler import JobRunner, JobStatus, JobStore, SchedulerService, utc_now
 from maurice.kernel.session import SessionStore
+from maurice.kernel.skill_setup import apply_skill_setup_updates, ensure_skill_setup_config, load_skill_setups
 from maurice.kernel.skills import SkillContext, SkillHooks, SkillLoader
 from maurice.host.vision_backend import build_vision_backend
 from maurice.system_skills.reminders.tools import fire_reminder
@@ -116,16 +117,21 @@ def _scheduler_configure(
     *,
     dream_time: str | None,
     daily_time: str | None,
+    sentinelle_time: str | None,
     enable_dreaming: bool,
     disable_dreaming: bool,
     enable_daily: bool,
     disable_daily: bool,
+    enable_sentinelle: bool,
+    disable_sentinelle: bool,
 ) -> None:
     workspace = Path(load_workspace_config(workspace_root).host.workspace_root)
     if enable_dreaming and disable_dreaming:
         raise SystemExit("Choose either --enable-dreaming or --disable-dreaming.")
     if enable_daily and disable_daily:
         raise SystemExit("Choose either --enable-daily or --disable-daily.")
+    if enable_sentinelle and disable_sentinelle:
+        raise SystemExit("Choose either --enable-sentinelle or --disable-sentinelle.")
     data = read_yaml_file(kernel_config_path(workspace))
     kernel = data.setdefault("kernel", {})
     scheduler = kernel.setdefault("scheduler", {})
@@ -133,6 +139,8 @@ def _scheduler_configure(
         scheduler["dreaming_time"] = _normalize_local_time_or_exit(dream_time)
     if daily_time is not None:
         scheduler["daily_time"] = _normalize_local_time_or_exit(daily_time)
+    if sentinelle_time is not None:
+        scheduler["sentinelle_time"] = _normalize_local_time_or_exit(sentinelle_time)
     if enable_dreaming:
         scheduler["dreaming_enabled"] = True
     if disable_dreaming:
@@ -141,14 +149,36 @@ def _scheduler_configure(
         scheduler["daily_enabled"] = True
     if disable_daily:
         scheduler["daily_enabled"] = False
+    if enable_sentinelle:
+        scheduler["sentinelle_enabled"] = True
+    if disable_sentinelle:
+        scheduler["sentinelle_enabled"] = False
     write_yaml_file(kernel_config_path(workspace), data)
     bundle = load_workspace_config(workspace)
+    sentinelle_updates: dict[str, Any] = {}
+    if sentinelle_time is not None:
+        sentinelle_updates["daily_audit_time"] = _normalize_local_time_or_exit(sentinelle_time)
+    if enable_sentinelle:
+        sentinelle_updates["daily_audit_enabled"] = True
+    if disable_sentinelle:
+        sentinelle_updates["daily_audit_enabled"] = False
+    if sentinelle_updates:
+        apply_skill_setup_updates(
+            workspace,
+            bundle.host.skill_roots,
+            {"sentinelle": sentinelle_updates},
+        )
+    for configured_agent in bundle.agents.agents.values():
+        if configured_agent.status == "active":
+            _ensure_configured_scheduler_jobs(workspace, configured_agent.id)
     print(
         "Scheduler configured: "
         f"dreaming {'on' if bundle.kernel.scheduler.dreaming_enabled else 'off'} "
         f"at {bundle.kernel.scheduler.dreaming_time}, "
         f"daily {'on' if bundle.kernel.scheduler.daily_enabled else 'off'} "
-        f"at {bundle.kernel.scheduler.daily_time}."
+        f"at {bundle.kernel.scheduler.daily_time}, "
+        f"sentinelle {'on' if bundle.kernel.scheduler.sentinelle_enabled else 'off'} "
+        f"at {bundle.kernel.scheduler.sentinelle_time}."
     )
 
 
@@ -238,6 +268,7 @@ def _ensure_configured_scheduler_jobs(workspace_root: Path, agent_id: str) -> No
     store = JobStore(workspace / "agents" / agent_id / "jobs.json")
     scheduler = bundle.kernel.scheduler
     agent = _resolve_agent(bundle, agent_id)
+    ctx = resolve_global_context(workspace, agent=agent, bundle=bundle)
     enabled_skills = agent.skills or bundle.kernel.skills or None
     if scheduler.dreaming_enabled and (enabled_skills is None or "dreaming" in enabled_skills):
         _ensure_recurring_job(
@@ -265,6 +296,54 @@ def _ensure_configured_scheduler_jobs(workspace_root: Path, agent_id: str) -> No
         )
     else:
         _cancel_recurring_job_kind(store, "system.daily.digest")
+    _ensure_setup_scheduler_jobs(store, workspace, ctx.skill_roots, enabled_skills=enabled_skills, agent_id=agent_id)
+
+
+def _skill_available(skill_roots: list[Any], skill_name: str) -> bool:
+    for root in skill_roots:
+        base = Path(root.path).expanduser()
+        skill_dir = base / skill_name
+        if (skill_dir / "skill.yaml").is_file() or (skill_dir / "skill.md").is_file():
+            return True
+    return False
+
+
+def _ensure_setup_scheduler_jobs(
+    store: JobStore,
+    workspace: Path,
+    skill_roots: list[Any],
+    *,
+    enabled_skills: Iterable[str] | None,
+    agent_id: str,
+) -> None:
+    config_by_skill = ensure_skill_setup_config(workspace, skill_roots, enabled_skills=enabled_skills)
+    active_kinds: set[str] = set()
+    setup_prefixes: set[str] = set()
+    for loaded in load_skill_setups(skill_roots, enabled_skills=enabled_skills):
+        setup_prefixes.add(f"skill.{loaded.skill}.")
+        config = config_by_skill.get(loaded.skill, {})
+        for schedule in loaded.setup.scheduler:
+            kind = f"skill.{loaded.skill}.{schedule.id}"
+            active_kinds.add(kind)
+            enabled = config.get(schedule.enabled_key, schedule.default_enabled)
+            if not bool(enabled):
+                _cancel_recurring_job_kind(store, kind)
+                continue
+            _ensure_recurring_job(
+                store,
+                name=schedule.tool,
+                owner=f"skill:{loaded.skill}",
+                kind=kind,
+                agent_id=agent_id,
+                session_id=schedule.session_id or loaded.skill,
+                time_value=str(config.get(schedule.time_key, schedule.default_time)),
+                arguments=schedule.arguments,
+                extra_payload={"deliver": schedule.deliver, "tool": schedule.tool},
+            )
+    for job in store.list():
+        kind = job.payload.get("kind")
+        if isinstance(kind, str) and any(kind.startswith(prefix) for prefix in setup_prefixes) and kind not in active_kinds:
+            _cancel_recurring_job_kind(store, kind)
 
 
 
@@ -278,6 +357,7 @@ def _ensure_recurring_job(
     session_id: str,
     time_value: str,
     arguments: dict[str, Any],
+    extra_payload: dict[str, Any] | None = None,
 ) -> None:
     normalized_time = _normalize_local_time_or_exit(time_value)
     for job in store.list():
@@ -303,6 +383,7 @@ def _ensure_recurring_job(
             "agent_id": agent_id,
             "session_id": session_id,
             "arguments": arguments,
+            **(extra_payload or {}),
         },
     )
 
@@ -421,4 +502,23 @@ def _scheduler_handlers(workspace_root: Path, agent_id: str):
         _deliver_reminder_result(workspace, job.payload, result.summary)
         return result
 
-    return {"dreaming.run": run_dream, "daily.digest": run_daily, "reminders.fire": run_reminder}
+    def run_skill_tool(job):
+        tool_name = str(job.payload.get("tool") or job.name)
+        executor = executors.get(tool_name)
+        if executor is None:
+            raise RuntimeError(f"No skill tool registered for {tool_name}.")
+        arguments = job.payload.get("arguments", {})
+        result = executor(arguments if isinstance(arguments, dict) else {})
+        if hasattr(result, "ok") and not result.ok:
+            raise RuntimeError(str(getattr(result, "summary", f"{tool_name} failed")))
+        text = str(getattr(result, "summary", result))
+        if job.payload.get("deliver", False):
+            delivery_payload = dict(job.payload)
+            delivery_payload["session_id"] = str(job.payload.get("session_id") or tool_name.split(".", 1)[0])
+            _deliver_daily_digest(workspace, delivery_payload, text, event_store=event_store)
+        return result
+
+    handlers = {"dreaming.run": run_dream, "daily.digest": run_daily, "reminders.fire": run_reminder}
+    for tool_name in executors:
+        handlers.setdefault(tool_name, run_skill_tool)
+    return handlers

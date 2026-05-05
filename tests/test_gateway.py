@@ -1211,10 +1211,15 @@ def test_gateway_http_server_serves_web_session_history_and_reset(tmp_path) -> N
     sessions = SessionStore(tmp_path / "sessions")
     sessions.create("main", session_id="web:main:1")
     sessions.append_message("main", "web:main:1", role="user", content="Bonjour")
+    sessions.create("main", session_id="web:main:2")
+    sessions.append_message("main", "web:main:2", role="user", content="Ancienne question")
 
     def history(agent_id: str, session_id: str):
         session = sessions.load(agent_id, session_id)
         return [{"role": message.role, "content": message.content} for message in session.messages]
+
+    def session_list(agent_id: str):
+        return [{"id": session.id} for session in sessions.list(agent_id)]
 
     def reset(agent_id: str, session_id: str):
         sessions.reset(agent_id, session_id)
@@ -1224,6 +1229,7 @@ def test_gateway_http_server_serves_web_session_history_and_reset(tmp_path) -> N
         host="127.0.0.1",
         port=0,
         router=MessageRouter(run_turn=lambda **_kwargs: DummyTurn()),
+        web_session_list=session_list,
         web_session_history=history,
         web_session_reset=reset,
     )
@@ -1233,6 +1239,8 @@ def test_gateway_http_server_serves_web_session_history_and_reset(tmp_path) -> N
         host, port = server.address
         with request.urlopen(f"http://{host}:{port}/api/session?agent_id=main&session_id=web%3Amain%3A1", timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8"))
+        with request.urlopen(f"http://{host}:{port}/api/sessions?agent_id=main", timeout=5) as response:
+            listed = json.loads(response.read().decode("utf-8"))
         req = request.Request(
             f"http://{host}:{port}/api/session?agent_id=main&session_id=web%3Amain%3A1",
             method="DELETE",
@@ -1241,6 +1249,7 @@ def test_gateway_http_server_serves_web_session_history_and_reset(tmp_path) -> N
             deleted = json.loads(response.read().decode("utf-8"))
 
         assert payload["messages"] == [{"role": "user", "content": "Bonjour"}]
+        assert listed["sessions"] == [{"id": "web:main:2"}, {"id": "web:main:1"}]
         assert deleted["deleted"] is True
         assert sessions.load("main", "web:main:1").messages == []
     finally:
@@ -1573,6 +1582,29 @@ def test_gateway_agent_config_update_can_configure_scheduler_times(tmp_path) -> 
     runtime = tmp_path / "runtime"
     (runtime / "maurice").mkdir(parents=True)
     initialize_workspace(workspace, runtime, permission_profile="limited")
+    skill_dir = workspace / "skills" / "sentinelle"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "skill.md").write_text("---\nname: sentinelle\n---\n# Sentinelle\n", encoding="utf-8")
+    (skill_dir / "setup.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "config": [
+                    {"key": "daily_audit_enabled", "type": "boolean", "default": True},
+                    {"key": "daily_audit_time", "type": "time", "default": "09:10"},
+                ],
+                "scheduler": [
+                    {
+                        "id": "daily_audit",
+                        "tool": "sentinelle.scan",
+                        "enabled_key": "daily_audit_enabled",
+                        "time_key": "daily_audit_time",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     status = _gateway_agent_config_status(workspace, "main")
     changed = _gateway_agent_config_update(
@@ -1584,19 +1616,33 @@ def test_gateway_agent_config_update_can_configure_scheduler_times(tmp_path) -> 
             "dreaming_time": "8h15",
             "daily_enabled": False,
             "daily_time": "10:45",
+            "sentinelle_enabled": True,
+            "sentinelle_time": "9h10",
+            "skill_setup": {
+                "sentinelle": {
+                    "daily_audit_enabled": True,
+                    "daily_audit_time": "8h25",
+                }
+            },
         },
     )
     bundle = load_workspace_config(workspace)
+    skills_data = read_yaml_file(workspace / "skills.yaml")
 
     assert status["scheduler"]["dreaming_time"] == "09:00"
+    assert status["skill_setups"][0]["skill"] == "sentinelle"
     assert changed["updated"] is True
     assert changed["scheduler"]["enabled"] is True
     assert changed["scheduler"]["dreaming_enabled"] is True
     assert changed["scheduler"]["dreaming_time"] == "08:15"
     assert changed["scheduler"]["daily_enabled"] is False
     assert changed["scheduler"]["daily_time"] == "10:45"
+    assert changed["scheduler"]["sentinelle_enabled"] is True
+    assert changed["scheduler"]["sentinelle_time"] == "09:10"
     assert bundle.kernel.scheduler.dreaming_time == "08:15"
     assert bundle.kernel.scheduler.daily_enabled is False
+    assert bundle.kernel.scheduler.sentinelle_time == "09:10"
+    assert skills_data["skills"]["sentinelle"]["daily_audit_time"] == "09:10"
 
 
 def test_gateway_agent_config_update_rejects_invalid_scheduler_time(tmp_path) -> None:
@@ -1632,7 +1678,7 @@ def test_gateway_agent_config_exposes_single_telegram_default_session(tmp_path) 
 
     status = _gateway_agent_config_status(workspace, "main")
 
-    assert status["telegram"]["default_session_id"] == "telegram:123"
+    assert status["telegram"]["default_session_id"] == "telegram:main"
 
 
 def test_gateway_agent_config_update_syncs_web_telegram_pollers(tmp_path) -> None:
@@ -1839,6 +1885,76 @@ def test_gateway_web_session_history_survives_compaction(tmp_path) -> None:
     assert "Session automatically compacted." in contents
     assert "Message apres compaction" in contents
     assert "Reponse apres compaction" in contents
+
+
+def test_gateway_web_session_list_summarizes_sessions(tmp_path) -> None:
+    from maurice.host.cli import _gateway_web_session_list
+
+    sessions = SessionStore(tmp_path / "sessions")
+    sessions.create("main", session_id="web:main:1")
+    sessions.append_message("main", "web:main:1", role="user", content="Bonjour Maurice")
+    sessions.append_message("main", "web:main:1", role="assistant", content="Salut")
+    sessions.create("main", session_id="telegram:123")
+    sessions.append_message("main", "telegram:123", role="user", content="Question telegram")
+    sessions.create("main", session_id="telegram:main")
+    sessions.append_message("main", "telegram:main", role="user", content="Question principale")
+    sessions.append_message("main", "telegram:main", role="assistant", content="Reponse principale")
+    sessions.create("main", session_id="daily")
+    sessions.append_message("main", "daily", role="assistant", content="Digest automatique")
+
+    rows = _gateway_web_session_list(tmp_path, "main")
+
+    assert [row["id"] for row in rows] == ["telegram:main"]
+    assert rows[0]["title"] == "Question principale"
+    assert rows[0]["channel"] == "telegram"
+    assert rows[0]["message_count"] == 2
+    assert rows[0]["last_message"] == "Reponse principale"
+
+
+def test_telegram_poll_uses_agent_canonical_session(tmp_path, monkeypatch) -> None:
+    from maurice.host.commands.gateway_server import _telegram_poll_once
+
+    offset = tmp_path / "telegram.offset"
+    updates = [
+        {
+            "update_id": 10,
+            "message": {
+                "text": "Salut",
+                "from": {"id": 123},
+                "chat": {"id": 123, "type": "private"},
+                "message_id": 5,
+            },
+        }
+    ]
+    calls = []
+    captured = {}
+    monkeypatch.setattr("maurice.host.commands.gateway_server._telegram_get_updates", lambda *_args, **_kwargs: updates)
+    monkeypatch.setattr("maurice.host.commands.gateway_server._telegram_send_message", lambda *args: calls.append(args))
+    monkeypatch.setattr("maurice.host.commands.gateway_server._telegram_start_chat_action", lambda *_args: (lambda: None))
+
+    def run_turn(**kwargs):
+        captured.update(kwargs)
+        return DummyTurn()
+
+    router = MessageRouter(run_turn=run_turn)
+
+    handled = _telegram_poll_once(
+        token="token",
+        router=router,
+        event_store=EventStore(tmp_path / "events.jsonl"),
+        workspace=tmp_path,
+        offset_path=offset,
+        agent_id="main",
+        allowed_users=[],
+        allowed_chats=[],
+        timeout_seconds=0,
+    )
+
+    assert handled == 1
+    assert calls
+    assert captured["session_id"] == "telegram:main"
+    session = SessionStore(tmp_path / "sessions").load("main", "telegram:main")
+    assert session.metadata["telegram"]["chat_id"] == 123
 
 
 def test_gateway_web_session_history_attaches_tool_activity(tmp_path) -> None:

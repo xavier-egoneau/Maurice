@@ -70,6 +70,7 @@ WebUploads = Callable[[str, str, list[dict[str, Any]]], list[dict[str, Any]]]
 WebAttachment = Callable[[str], tuple[str, bytes] | None]
 WebTurnCancel = Callable[[str, str], bool]
 WebSecretCapture = Callable[[str, str, str, str], str | None]
+WebSessionList = Callable[[str], list[dict[str, Any]]]
 
 
 APPROVAL_ACCEPT_WORDS = {
@@ -666,6 +667,7 @@ class GatewayHttpServer:
         channels: Any | None = None,
         event_store: EventStore | None = None,
         web_agents: Callable[[], list[dict[str, Any]]] | None = None,
+        web_session_list: WebSessionList | None = None,
         web_session_history: Callable[[str, str], list[dict[str, Any]]] | None = None,
         web_session_reset: Callable[[str, str], bool] | None = None,
         web_git_status: Callable[[], dict[str, Any]] | None = None,
@@ -691,6 +693,7 @@ class GatewayHttpServer:
             channels,
             event_store,
             web_agents=web_agents,
+            web_session_list=web_session_list,
             web_session_history=web_session_history,
             web_session_reset=web_session_reset,
             web_git_status=web_git_status,
@@ -727,6 +730,7 @@ class GatewayHttpServer:
         event_store: EventStore | None,
         *,
         web_agents: Callable[[], list[dict[str, Any]]] | None,
+        web_session_list: WebSessionList | None,
         web_session_history: Callable[[str, str], list[dict[str, Any]]] | None,
         web_session_reset: Callable[[str, str], bool] | None,
         web_git_status: Callable[[], dict[str, Any]] | None,
@@ -843,6 +847,26 @@ class GatewayHttpServer:
                             "agent_id": agent_id,
                             "session_id": session_id,
                             "messages": messages,
+                        },
+                    )
+                    return
+                if parsed.path == "/api/sessions":
+                    if not self._authorized(parsed):
+                        self._write_json(403, {"ok": False, "error": "forbidden"})
+                        return
+                    query = parse_qs(parsed.query)
+                    agent_id = self._web_agent_id(query.get("agent_id", [router.default_agent_id])[0])
+                    sessions = (
+                        web_session_list(agent_id)
+                        if web_session_list is not None
+                        else []
+                    )
+                    self._write_json(
+                        200,
+                        {
+                            "ok": True,
+                            "agent_id": agent_id,
+                            "sessions": sessions,
                         },
                     )
                     return

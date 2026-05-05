@@ -49,6 +49,7 @@ def initialize_workspace(
         (workspace / relative).mkdir(parents=True, exist_ok=True)
     ensure_workspace_content_migrated(workspace)
     ensure_agent_memory_migrated(workspace, agent_id="main")
+    ensure_agent_user_file(workspace / "agents" / "main")
     ensure_workspace_config_migrated(workspace)
 
     host_config = {
@@ -141,6 +142,16 @@ def ensure_workspace_content_migrated(workspace_root: str | Path) -> Path:
         except OSError:
             pass
     return agent_content
+
+
+def ensure_agent_user_file(agent_workspace: str | Path) -> Path:
+    """Create the per-agent USER.md file if it is missing."""
+    agent_root = Path(agent_workspace).expanduser().resolve()
+    agent_root.mkdir(parents=True, exist_ok=True)
+    user_path = agent_root / "USER.md"
+    if not user_path.exists():
+        user_path.write_text("", encoding="utf-8")
+    return user_path
 
 
 def ensure_agent_memory_migrated(

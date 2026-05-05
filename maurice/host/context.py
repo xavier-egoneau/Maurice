@@ -17,7 +17,7 @@ from maurice.host.project import (
     global_config_path,
     sessions_dir,
 )
-from maurice.host.workspace import ensure_agent_memory_migrated
+from maurice.host.workspace import ensure_agent_memory_migrated, ensure_agent_user_file
 from maurice.kernel.config import ConfigBundle, load_workspace_config
 from maurice.kernel.session import SessionStore
 from maurice.kernel.skills import SkillRoot
@@ -317,6 +317,7 @@ def _local_agent_workspace(cfg: LocalConfig) -> Path:
 def _ensure_agent_workspace_dirs(agent_workspace: Path) -> None:
     for relative in ("content", "memory", "dreams", "reminders"):
         (agent_workspace / relative).mkdir(parents=True, exist_ok=True)
+    ensure_agent_user_file(agent_workspace)
 
 
 def _merge_local_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

@@ -185,6 +185,52 @@ events:
 Use `skill.yaml` only when you need explicit tools, slash commands, runtime
 dependencies, permissions, or non-default attachment names.
 
+## setup.json
+
+A skill can expose user-configurable setup with a sibling `setup.json`. Maurice
+uses it to create missing defaults in `<workspace>/skills.yaml`, render fields in
+Maurice web, and schedule skill-owned recurring jobs without adding
+skill-specific settings to `kernel.scheduler`.
+
+Example:
+
+```json
+{
+  "version": 1,
+  "title": "Sentinelle",
+  "description": "Audit local des services et ports.",
+  "config": [
+    {
+      "key": "daily_audit_enabled",
+      "label": "Audit quotidien",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "key": "daily_audit_time",
+      "label": "Heure de l'audit",
+      "type": "time",
+      "default": "09:10"
+    }
+  ],
+  "scheduler": [
+    {
+      "id": "daily_audit",
+      "tool": "sentinelle.scan",
+      "enabled_key": "daily_audit_enabled",
+      "time_key": "daily_audit_time",
+      "session_id": "sentinelle",
+      "arguments": {"include_raw": false},
+      "deliver": true
+    }
+  ]
+}
+```
+
+Supported field types are `boolean`, `time`, `string`, `integer`, `number`, and
+`choice`. Field keys are local to the skill and are stored under
+`skills.<skill_name>` in `skills.yaml`.
+
 ## Tool declarations
 
 Each entry under `tools:` is a `ToolDeclaration`:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -126,7 +127,174 @@ def build_base_prompt(
         known_projects=bool(known_projects),
     )
 
-    return f"{_BASE_PROMPT}\n## Runtime context\n\n{context_block}\n\n{path_rules}".strip()
+    agent_content_path = Path(agent_content)
+    soul_block = _soul_prompt(agent_content=agent_content_path)
+    user_block = _user_prompt(agent_root=_agent_root_from_content(agent_content_path))
+    parts = [
+        _BASE_PROMPT,
+        soul_block,
+        user_block,
+        f"## Runtime context\n\n{context_block}",
+        path_rules,
+    ]
+    return "\n\n".join(part for part in parts if part.strip()).strip()
+
+
+def _soul_prompt(*, agent_content: Path) -> str:
+    sections = []
+    default_soul = _default_soul_text()
+    if default_soul:
+        sections.append("## Base Soul\n\n" + default_soul)
+    agent_soul_path = agent_content / "SOUL.md"
+    if agent_soul_path.is_file():
+        agent_soul = _read_text(agent_soul_path)
+        if agent_soul:
+            sections.append(
+                "## Agent Soul\n\n"
+                f"Agent-specific soul loaded from: {agent_soul_path}\n\n"
+                + agent_soul
+            )
+    if not sections:
+        return ""
+    return (
+        "## Soul\n\n"
+        "The base soul defines Maurice's default voice, stance, and boundaries. "
+        "If an agent-specific `SOUL.md` is present, treat it as an additional layer "
+        "on top of the base soul unless higher-priority instructions conflict.\n\n"
+        + "\n\n".join(sections)
+    )
+
+
+def _default_soul_text() -> str:
+    return _default_prompt_fragment("SOUL.md")
+
+
+def _user_prompt(*, agent_root: Path) -> str:
+    sections = []
+    user_path = agent_root / "USER.md"
+    user_file_exists = user_path.is_file()
+    user_profile = _read_text(user_path) if user_file_exists else ""
+    profile_has_facts = _user_profile_has_facts(user_profile)
+    missing_basics = _user_profile_missing_basics(user_profile)
+    if user_profile:
+        sections.append(
+            "## User Profile\n\n"
+            f"User-approved context loaded from: {user_path}\n\n"
+            + user_profile
+        )
+
+    onboarding = _default_user_onboarding_text()
+    if onboarding:
+        if user_profile:
+            profile_state = (
+                "This profile contains at least one user-provided fact."
+                if profile_has_facts
+                else "This profile appears to be the default blank template. Treat onboarding as not done yet."
+            )
+            if missing_basics:
+                profile_state += (
+                    "\nMissing onboarding basics: "
+                    + ", ".join(missing_basics)
+                    + ". Treat the user profile setup as incomplete."
+                )
+            sections.append(
+                "## User Profile Maintenance\n\n"
+                + profile_state
+                + "\n\n"
+                f"Keep `{user_path}` concise and user-approved. When the user corrects "
+                "or adds a stable preference, update it instead of relying only on chat history. "
+                "If the profile lacks important basics, use the same lightweight onboarding rule:\n\n"
+                + onboarding
+            )
+        else:
+            missing_reason = (
+                f"User profile file exists but is empty at: {user_path}"
+                if user_file_exists
+                else f"No user profile was found at: {user_path}"
+            )
+            sections.append(
+                "## User Onboarding\n\n"
+                + missing_reason
+                + "\n\n"
+                + onboarding
+            )
+
+    if not sections:
+        return ""
+    return (
+        "## Human Context\n\n"
+        "`USER.md` is the agent-local profile of the human Maurice helps. "
+        "Treat it as personal context, not a dossier. It can refine tone, memory, "
+        "and collaboration style, but higher-priority instructions and the user's "
+        "current request still win.\n\n"
+        + "\n\n".join(sections)
+    )
+
+
+def _default_user_onboarding_text() -> str:
+    return _default_prompt_fragment("USER_ONBOARDING.md")
+
+
+def _default_prompt_fragment(filename: str) -> str:
+    try:
+        return resources.files("maurice.defaults").joinpath(filename).read_text(encoding="utf-8").strip()
+    except (FileNotFoundError, ModuleNotFoundError):
+        return ""
+
+
+def _agent_root_from_content(agent_content: Path) -> Path:
+    if agent_content.name == "content":
+        return agent_content.parent
+    return agent_content
+
+
+def _user_profile_has_facts(text: str) -> bool:
+    return bool(_user_profile_values(text))
+
+
+def _user_profile_missing_basics(text: str) -> list[str]:
+    values = _user_profile_values(text)
+    missing = []
+    expected_fields = [
+        ("name or preferred address", ("name or preferred address", "name", "preferred address")),
+        ("main language", ("main language", "language")),
+        ("tone preferences", ("tone preferences", "tone")),
+        ("relationship style", ("relationship style",)),
+        ("helpful defaults", ("helpful defaults",)),
+        ("things to avoid", ("things to avoid",)),
+        ("boundaries", ("boundaries",)),
+    ]
+    for label, aliases in expected_fields:
+        if not any(key == alias or key.startswith(alias + " ") for key in values for alias in aliases):
+            missing.append(label)
+    return missing
+
+
+def _user_profile_values(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("_"):
+            continue
+        if not line.startswith("- "):
+            continue
+        item = line[2:].strip()
+        if not item or item == "-":
+            continue
+        if ":" not in item:
+            values[item.lower()] = item
+            continue
+        key, value = item.split(":", 1)
+        if value.strip():
+            values[key.strip().lower()] = value.strip()
+    return values
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def _path_rules(*, agent_content: str, active_project: str | None, known_projects: bool = False) -> str:

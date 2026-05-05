@@ -48,6 +48,8 @@ def test_resolve_local_context_centers_state_on_project(tmp_path, monkeypatch) -
     assert ctx.approvals_path == project / ".maurice" / "approvals.json"
     assert ctx.agent_workspace_root == home / ".maurice" / "agents" / "main"
     assert ctx.memory_path == home / ".maurice" / "agents" / "main" / "memory" / "memory.sqlite"
+    assert (home / ".maurice" / "agents" / "main" / "USER.md").is_file()
+    assert not (home / ".maurice" / "agents" / "main" / "content" / "USER.md").exists()
     assert ctx.run_root == project / ".maurice" / "run"
     assert ctx.server_meta_path == project / ".maurice" / "run" / "server.meta"
     assert ctx.permission_profile == "limited"
@@ -150,6 +152,8 @@ def test_resolve_global_context_scopes_memory_to_selected_agent(tmp_path) -> Non
     ctx = resolve_global_context(workspace, agent=agent, bundle=bundle)
 
     assert ctx.memory_path == workspace / "agents" / "paul" / "memory" / "memory.sqlite"
+    assert (workspace / "agents" / "paul" / "USER.md").is_file()
+    assert not (workspace / "agents" / "paul" / "content" / "USER.md").exists()
 
 
 def test_command_callbacks_reset_and_compact_context_session(tmp_path, monkeypatch) -> None:
